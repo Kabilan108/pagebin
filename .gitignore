@@ -7,4 +7,7 @@
 !.dev.vars.example
 dist/
 node_modules/
+result
+result-*
+scratch/
 .wrangler/

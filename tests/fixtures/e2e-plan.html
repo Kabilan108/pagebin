@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>pagebin e2e artifact</title>
+</head>
+<body>
+  <h1>pagebin e2e artifact</h1>
+  <button id="toggle" type="button">Toggle</button>
+  <p id="state">ready</p>
+  <script>
+    document.querySelector("#toggle").addEventListener("click", () => {
+      document.querySelector("#state").textContent = "clicked";
+    });
+  </script>
+</body>
+</html>
+

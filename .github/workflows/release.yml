@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+      - bun.lock
+      - src/**
+      - worker/**
+      - tests/**
+      - tsconfig*.json
+      - wrangler.toml
+      - .github/workflows/release.yml
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build Linux x64 binary
+        run: |
+          bun run build:linux
+          chmod +x dist/pagebin-linux-x64
+          sha256sum dist/pagebin-linux-x64 > dist/pagebin-linux-x64.sha256
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pagebin-linux-x64
+          path: |
+            dist/pagebin-linux-x64
+            dist/pagebin-linux-x64.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  detect-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect package version bump
+        id: version
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          new_version="$(node -p "require('./package.json').version")"
+          old_version=""
+
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE_SHA:package.json" 2>/dev/null; then
+            git show "$BEFORE_SHA:package.json" > /tmp/pagebin-package-prev.json
+            old_version="$(node -p "require('/tmp/pagebin-package-prev.json').version")"
+          fi
+
+          if [ "$new_version" = "$old_version" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs:
+      - validate
+      - detect-version
+    if: needs.detect-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pagebin-linux-x64
+          path: dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          tag="v${VERSION}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/pagebin-linux-x64 dist/pagebin-linux-x64.sha256 --clobber
+          else
+            gh release create "$tag" dist/pagebin-linux-x64 dist/pagebin-linux-x64.sha256 \
+              --title "$tag" \
+              --notes "Linux x86_64 single-file pagebin binary."
+          fi
+

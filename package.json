@@ -1,0 +1,22 @@
+{
+  "name": "pagebin",
+  "version": "0.1.0",
+  "description": "Securely publish generated HTML artifacts behind protected URLs.",
+  "type": "module",
+  "bin": {
+    "pagebin": "./src/cli.ts"
+  },
+  "scripts": {
+    "build": "bun run build:linux",
+    "build:linux": "bun build ./src/cli.ts --compile --target=bun-linux-x64 --outfile dist/pagebin-linux-x64",
+    "deploy": "wrangler deploy",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.cli.json --noEmit && tsc -p tsconfig.worker.json --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250523.0",
+    "@types/bun": "^1.2.15",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.18.0"
+  }
+}

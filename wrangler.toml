@@ -1,0 +1,12 @@
+name = "pagebin"
+main = "worker/index.ts"
+compatibility_date = "2024-11-01"
+workers_dev = true
+preview_urls = false
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "pagebin-artifacts"
+
+[vars]
+PAGEBIN_MAX_BYTES = "10485760"

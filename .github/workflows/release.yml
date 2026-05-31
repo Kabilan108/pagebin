@@ -11,6 +11,8 @@ on:
       - worker/**
       - tests/**
       - tsconfig*.json
+      - flake.nix
+      - flake.lock
       - wrangler.toml
       - .github/workflows/release.yml
 
@@ -56,6 +58,26 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  nix-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Check flake
+        run: nix flake check --no-build
+
+      - name: Build flake package
+        run: nix build .#pagebin
+
   detect-version:
     runs-on: ubuntu-latest
     permissions:
@@ -98,6 +120,7 @@ jobs:
   release:
     needs:
       - validate
+      - nix-validate
       - detect-version
     if: needs.detect-version.outputs.changed == 'true'
     runs-on: ubuntu-latest

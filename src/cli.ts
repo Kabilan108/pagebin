@@ -389,10 +389,21 @@ function isLocalhost(hostname: string): boolean {
 function helpText(): string {
   return `pagebin
 
+Securely publish local .html artifacts to a Cloudflare Worker/R2 backend and print a protected, unlisted viewer URL.
+Use it for temporary agent-generated HTML reports, plans, visual explanations, and previews.
+
 Usage:
   pagebin publish <file.html> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
   pagebin version
+
+Behavior:
+  publish              Uploads one .html file and prints only the viewer URL by default.
+  --json               Prints id, url, expiresAt, and sandbox as JSON.
+  --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
+  --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
+  --sandbox strict     Disables iframe sandbox permissions.
+  delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
 
 Environment:
   PAGEBIN_ENDPOINT        Worker endpoint, for example https://pagebin.example.workers.dev

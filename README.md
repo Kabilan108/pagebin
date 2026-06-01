@@ -12,10 +12,12 @@ pagebin publish ./plan.html
 pagebin publish ./plan.html --ttl 7d
 pagebin publish ./plan.html --sandbox strict
 pagebin publish ./plan.html --json
+pagebin list
+pagebin reissue <artifact_id>
 pagebin delete <artifact_id>
 ```
 
-Default output is only the protected URL, so it can be piped into a clipboard alias.
+Default publish and reissue output is only the protected URL, so it can be piped into a clipboard alias. `pagebin list` shows stored page metadata, but not viewer URLs because view tokens are not stored. `pagebin reissue` generates a new viewer URL for an existing page and revokes the old URL.
 
 ## Nix
 
@@ -66,6 +68,8 @@ Required R2 bucket:
 ```bash
 wrangler r2 bucket create pagebin-artifacts
 ```
+
+Expired artifacts are removed by the Worker cron trigger configured in `wrangler.toml`. The scheduled cleanup runs weekly and deletes both metadata and HTML objects for pages whose `expiresAt` timestamp has passed.
 
 Optional Worker var:
 

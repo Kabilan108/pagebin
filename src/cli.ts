@@ -9,8 +9,18 @@ const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SANDBOX = "standard";
 const MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
 const VERSION = packageJson.version;
+const ARTIFACT_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
+const RED = "\x1b[31m";
+const RESET = "\x1b[0m";
 
 interface PublishResponse {
+  id: string;
+  url: string;
+  expiresAt: string | null;
+  sandbox: SandboxMode;
+}
+
+interface ReissueResponse {
   id: string;
   url: string;
   expiresAt: string | null;
@@ -20,6 +30,19 @@ interface PublishResponse {
 interface DeleteResponse {
   id: string;
   deleted: boolean;
+}
+
+interface ListResponse {
+  artifacts: ListedArtifact[];
+}
+
+interface ListedArtifact {
+  id: string;
+  filename: string;
+  createdAt: string;
+  expiresAt: string | null;
+  sandbox: SandboxMode;
+  size: number;
 }
 
 interface PublishOptions {
@@ -36,9 +59,20 @@ interface DeleteOptions {
   json: boolean;
 }
 
+interface ReissueOptions {
+  endpoint: string;
+  id: string;
+  json: boolean;
+}
+
+interface ListOptions {
+  endpoint: string;
+  json: boolean;
+}
+
 interface ParsedCommand {
-  command: "publish" | "delete" | "help" | "version";
-  options?: PublishOptions | DeleteOptions;
+  command: "publish" | "delete" | "reissue" | "list" | "help" | "version";
+  options?: PublishOptions | DeleteOptions | ReissueOptions | ListOptions;
 }
 
 type SandboxMode = "standard" | "strict";
@@ -137,6 +171,20 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     };
   }
 
+  if (command === "reissue") {
+    return {
+      command,
+      options: parseReissueOptions(rest, env),
+    };
+  }
+
+  if (command === "list") {
+    return {
+      command,
+      options: parseListOptions(rest, env),
+    };
+  }
+
   throw new CliError(`Unknown command: ${command}`);
 }
 
@@ -150,6 +198,12 @@ async function main(): Promise<void> {
         return;
       case "delete":
         await deleteArtifact(parsed.options as DeleteOptions);
+        return;
+      case "reissue":
+        await reissueArtifact(parsed.options as ReissueOptions);
+        return;
+      case "list":
+        await listArtifacts(parsed.options as ListOptions);
         return;
       case "version":
         console.log(VERSION);
@@ -245,7 +299,7 @@ function parseDeleteOptions(args: string[], env: NodeJS.ProcessEnv): DeleteOptio
       continue;
     }
 
-    if (arg?.startsWith("-")) {
+    if (arg?.startsWith("-") && !isArtifactId(arg)) {
       throw new CliError(`Unknown option for delete: ${arg}`);
     }
 
@@ -263,6 +317,74 @@ function parseDeleteOptions(args: string[], env: NodeJS.ProcessEnv): DeleteOptio
   return {
     endpoint,
     id,
+    json,
+  };
+}
+
+function parseReissueOptions(args: string[], env: NodeJS.ProcessEnv): ReissueOptions {
+  const endpoint = normalizeEndpoint(readEndpoint(args, env));
+  let id: string | null = null;
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--endpoint") {
+      index += 1;
+      requireValue(args[index], "--endpoint");
+      continue;
+    }
+
+    if (arg?.startsWith("-") && !isArtifactId(arg)) {
+      throw new CliError(`Unknown option for reissue: ${arg}`);
+    }
+
+    if (id) {
+      throw new CliError("reissue accepts exactly one artifact ID.");
+    }
+
+    id = arg ?? null;
+  }
+
+  if (!id) {
+    throw new CliError("reissue requires an artifact ID.");
+  }
+
+  return {
+    endpoint,
+    id,
+    json,
+  };
+}
+
+function parseListOptions(args: string[], env: NodeJS.ProcessEnv): ListOptions {
+  const endpoint = normalizeEndpoint(readEndpoint(args, env));
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--endpoint") {
+      index += 1;
+      requireValue(args[index], "--endpoint");
+      continue;
+    }
+
+    throw new CliError(`Unknown option for list: ${arg}`);
+  }
+
+  return {
+    endpoint,
     json,
   };
 }
@@ -354,6 +476,136 @@ async function deleteArtifact(options: DeleteOptions): Promise<void> {
   }
 }
 
+async function reissueArtifact(options: ReissueOptions): Promise<void> {
+  const token = readPublishToken();
+  const response = await fetch(`${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}/reissue`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const payload = await readJsonResponse<ReissueResponse>(response);
+
+  if (options.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  console.log(payload.url);
+}
+
+async function listArtifacts(options: ListOptions): Promise<void> {
+  const token = readPublishToken();
+  const response = await fetch(`${options.endpoint}/api/artifacts`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const payload = await readJsonResponse<ListResponse>(response);
+
+  if (options.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  console.log(formatArtifactList(payload.artifacts));
+}
+
+function formatArtifactList(artifacts: ListedArtifact[]): string {
+  if (artifacts.length === 0) {
+    return "No stored pages.";
+  }
+
+  const rows = artifacts.map((artifact) => ({
+    id: artifact.id,
+    filename: artifact.filename,
+    created: formatDate(artifact.createdAt),
+    expires: artifact.expiresAt ? formatDate(artifact.expiresAt) : "never",
+    isExpired: isExpired(artifact.expiresAt),
+    sandbox: artifact.sandbox,
+    size: formatBytes(artifact.size),
+  }));
+  const headers = {
+    id: "ID",
+    filename: "Filename",
+    created: "Created",
+    expires: "Expires",
+    sandbox: "Sandbox",
+    size: "Size",
+  };
+  const widths = {
+    id: maxWidth(headers.id, rows.map((row) => row.id)),
+    filename: maxWidth(headers.filename, rows.map((row) => row.filename)),
+    created: maxWidth(headers.created, rows.map((row) => row.created)),
+    expires: maxWidth(headers.expires, rows.map((row) => row.expires)),
+    sandbox: maxWidth(headers.sandbox, rows.map((row) => row.sandbox)),
+    size: maxWidth(headers.size, rows.map((row) => row.size)),
+  };
+  const lines = [
+    [
+      headers.id.padEnd(widths.id),
+      headers.filename.padEnd(widths.filename),
+      headers.created.padEnd(widths.created),
+      headers.expires.padEnd(widths.expires),
+      headers.sandbox.padEnd(widths.sandbox),
+      headers.size.padStart(widths.size),
+    ].join("  "),
+  ];
+
+  for (const row of rows) {
+    lines.push(
+      [
+        row.id.padEnd(widths.id),
+        row.filename.padEnd(widths.filename),
+        row.created.padEnd(widths.created),
+        colorExpired(row.expires.padEnd(widths.expires), row.isExpired),
+        row.sandbox.padEnd(widths.sandbox),
+        row.size.padStart(widths.size),
+      ].join("  "),
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function maxWidth(header: string, values: string[]): number {
+  return Math.max(header.length, ...values.map((value) => value.length));
+}
+
+function formatDate(value: string): string {
+  return value.replace(/\.\d{3}Z$/, "Z");
+}
+
+function isExpired(value: string | null): boolean {
+  return value !== null && Date.now() >= Date.parse(value);
+}
+
+function colorExpired(value: string, isExpiredValue: boolean): string {
+  if (!isExpiredValue || !shouldUseColor()) {
+    return value;
+  }
+
+  return `${RED}${value}${RESET}`;
+}
+
+function shouldUseColor(): boolean {
+  return !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 async function readJsonResponse<T>(response: Response): Promise<T> {
   const text = await response.text();
   let payload: unknown;
@@ -386,6 +638,10 @@ function isLocalhost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
+function isArtifactId(value: string): boolean {
+  return ARTIFACT_ID_PATTERN.test(value);
+}
+
 function helpText(): string {
   return `pagebin
 
@@ -394,6 +650,8 @@ Use it for temporary agent-generated HTML reports, plans, visual explanations, a
 
 Usage:
   pagebin publish <file.html> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
+  pagebin list [--json] [--endpoint URL]
+  pagebin reissue <artifact_id> [--json] [--endpoint URL]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
   pagebin version
 
@@ -403,6 +661,8 @@ Behavior:
   --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
   --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
   --sandbox strict     Disables iframe sandbox permissions.
+  list                 Lists stored pages by id, filename, dates, sandbox, and size.
+  reissue              Generates a new viewer URL for an artifact and revokes the old URL.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
 
 Environment:

@@ -1,6 +1,6 @@
 {
   "name": "pagebin",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "description": "Securely publish generated HTML artifacts behind protected URLs.",
   "type": "module",
   "bin": {

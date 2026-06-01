@@ -52,6 +52,20 @@ class MemoryR2Bucket {
 
     this.objects.delete(key);
   }
+
+  async list(options: { cursor?: string; prefix?: string } = {}): Promise<{
+    cursor?: string;
+    objects: { key: string }[];
+    truncated: boolean;
+  }> {
+    return {
+      objects: [...this.objects.keys()]
+        .filter((key) => !options.prefix || key.startsWith(options.prefix))
+        .sort()
+        .map((key) => ({ key })),
+      truncated: false,
+    };
+  }
 }
 
 interface TestEnv {
@@ -112,6 +126,110 @@ describe("worker", () => {
     expect(response.status).toBe(401);
   });
 
+  test("lists stored artifact metadata without view tokens", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const response = await worker.fetch(
+      new Request("https://pagebin.test/api/artifacts", {
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+    const payload = (await response.json()) as {
+      artifacts: Array<{
+        createdAt: string;
+        expiresAt: string | null;
+        filename: string;
+        id: string;
+        sandbox: string;
+        size: number;
+      }>;
+    };
+    const token = new URL(published.url).pathname.split("/").at(-1);
+
+    expect(response.status).toBe(200);
+    expect(payload.artifacts).toHaveLength(1);
+    expect(typeof payload.artifacts[0]?.createdAt).toBe("string");
+    expect(payload.artifacts[0]).toEqual({
+      createdAt: payload.artifacts[0]?.createdAt,
+      expiresAt: null,
+      filename: "plan.html",
+      id: published.id,
+      sandbox: "standard",
+      size: 52,
+    });
+    expect(JSON.stringify(payload)).not.toContain(token ?? "");
+  });
+
+  test("requires publisher authorization to list artifacts", async () => {
+    const env = createEnv();
+    const response = await worker.fetch(new Request("https://pagebin.test/api/artifacts"), env as never);
+
+    expect(response.status).toBe(401);
+  });
+
+  test("reissues a viewer URL and revokes the old token", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const response = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+    const payload = (await response.json()) as {
+      expiresAt: string | null;
+      id: string;
+      sandbox: string;
+      url: string;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.id).toBe(published.id);
+    expect(payload.url).toStartWith(`https://pagebin.test/p/${published.id}/`);
+    expect(payload.url).not.toBe(published.url);
+    expect(payload.expiresAt).toBeNull();
+    expect(payload.sandbox).toBe("standard");
+    expect((await worker.fetch(new Request(payload.url), env as never)).status).toBe(200);
+    expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(404);
+  });
+
+  test("requires publisher authorization to reissue artifacts", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const response = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+        method: "POST",
+      }),
+      env as never,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  test("does not reissue expired artifacts", async () => {
+    const env = createEnv();
+    const originalDateNow = Date.now;
+    const published = await publishFixture(env, { ttlSeconds: "1" });
+
+    try {
+      Date.now = () => originalDateNow() + 2000;
+
+      const response = await worker.fetch(
+        new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+          method: "POST",
+          headers: { Authorization: "Bearer publish-secret" },
+        }),
+        env as never,
+      );
+
+      expect(response.status).toBe(410);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
   test("strict sandbox disables iframe permissions and raw CSP allowances", async () => {
     const env = createEnv();
     const published = await publishFixture(env, { sandbox: "strict" });
@@ -133,6 +251,45 @@ describe("worker", () => {
       Date.now = () => originalDateNow() + 2000;
       expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(404);
       expect((await worker.fetch(new Request("https://pagebin.test/p/unknownunknownunknown/t"), env as never)).status).toBe(404);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("scheduled cleanup deletes expired artifacts and keeps active artifacts", async () => {
+    const env = createEnv();
+    const originalDateNow = Date.now;
+    const expired = await publishFixture(env, { ttlSeconds: "1" });
+    const active = await publishFixture(env, { ttlSeconds: "1209600" });
+
+    try {
+      Date.now = () => originalDateNow() + 2000;
+
+      await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+
+      expect(await env.ARTIFACTS.get(`artifacts/${expired.id}/metadata.json`)).toBeNull();
+      expect(await env.ARTIFACTS.get(`artifacts/${expired.id}/index.html`)).toBeNull();
+      expect(await env.ARTIFACTS.get(`artifacts/${active.id}/metadata.json`)).not.toBeNull();
+      expect(await env.ARTIFACTS.get(`artifacts/${active.id}/index.html`)).not.toBeNull();
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("scheduled cleanup keeps metadata for retry if HTML deletion fails", async () => {
+    const env = createEnv();
+    const originalDateNow = Date.now;
+    const expired = await publishFixture(env, { ttlSeconds: "1" });
+
+    env.ARTIFACTS.failHtmlDelete = true;
+
+    try {
+      Date.now = () => originalDateNow() + 2000;
+
+      await withSuppressedConsoleError(() => worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext));
+
+      expect(await env.ARTIFACTS.get(`artifacts/${expired.id}/metadata.json`)).not.toBeNull();
+      expect(await env.ARTIFACTS.get(`artifacts/${expired.id}/index.html`)).not.toBeNull();
     } finally {
       Date.now = originalDateNow;
     }

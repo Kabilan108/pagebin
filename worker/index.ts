@@ -21,6 +21,22 @@ interface PublishPayload {
   sandbox: SandboxMode;
 }
 
+interface ReissuePayload {
+  id: string;
+  url: string;
+  expiresAt: string | null;
+  sandbox: SandboxMode;
+}
+
+interface ListedArtifact {
+  id: string;
+  filename: string;
+  createdAt: string;
+  expiresAt: string | null;
+  sandbox: SandboxMode;
+  size: number;
+}
+
 type SandboxMode = "standard" | "strict";
 
 interface UploadedFile {
@@ -44,6 +60,10 @@ export default {
       return json({ error: "Internal server error." }, 500);
     }
   },
+
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await cleanupExpiredArtifacts(env);
+  },
 };
 
 async function handleRequest(request: Request, env: Env): Promise<Response> {
@@ -57,6 +77,16 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   if (request.method === "POST" && url.pathname === "/api/publish") {
     return publish(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/artifacts") {
+    return listArtifacts(request, env);
+  }
+
+  const reissueMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/reissue$/);
+
+  if (request.method === "POST" && reissueMatch?.[1]) {
+    return reissueArtifact(request, env, reissueMatch[1]);
   }
 
   const deleteMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)$/);
@@ -167,6 +197,133 @@ async function publish(request: Request, env: Env): Promise<Response> {
   };
 
   return json(payload, 201);
+}
+
+async function listArtifacts(request: Request, env: Env): Promise<Response> {
+  if (!(await isAuthorized(request, env))) {
+    return json({ error: "Unauthorized." }, 401);
+  }
+
+  const artifacts: ListedArtifact[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const options: R2ListOptions = cursor ? { cursor, prefix: "artifacts/" } : { prefix: "artifacts/" };
+    const result = await env.ARTIFACTS.list(options);
+
+    cursor = result.truncated ? result.cursor : undefined;
+
+    for (const object of result.objects) {
+      if (!object.key.endsWith("/metadata.json")) {
+        continue;
+      }
+
+      const metadata = await env.ARTIFACTS.get(object.key);
+
+      if (!metadata) {
+        continue;
+      }
+
+      const artifact = JSON.parse(await metadata.text()) as ArtifactMetadata;
+
+      artifacts.push({
+        id: artifact.id,
+        filename: artifact.filename,
+        createdAt: artifact.createdAt,
+        expiresAt: artifact.expiresAt,
+        sandbox: artifact.sandbox,
+        size: artifact.size,
+      });
+    }
+  } while (cursor);
+
+  artifacts.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+
+  return json({ artifacts });
+}
+
+async function reissueArtifact(request: Request, env: Env, id: string): Promise<Response> {
+  if (!(await isAuthorized(request, env))) {
+    return json({ error: "Unauthorized." }, 401);
+  }
+
+  if (!isValidId(id)) {
+    return notFound();
+  }
+
+  const object = await env.ARTIFACTS.get(metadataKey(id));
+
+  if (!object) {
+    return notFound();
+  }
+
+  const metadata = JSON.parse(await object.text()) as ArtifactMetadata;
+
+  if (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt)) {
+    return json({ error: "Artifact has expired." }, 410);
+  }
+
+  const token = randomBase64Url(32);
+  const tokenHash = await sha256Hex(token);
+  const nextMetadata: ArtifactMetadata = {
+    ...metadata,
+    tokenHash,
+  };
+
+  await env.ARTIFACTS.put(metadataKey(id), JSON.stringify(nextMetadata), {
+    httpMetadata: {
+      contentType: "application/json; charset=utf-8",
+    },
+  });
+
+  const payload: ReissuePayload = {
+    id,
+    url: `${new URL(request.url).origin}/p/${id}/${token}`,
+    expiresAt: metadata.expiresAt,
+    sandbox: metadata.sandbox,
+  };
+
+  return json(payload);
+}
+
+async function cleanupExpiredArtifacts(env: Env): Promise<void> {
+  let cursor: string | undefined;
+
+  do {
+    const options: R2ListOptions = cursor ? { cursor, prefix: "artifacts/" } : { prefix: "artifacts/" };
+    const result = await env.ARTIFACTS.list(options);
+
+    cursor = result.truncated ? result.cursor : undefined;
+
+    for (const object of result.objects) {
+      if (!object.key.endsWith("/metadata.json")) {
+        continue;
+      }
+
+      try {
+        await cleanupExpiredArtifact(env, object.key);
+      } catch (error) {
+        console.error("Failed to clean up expired artifact.", object.key, error);
+      }
+    }
+  } while (cursor);
+}
+
+async function cleanupExpiredArtifact(env: Env, key: string): Promise<void> {
+  const object = await env.ARTIFACTS.get(key);
+
+  if (!object) {
+    return;
+  }
+
+  const metadata = JSON.parse(await object.text()) as ArtifactMetadata;
+
+  if (!metadata.expiresAt || Date.now() < Date.parse(metadata.expiresAt)) {
+    return;
+  }
+
+  await env.ARTIFACTS.delete(htmlKey(metadata.id));
+  await env.ARTIFACTS.delete(metadataKey(metadata.id));
 }
 
 async function deleteArtifact(request: Request, env: Env, id: string): Promise<Response> {

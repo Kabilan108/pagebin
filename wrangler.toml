@@ -11,6 +11,9 @@ bucket_name = "pagebin-artifacts"
 [vars]
 PAGEBIN_MAX_BYTES = "10485760"
 
+[triggers]
+crons = ["0 0 * * 0"]
+
 [observability]
 enabled = false
 head_sampling_rate = 1

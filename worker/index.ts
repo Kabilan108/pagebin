@@ -9,6 +9,7 @@ interface ArtifactMetadata {
   filename: string;
   tokenHash: string;
   createdAt: string;
+  updatedAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
   size: number;
@@ -26,6 +27,21 @@ interface ReissuePayload {
   url: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+}
+
+interface UpdatePayload {
+  id: string;
+  filename: string;
+  updatedAt: string;
+  expiresAt: string | null;
+  sandbox: SandboxMode;
+  size: number;
+}
+
+interface VersionPayload {
+  id: string;
+  updatedAt: string;
+  size: number;
 }
 
 interface ListedArtifact {
@@ -83,10 +99,22 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return listArtifacts(request, env);
   }
 
+  const updateMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/content$/);
+
+  if (request.method === "PUT" && updateMatch?.[1]) {
+    return updateArtifactContent(request, env, updateMatch[1]);
+  }
+
   const reissueMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/reissue$/);
 
   if (request.method === "POST" && reissueMatch?.[1]) {
     return reissueArtifact(request, env, reissueMatch[1]);
+  }
+
+  const versionMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/version\/([^/]+)$/);
+
+  if (request.method === "GET" && versionMatch?.[1] && versionMatch[2]) {
+    return artifactVersion(env, versionMatch[1], versionMatch[2]);
   }
 
   const deleteMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)$/);
@@ -115,62 +143,37 @@ async function publish(request: Request, env: Env): Promise<Response> {
     return json({ error: "Unauthorized." }, 401);
   }
 
-  const maxBytes = readMaxBytes(env);
-  const contentLength = readContentLength(request);
+  const upload = await readHtmlUpload(request, env);
 
-  if (contentLength !== null && contentLength > maxBytes + MAX_MULTIPART_OVERHEAD_BYTES) {
-    return json({ error: "Upload request is larger than the configured upload limit." }, 413);
+  if ("error" in upload) {
+    return json({ error: upload.error }, upload.status);
   }
 
-  const formResult = await readMultipartForm(request);
-
-  if ("error" in formResult) {
-    return json({ error: formResult.error }, formResult.status);
-  }
-
-  const form = formResult.form;
-  const file = form.get("file");
-  const parsedOptions = parsePublishOptions(form);
+  const parsedOptions = parsePublishOptions(upload.form);
 
   if ("error" in parsedOptions) {
     return json({ error: parsedOptions.error }, 400);
-  }
-
-  if (!isUploadedFile(file)) {
-    return json({ error: "Missing file upload." }, 400);
-  }
-
-  if (!file.name.toLowerCase().endsWith(".html")) {
-    return json({ error: "Only .html files are accepted." }, 400);
-  }
-
-  if (file.size > maxBytes) {
-    return json({ error: "File is larger than the configured upload limit." }, 413);
-  }
-
-  const html = await readUtf8File(file);
-
-  if (html === null) {
-    return json({ error: "Uploaded HTML must be valid UTF-8 text." }, 400);
   }
 
   const id = randomBase64Url(16);
   const token = randomBase64Url(32);
   const tokenHash = await sha256Hex(token);
   const now = new Date();
+  const nowIso = now.toISOString();
   const expiresAt =
     parsedOptions.ttlSeconds === null ? null : new Date(now.getTime() + parsedOptions.ttlSeconds * 1000).toISOString();
   const metadata: ArtifactMetadata = {
     id,
-    filename: file.name,
+    filename: upload.file.name,
     tokenHash,
-    createdAt: now.toISOString(),
+    createdAt: nowIso,
+    updatedAt: nowIso,
     expiresAt,
     sandbox: parsedOptions.sandbox,
-    size: file.size,
+    size: upload.file.size,
   };
 
-  await env.ARTIFACTS.put(htmlKey(id), html, {
+  await env.ARTIFACTS.put(htmlKey(id), upload.html, {
     httpMetadata: {
       contentType: "text/html; charset=utf-8",
     },
@@ -199,6 +202,81 @@ async function publish(request: Request, env: Env): Promise<Response> {
   return json(payload, 201);
 }
 
+async function updateArtifactContent(request: Request, env: Env, id: string): Promise<Response> {
+  if (!(await isAuthorized(request, env))) {
+    return json({ error: "Unauthorized." }, 401);
+  }
+
+  if (!isValidId(id)) {
+    return notFound();
+  }
+
+  const object = await env.ARTIFACTS.get(metadataKey(id));
+
+  if (!object) {
+    return notFound();
+  }
+
+  const metadata = normalizeMetadata(JSON.parse(await object.text()) as ArtifactMetadata);
+
+  if (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt)) {
+    return json({ error: "Artifact has expired." }, 410);
+  }
+
+  const upload = await readHtmlUpload(request, env);
+
+  if ("error" in upload) {
+    return json({ error: upload.error }, upload.status);
+  }
+
+  const updatedAt = new Date().toISOString();
+  const nextMetadata: ArtifactMetadata = {
+    ...metadata,
+    filename: upload.file.name,
+    updatedAt,
+    size: upload.file.size,
+  };
+  const previousHtml = await env.ARTIFACTS.get(htmlKey(id));
+  const previousHtmlBytes = previousHtml ? await previousHtml.arrayBuffer() : null;
+
+  await env.ARTIFACTS.put(htmlKey(id), upload.html, {
+    httpMetadata: {
+      contentType: "text/html; charset=utf-8",
+    },
+  });
+
+  try {
+    await env.ARTIFACTS.put(metadataKey(id), JSON.stringify(nextMetadata), {
+      httpMetadata: {
+        contentType: "application/json; charset=utf-8",
+      },
+    });
+  } catch (error) {
+    if (previousHtmlBytes) {
+      await env.ARTIFACTS.put(htmlKey(id), previousHtmlBytes, {
+        httpMetadata: {
+          contentType: "text/html; charset=utf-8",
+        },
+      });
+    } else {
+      await env.ARTIFACTS.delete(htmlKey(id));
+    }
+
+    throw error;
+  }
+
+  const payload: UpdatePayload = {
+    id,
+    filename: nextMetadata.filename,
+    updatedAt,
+    expiresAt: nextMetadata.expiresAt,
+    sandbox: nextMetadata.sandbox,
+    size: nextMetadata.size,
+  };
+
+  return json(payload);
+}
+
 async function listArtifacts(request: Request, env: Env): Promise<Response> {
   if (!(await isAuthorized(request, env))) {
     return json({ error: "Unauthorized." }, 401);
@@ -224,7 +302,7 @@ async function listArtifacts(request: Request, env: Env): Promise<Response> {
         continue;
       }
 
-      const artifact = JSON.parse(await metadata.text()) as ArtifactMetadata;
+      const artifact = normalizeMetadata(JSON.parse(await metadata.text()) as ArtifactMetadata);
 
       artifacts.push({
         id: artifact.id,
@@ -257,7 +335,7 @@ async function reissueArtifact(request: Request, env: Env, id: string): Promise<
     return notFound();
   }
 
-  const metadata = JSON.parse(await object.text()) as ArtifactMetadata;
+  const metadata = normalizeMetadata(JSON.parse(await object.text()) as ArtifactMetadata);
 
   if (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt)) {
     return json({ error: "Artifact has expired." }, 410);
@@ -281,6 +359,22 @@ async function reissueArtifact(request: Request, env: Env, id: string): Promise<
     url: `${new URL(request.url).origin}/p/${id}/${token}`,
     expiresAt: metadata.expiresAt,
     sandbox: metadata.sandbox,
+  };
+
+  return json(payload);
+}
+
+async function artifactVersion(env: Env, id: string, token: string): Promise<Response> {
+  const metadata = await readAuthorizedMetadata(env, id, token);
+
+  if (!metadata) {
+    return notFound();
+  }
+
+  const payload: VersionPayload = {
+    id: metadata.id,
+    updatedAt: metadata.updatedAt,
+    size: metadata.size,
   };
 
   return json(payload);
@@ -316,7 +410,7 @@ async function cleanupExpiredArtifact(env: Env, key: string): Promise<void> {
     return;
   }
 
-  const metadata = JSON.parse(await object.text()) as ArtifactMetadata;
+  const metadata = normalizeMetadata(JSON.parse(await object.text()) as ArtifactMetadata);
 
   if (!metadata.expiresAt || Date.now() < Date.parse(metadata.expiresAt)) {
     return;
@@ -350,7 +444,9 @@ async function serveViewer(env: Env, requestUrl: string, id: string, token: stri
 
   const url = new URL(requestUrl);
   const rawPath = `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+  const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
   const sandbox = iframeSandboxAttribute(metadata.sandbox);
+  const version = metadata.updatedAt;
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -364,12 +460,28 @@ iframe{display:block;width:100%;height:100%;border:0}
 </style>
 </head>
 <body>
-<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+<script>
+const pagebinFrame = document.getElementById("pagebin-frame");
+let pagebinVersion = ${JSON.stringify(version)};
+async function pagebinPoll() {
+  try {
+    const response = await fetch(${JSON.stringify(versionPath)}, { cache: "no-store" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (payload.updatedAt && payload.updatedAt !== pagebinVersion) {
+      pagebinVersion = payload.updatedAt;
+      pagebinFrame.src = ${JSON.stringify(rawPath)} + "?v=" + encodeURIComponent(pagebinVersion);
+    }
+  } catch {}
+}
+setInterval(pagebinPoll, 1000);
+</script>
 </body>
 </html>`;
 
   return text(html, 200, {
-    "Content-Security-Policy": "default-src 'none'; frame-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; connect-src 'self'; frame-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     "Content-Type": "text/html; charset=utf-8",
     Link: `<${url.origin}/robots.txt>; rel="robots"`,
   });
@@ -408,7 +520,7 @@ async function readAuthorizedMetadata(env: Env, id: string, token: string): Prom
     return null;
   }
 
-  const metadata = JSON.parse(await object.text()) as ArtifactMetadata;
+  const metadata = normalizeMetadata(JSON.parse(await object.text()) as ArtifactMetadata);
 
   if (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt)) {
     return null;
@@ -435,6 +547,65 @@ async function isAuthorized(request: Request, env: Env): Promise<boolean> {
   const expectedHash = await sha256Hex(env.PAGEBIN_PUBLISH_TOKEN);
 
   return constantTimeEqual(providedHash, expectedHash);
+}
+
+async function readHtmlUpload(
+  request: Request,
+  env: Env,
+): Promise<{ file: UploadedFile; form: FormData; html: string } | { error: string; status: 400 | 413 | 415 }> {
+  const maxBytes = readMaxBytes(env);
+  const contentLength = readContentLength(request);
+
+  if (contentLength !== null && contentLength > maxBytes + MAX_MULTIPART_OVERHEAD_BYTES) {
+    return {
+      error: "Upload request is larger than the configured upload limit.",
+      status: 413,
+    };
+  }
+
+  const formResult = await readMultipartForm(request);
+
+  if ("error" in formResult) {
+    return formResult;
+  }
+
+  const file = formResult.form.get("file");
+
+  if (!isUploadedFile(file)) {
+    return {
+      error: "Missing file upload.",
+      status: 400,
+    };
+  }
+
+  if (!file.name.toLowerCase().endsWith(".html")) {
+    return {
+      error: "Only .html files are accepted.",
+      status: 400,
+    };
+  }
+
+  if (file.size > maxBytes) {
+    return {
+      error: "File is larger than the configured upload limit.",
+      status: 413,
+    };
+  }
+
+  const html = await readUtf8File(file);
+
+  if (html === null) {
+    return {
+      error: "Uploaded HTML must be valid UTF-8 text.",
+      status: 400,
+    };
+  }
+
+  return {
+    file,
+    form: formResult.form,
+    html,
+  };
 }
 
 async function readMultipartForm(
@@ -618,6 +789,13 @@ function rawSandboxCsp(mode: SandboxMode): string {
 
 function isValidId(id: string): boolean {
   return ID_PATTERN.test(id);
+}
+
+function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
+  return {
+    ...metadata,
+    updatedAt: metadata.updatedAt ?? metadata.createdAt,
+  };
 }
 
 function escapeHtml(value: string): string {

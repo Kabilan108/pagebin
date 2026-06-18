@@ -83,6 +83,8 @@ describe("worker", () => {
 
     expect(viewerResponse.status).toBe(200);
     expect(viewerHtml).toContain('sandbox="allow-scripts allow-forms allow-popups allow-downloads"');
+    expect(viewerHtml).toContain("/version/");
+    expect(viewerHtml).toContain("setInterval(pagebinPoll, 1000)");
     expect(viewerResponse.headers.get("X-Robots-Tag")).toBe("noindex, nofollow, noarchive");
 
     const rawUrl = published.url.replace("/p/", "/raw/");
@@ -106,6 +108,70 @@ describe("worker", () => {
 
     expect(deleteResponse.status).toBe(200);
     expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(404);
+  });
+
+  test("updates artifact content while preserving the existing viewer URL", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const updateResponse = await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>updated</h1>",
+      filename: "updated-plan.html",
+    });
+    const payload = (await updateResponse.json()) as {
+      filename: string;
+      id: string;
+      updatedAt: string;
+      size: number;
+    };
+    const rawResponse = await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never);
+    const versionResponse = await worker.fetch(
+      new Request(published.url.replace("/p/", "/api/artifacts/").replace(/\/([^/]+)$/, "/version/$1")),
+      env as never,
+    );
+    const versionPayload = (await versionResponse.json()) as {
+      id: string;
+      updatedAt: string;
+      size: number;
+    };
+
+    expect(updateResponse.status).toBe(200);
+    expect(payload.id).toBe(published.id);
+    expect(payload.filename).toBe("updated-plan.html");
+    expect(typeof payload.updatedAt).toBe("string");
+    expect(payload.size).toBe(31);
+    expect(rawResponse.status).toBe(200);
+    expect(await rawResponse.text()).toBe("<!doctype html><h1>updated</h1>");
+    expect(versionResponse.status).toBe(200);
+    expect(versionPayload).toEqual({
+      id: published.id,
+      updatedAt: payload.updatedAt,
+      size: 31,
+    });
+  });
+
+  test("requires publisher authorization to update artifacts", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const multipart = createMultipartBody({
+      fields: {},
+      file: {
+        contents: "<!doctype html><h1>updated</h1>",
+        filename: "updated-plan.html",
+      },
+    });
+    const response = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/content`, {
+        body: multipart.body,
+        headers: {
+          "Content-Length": String(multipart.byteLength),
+          "Content-Type": `multipart/form-data; boundary=${multipart.boundary}`,
+        },
+        method: "PUT",
+      }),
+      env as never,
+    );
+
+    expect(response.status).toBe(401);
   });
 
   test("requires publisher authorization", async () => {
@@ -237,7 +303,7 @@ describe("worker", () => {
     const viewerHtml = await viewerResponse.text();
     const rawResponse = await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never);
 
-    expect(viewerHtml).toContain("<iframe sandbox ");
+    expect(viewerHtml).toContain(" sandbox ");
     expect(viewerHtml).not.toContain("allow-scripts");
     expect(rawResponse.headers.get("Content-Security-Policy")).toBe("sandbox");
   });
@@ -389,6 +455,24 @@ describe("worker", () => {
     expect([...env.ARTIFACTS.objects.keys()].some((key) => key.endsWith("/index.html"))).toBe(false);
   });
 
+  test("rolls back updated HTML if update metadata persistence fails", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    env.ARTIFACTS.failMetadataPut = true;
+
+    const response = await withSuppressedConsoleError(() =>
+      updateFixtureResponse(env, published.id, {
+        contents: "<!doctype html><h1>updated</h1>",
+        filename: "updated-plan.html",
+      }),
+    );
+    const rawResponse = await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never);
+
+    expect(response.status).toBe(500);
+    expect(await rawResponse.text()).toContain("<script>globalThis.ok = true</script>");
+  });
+
   test("revokes metadata before deleting HTML", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
@@ -452,6 +536,30 @@ async function publishFixtureResponse(env: TestEnv, options: PublishFixtureOptio
   return worker.fetch(
     new Request("https://pagebin.test/api/publish", {
       method: "POST",
+      headers: {
+        Authorization: "Bearer publish-secret",
+        "Content-Length": String(multipart.byteLength),
+        "Content-Type": `multipart/form-data; boundary=${multipart.boundary}`,
+      },
+      body: multipart.body,
+    }),
+    env as never,
+  );
+}
+
+async function updateFixtureResponse(
+  env: TestEnv,
+  id: string,
+  file: { contents: string; filename: string },
+): Promise<Response> {
+  const multipart = createMultipartBody({
+    fields: {},
+    file,
+  });
+
+  return worker.fetch(
+    new Request(`https://pagebin.test/api/artifacts/${id}/content`, {
+      method: "PUT",
       headers: {
         Authorization: "Bearer publish-secret",
         "Content-Length": String(multipart.byteLength),

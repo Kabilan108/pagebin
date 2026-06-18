@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { normalizeEndpoint, parseArgs, parseTtlSeconds } from "../src/cli";
 
@@ -109,6 +109,45 @@ describe("parseArgs", () => {
         endpoint: "https://example.com",
         id: "-abc123456789012",
         json: true,
+      },
+    });
+  });
+
+  test("parses update with an artifact ID", () => {
+    expect(parseArgs(["update", "abc1234567890123", "plan.html", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+      command: "update",
+      options: {
+        endpoint: "https://example.com",
+        filePath: "plan.html",
+        id: "abc1234567890123",
+        json: true,
+        url: null,
+      },
+    });
+  });
+
+  test("parses update with a viewer URL and infers the endpoint", () => {
+    expect(parseArgs(["update", "https://pagebin.test/p/abc1234567890123/view-token", "plan.html"], {})).toEqual({
+      command: "update",
+      options: {
+        endpoint: "https://pagebin.test",
+        filePath: "plan.html",
+        id: "abc1234567890123",
+        json: false,
+        url: "https://pagebin.test/p/abc1234567890123/view-token",
+      },
+    });
+  });
+
+  test("parses watch with a viewer URL", () => {
+    expect(parseArgs(["watch", "https://pagebin.test/p/abc1234567890123/view-token", "plan.html"], {})).toEqual({
+      command: "watch",
+      options: {
+        endpoint: "https://pagebin.test",
+        filePath: "plan.html",
+        id: "abc1234567890123",
+        json: false,
+        url: "https://pagebin.test/p/abc1234567890123/view-token",
       },
     });
   });
@@ -457,6 +496,153 @@ describe("reissue command", () => {
   });
 });
 
+describe("update command", () => {
+  test("updates content and prints the target URL when a URL was provided", async () => {
+    const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>updated</h1>");
+    let requestCount = 0;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        requestCount += 1;
+        expect(request.method).toBe("PUT");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/content");
+        expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(file).toBeInstanceOf(File);
+        expect((file as File).name).toBe("cli-plan.html");
+        expect(await (file as File).text()).toBe("<!doctype html><h1>updated</h1>");
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-plan.html",
+          updatedAt: "2026-06-18T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: 31,
+        });
+      },
+    });
+    const url = `${server.url.origin}/p/artifact-id-1234/view-token`;
+
+    try {
+      const result = await runPagebin(["update", url, filePath], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(`${url}\n`);
+      expect(requestCount).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("updates content by ID and prints structured JSON", async () => {
+    const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>updated</h1>");
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.method).toBe("PUT");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/content");
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-plan.html",
+          updatedAt: "2026-06-18T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: 31,
+        });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin, "--json"], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        id: "artifact-id-1234",
+        filename: "cli-plan.html",
+        updatedAt: "2026-06-18T00:00:00.000Z",
+        expiresAt: null,
+        sandbox: "standard",
+        size: 31,
+        url: null,
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("watch command", () => {
+  test("continues updating after atomic file replacement", async () => {
+    const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>first</h1>");
+    const uploads: string[] = [];
+    let resolveSecondUpload: (() => void) | null = null;
+    const secondUpload = new Promise<void>((resolve) => {
+      resolveSecondUpload = resolve;
+    });
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("PUT");
+
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(file).toBeInstanceOf(File);
+        uploads.push(await (file as File).text());
+
+        if (uploads.length === 2) {
+          resolveSecondUpload?.();
+        }
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-plan.html",
+          updatedAt: "2026-06-18T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: 31,
+        });
+      },
+    });
+    const proc = Bun.spawn([process.execPath, "src/cli.ts", "watch", "artifact-id-1234", filePath, "--endpoint", server.url.origin], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+
+    try {
+      await waitFor(() => uploads.length === 1);
+
+      const nextPath = join(dirname(filePath), "cli-plan-next.html");
+      await writeFile(nextPath, "<!doctype html><h1>second</h1>");
+      await rename(nextPath, filePath);
+      await withTimeout(secondUpload, 3000);
+
+      expect(uploads).toEqual(["<!doctype html><h1>first</h1>", "<!doctype html><h1>second</h1>"]);
+    } finally {
+      proc.kill("SIGTERM");
+      await proc.exited;
+      server.stop(true);
+      await new Response(proc.stdout).text();
+      await new Response(proc.stderr).text();
+    }
+  });
+});
+
 async function writeTempFile(filename: string, contents: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "pagebin-test-"));
   const filePath = join(directory, filename);
@@ -487,4 +673,37 @@ async function runPagebin(args: string[], env: Record<string, string>): Promise<
     stderr,
     stdout,
   };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  await withTimeout(
+    new Promise<void>((resolve) => {
+      const interval = setInterval(() => {
+        if (!predicate()) {
+          return;
+        }
+
+        clearInterval(interval);
+        resolve();
+      }, 10);
+    }),
+    3000,
+  );
+}
+
+async function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`Timed out after ${milliseconds}ms.`));
+    }, milliseconds);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }

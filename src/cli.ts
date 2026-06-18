@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
+import { watch } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { basename, dirname, extname, resolve } from "node:path";
 
 import packageJson from "../package.json" with { type: "json" };
 
@@ -25,6 +26,15 @@ interface ReissueResponse {
   url: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+}
+
+interface UpdateResponse {
+  id: string;
+  filename: string;
+  updatedAt: string;
+  expiresAt: string | null;
+  sandbox: SandboxMode;
+  size: number;
 }
 
 interface DeleteResponse {
@@ -65,14 +75,30 @@ interface ReissueOptions {
   json: boolean;
 }
 
+interface UpdateOptions {
+  endpoint: string;
+  filePath: string;
+  id: string;
+  json: boolean;
+  url: string | null;
+}
+
+interface WatchOptions extends UpdateOptions {}
+
 interface ListOptions {
   endpoint: string;
   json: boolean;
 }
 
+interface ArtifactTarget {
+  id: string;
+  url: string | null;
+  urlOrigin: string | null;
+}
+
 interface ParsedCommand {
-  command: "publish" | "delete" | "reissue" | "list" | "help" | "version";
-  options?: PublishOptions | DeleteOptions | ReissueOptions | ListOptions;
+  command: "publish" | "delete" | "reissue" | "update" | "watch" | "list" | "help" | "version";
+  options?: PublishOptions | DeleteOptions | ReissueOptions | UpdateOptions | WatchOptions | ListOptions;
 }
 
 type SandboxMode = "standard" | "strict";
@@ -178,6 +204,20 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     };
   }
 
+  if (command === "update") {
+    return {
+      command,
+      options: parseUpdateOptions(rest, env),
+    };
+  }
+
+  if (command === "watch") {
+    return {
+      command,
+      options: parseUpdateOptions(rest, env),
+    };
+  }
+
   if (command === "list") {
     return {
       command,
@@ -201,6 +241,12 @@ async function main(): Promise<void> {
         return;
       case "reissue":
         await reissueArtifact(parsed.options as ReissueOptions);
+        return;
+      case "update":
+        await updateArtifact(parsed.options as UpdateOptions);
+        return;
+      case "watch":
+        await watchArtifact(parsed.options as WatchOptions);
         return;
       case "list":
         await listArtifacts(parsed.options as ListOptions);
@@ -362,6 +408,62 @@ function parseReissueOptions(args: string[], env: NodeJS.ProcessEnv): ReissueOpt
   };
 }
 
+function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptions {
+  let filePath: string | null = null;
+  let json = false;
+  let targetValue: string | null = null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--endpoint") {
+      index += 1;
+      requireValue(args[index], "--endpoint");
+      continue;
+    }
+
+    if (arg?.startsWith("-") && !isArtifactId(arg)) {
+      throw new CliError(`Unknown option for update: ${arg}`);
+    }
+
+    if (!targetValue) {
+      targetValue = arg ?? null;
+      continue;
+    }
+
+    if (!filePath) {
+      filePath = arg ?? null;
+      continue;
+    }
+
+    throw new CliError("update accepts exactly one artifact target and one file path.");
+  }
+
+  if (!targetValue) {
+    throw new CliError("update requires an artifact ID or viewer URL.");
+  }
+
+  if (!filePath) {
+    throw new CliError("update requires a .html file path.");
+  }
+
+  const target = parseArtifactTarget(targetValue);
+  const endpoint = normalizeEndpoint(readEndpointOption(args) ?? target.urlOrigin ?? env.PAGEBIN_ENDPOINT ?? "");
+
+  return {
+    endpoint,
+    filePath,
+    id: target.id,
+    json,
+    url: target.url,
+  };
+}
+
 function parseListOptions(args: string[], env: NodeJS.ProcessEnv): ListOptions {
   const endpoint = normalizeEndpoint(readEndpoint(args, env));
   let json = false;
@@ -390,13 +492,55 @@ function parseListOptions(args: string[], env: NodeJS.ProcessEnv): ListOptions {
 }
 
 function readEndpoint(args: string[], env: NodeJS.ProcessEnv): string {
+  return readOptionalEndpoint(args, env) ?? "";
+}
+
+function readOptionalEndpoint(args: string[], env: NodeJS.ProcessEnv): string | null {
+  return readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? null;
+}
+
+function readEndpointOption(args: string[]): string | null {
   const endpointIndex = args.indexOf("--endpoint");
 
-  if (endpointIndex !== -1) {
-    return requireValue(args[endpointIndex + 1], "--endpoint");
+  if (endpointIndex === -1) {
+    return null;
   }
 
-  return env.PAGEBIN_ENDPOINT ?? "";
+  return requireValue(args[endpointIndex + 1], "--endpoint");
+}
+
+function parseArtifactTarget(value: string): ArtifactTarget {
+  if (isArtifactId(value)) {
+    return {
+      id: value,
+      url: null,
+      urlOrigin: null,
+    };
+  }
+
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    throw new CliError("Artifact target must be an artifact ID or pagebin viewer URL.");
+  }
+
+  if (url.protocol !== "https:" && !isLocalhost(url.hostname)) {
+    throw new CliError("Artifact viewer URL must use https unless it points at localhost.");
+  }
+
+  const match = url.pathname.match(/^\/(?:p|raw)\/([^/]+)\/([^/]+)$/);
+
+  if (!match?.[1] || !isArtifactId(match[1])) {
+    throw new CliError("Artifact viewer URL must look like /p/<artifact_id>/<token>.");
+  }
+
+  return {
+    id: match[1],
+    url: url.toString(),
+    urlOrigin: url.origin,
+  };
 }
 
 function parseSandbox(value: string): SandboxMode {
@@ -417,24 +561,8 @@ function requireValue(value: string | undefined, flag: string): string {
 
 async function publishArtifact(options: PublishOptions): Promise<void> {
   const token = readPublishToken();
-  const fileInfo = await stat(options.filePath);
+  const form = await createHtmlUploadForm(options.filePath);
 
-  if (!fileInfo.isFile()) {
-    throw new CliError(`${options.filePath} is not a file.`);
-  }
-
-  if (extname(options.filePath).toLowerCase() !== ".html") {
-    throw new CliError("pagebin only accepts .html files.");
-  }
-
-  if (fileInfo.size > DEFAULT_MAX_BYTES) {
-    throw new CliError("File is larger than the 10 MB upload limit.");
-  }
-
-  const bytes = await readFile(options.filePath);
-  const form = new FormData();
-
-  form.set("file", new Blob([bytes], { type: "text/html; charset=utf-8" }), basename(options.filePath));
   form.set("sandbox", options.sandbox);
 
   if (options.ttlSeconds !== null) {
@@ -457,6 +585,106 @@ async function publishArtifact(options: PublishOptions): Promise<void> {
   }
 
   console.log(payload.url);
+}
+
+async function updateArtifact(options: UpdateOptions): Promise<UpdateResponse> {
+  const token = readPublishToken();
+  const form = await createHtmlUploadForm(options.filePath);
+  const response = await fetch(`${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}/content`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    body: form,
+  });
+  const payload = await readJsonResponse<UpdateResponse>(response);
+
+  if (options.json) {
+    console.log(JSON.stringify({ ...payload, url: options.url }, null, 2));
+    return payload;
+  }
+
+  console.log(options.url ?? payload.id);
+  return payload;
+}
+
+async function watchArtifact(options: WatchOptions): Promise<void> {
+  await updateArtifact(options);
+  const watchedFile = resolve(options.filePath);
+  const watchedDirectory = dirname(watchedFile);
+  const watchedBasename = basename(watchedFile);
+
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let running = false;
+  let pending = false;
+
+  const runUpdate = (): void => {
+    if (running) {
+      pending = true;
+      return;
+    }
+
+    running = true;
+    updateArtifact({ ...options, json: false })
+      .catch((error: unknown) => {
+        console.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        running = false;
+
+        if (pending) {
+          pending = false;
+          runUpdate();
+        }
+      });
+  };
+
+  const watcher = watch(watchedDirectory, (eventType, filename) => {
+    if (eventType !== "rename" && filename && filename.toString() !== watchedBasename) {
+      return;
+    }
+
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+
+    timeout = setTimeout(runUpdate, 250);
+  });
+
+  console.error(`Watching ${options.filePath}; press Ctrl-C to stop.`);
+
+  await new Promise<void>((resolve) => {
+    const stop = (): void => {
+      watcher.close();
+      resolve();
+    };
+
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+}
+
+async function createHtmlUploadForm(filePath: string): Promise<FormData> {
+  const fileInfo = await stat(filePath);
+
+  if (!fileInfo.isFile()) {
+    throw new CliError(`${filePath} is not a file.`);
+  }
+
+  if (extname(filePath).toLowerCase() !== ".html") {
+    throw new CliError("pagebin only accepts .html files.");
+  }
+
+  if (fileInfo.size > DEFAULT_MAX_BYTES) {
+    throw new CliError("File is larger than the 10 MB upload limit.");
+  }
+
+  const bytes = await readFile(filePath);
+  const form = new FormData();
+
+  form.set("file", new Blob([bytes], { type: "text/html; charset=utf-8" }), basename(filePath));
+
+  return form;
 }
 
 async function deleteArtifact(options: DeleteOptions): Promise<void> {
@@ -652,6 +880,8 @@ Usage:
   pagebin publish <file.html> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
   pagebin list [--json] [--endpoint URL]
   pagebin reissue <artifact_id> [--json] [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> <file.html> [--json] [--endpoint URL]
+  pagebin watch <artifact_id|viewer_url> <file.html> [--endpoint URL]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
   pagebin version
 
@@ -663,6 +893,8 @@ Behavior:
   --sandbox strict     Disables iframe sandbox permissions.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.
+  update               Replaces an artifact's HTML while preserving existing viewer URLs.
+  watch                Updates an artifact whenever the local HTML file changes.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
 
 Environment:

@@ -3,6 +3,5 @@
   "compilerOptions": {
     "types": ["@types/bun"]
   },
-  "include": ["src/**/*.ts", "tests/cli.test.ts", "package.json"]
+  "include": ["src/**/*.ts", "tests/cli.test.ts", "tests/markdown-template.test.ts", "package.json"]
 }
-

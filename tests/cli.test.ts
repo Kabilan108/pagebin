@@ -252,14 +252,115 @@ describe("publish command", () => {
     }
   });
 
-  test("rejects non-html files before sending a request", async () => {
+  test("renders markdown files to HTML before publishing", async () => {
+    const filePath = await writeTempFile(
+      "cli-plan.md",
+      `---
+title: CLI Markdown
+tags:
+  - one
+  - two
+---
+
+# CLI Markdown
+
+\`\`\`mermaid
+flowchart LR
+  A --> B
+\`\`\`
+`,
+    );
+    let requestCount = 0;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        requestCount += 1;
+        expect(request.method).toBe("POST");
+
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(form.get("filename")).toBe("cli-plan.md");
+        expect(file).toBeInstanceOf(File);
+        expect((file as File).name).toBe("cli-plan.html");
+
+        const html = await (file as File).text();
+
+        expect(html).toContain('<script type="application/json" id="markdown-source"');
+        expect(html).toContain("CLI Markdown");
+        expect(html).toContain("data-mermaid-viewport");
+        expect(html).toContain("data-copy-code");
+        expect(html).toContain("Properties");
+        expect(html).toContain("Outline");
+
+        return Response.json(
+          {
+            id: "artifact-id",
+            url: "https://pagebin.test/p/artifact-id/view-token",
+            expiresAt: null,
+            sandbox: "standard",
+          },
+          { status: 201 },
+        );
+      },
+    });
+
+    try {
+      const result = await runPagebin(["publish", filePath, "--endpoint", server.url.origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("https://pagebin.test/p/artifact-id/view-token\n");
+      expect(requestCount).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects publishing markdown with the strict sandbox before sending a request", async () => {
+    const filePath = await writeTempFile("cli-plan.md", "# CLI Markdown\n");
+    let requestCount = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requestCount += 1;
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["publish", filePath, "--endpoint", server.url.origin, "--sandbox", "strict"], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Markdown rendering requires --sandbox standard");
+      expect(requestCount).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects oversized markdown before sending a request", async () => {
+    const filePath = await writeTempFile("huge-report.md", "x".repeat(10 * 1024 * 1024 + 1));
+    const result = await runPagebin(["publish", filePath, "--endpoint", "http://localhost:8787"], {
+      PAGEBIN_PUBLISH_TOKEN: "publish-token",
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("File is larger than the 10 MB upload limit.");
+  });
+
+  test("rejects unsupported file types before sending a request", async () => {
     const filePath = await writeTempFile("cli-plan.txt", "not html");
     const result = await runPagebin(["publish", filePath, "--endpoint", "http://localhost:8787"], {
       PAGEBIN_PUBLISH_TOKEN: "publish-token",
     });
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("pagebin only accepts .html files.");
+    expect(result.stderr).toContain("pagebin only accepts .html, .md, or .markdown files.");
   });
 });
 
@@ -575,6 +676,89 @@ describe("update command", () => {
         size: 31,
         url: null,
       });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("renders markdown files to HTML before updating", async () => {
+    const filePath = await writeTempFile("cli-update.markdown", "# Updated\n\n```ts\nconst ok = true;\n```\n");
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("PUT");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/content");
+
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(form.get("filename")).toBe("cli-update.markdown");
+        expect(file).toBeInstanceOf(File);
+        expect((file as File).name).toBe("cli-update.html");
+
+        const html = await (file as File).text();
+
+        expect(html).toContain("Updated");
+        expect(html).toContain("data-copy-code");
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-update.markdown",
+          updatedAt: "2026-06-18T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: html.length,
+        });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin, "--json"], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+      const payload = JSON.parse(result.stdout) as { filename: string; url: string | null };
+
+      expect(result.exitCode).toBe(0);
+      expect(payload.filename).toBe("cli-update.markdown");
+      expect(payload.url).toBeNull();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("warns when updating a strict-sandbox artifact with markdown", async () => {
+    const filePath = await writeTempFile("cli-update.md", "# Updated\n");
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("PUT");
+
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(form.get("filename")).toBe("cli-update.md");
+        expect(file).toBeInstanceOf(File);
+        expect((file as File).name).toBe("cli-update.html");
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-update.md",
+          updatedAt: "2026-06-18T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "strict",
+          size: 120,
+        });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("artifact-id-1234\n");
+      expect(result.stderr).toContain("strict-sandbox artifact");
     } finally {
       server.stop(true);
     }

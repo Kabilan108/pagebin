@@ -1,0 +1,1803 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pagebin markdown prototype</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/styles/github-dark.min.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #050505;
+        --panel: #0a0a0a;
+        --panel-soft: #101010;
+        --panel-glass: color-mix(in oklab, #0d0d0d 88%, transparent);
+        --text: #f7f7f7;
+        --text-soft: #c9c9c9;
+        --muted: #8b8b8b;
+        --muted-2: #676767;
+        --line: #242424;
+        --line-strong: #383838;
+        --accent: #ededed;
+        --cyan: #7dd3fc;
+        --green: #a7f3d0;
+        --amber: #f5d38b;
+        --pink: #f0abfc;
+        --danger: #fca5a5;
+        --selection: rgb(255 255 255 / 0.16);
+        --shadow: 0 24px 80px rgb(0 0 0 / 0.54);
+        --radius: 8px;
+        --content: 760px;
+        --sidebar: 320px;
+        --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+        --font-mono: "Geist Mono", "SFMono-Regular", Consolas, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      ::selection {
+        background: var(--selection);
+      }
+
+      html {
+        background: var(--bg);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background:
+          linear-gradient(180deg, rgb(255 255 255 / 0.035), transparent 330px),
+          radial-gradient(circle at 50% -20%, rgb(255 255 255 / 0.07), transparent 440px),
+          var(--bg);
+        color: var(--text);
+        font-family: var(--font-sans);
+        font-size: 15.5px;
+        line-height: 1.7;
+        letter-spacing: 0;
+        text-rendering: optimizeLegibility;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-color: rgb(255 255 255 / 0.35);
+        text-underline-offset: 0.22em;
+        transition:
+          color 160ms ease,
+          text-decoration-color 160ms ease;
+      }
+
+      a:hover {
+        color: #fff;
+        text-decoration-color: rgb(255 255 255 / 0.75);
+      }
+
+      button {
+        font: inherit;
+        color: inherit;
+      }
+
+      button:focus-visible,
+      a:focus-visible {
+        outline: 2px solid rgb(255 255 255 / 0.58);
+        outline-offset: 2px;
+      }
+
+      .shell {
+        min-height: 100vh;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns:
+          minmax(22px, 1fr)
+          minmax(0, var(--content))
+          minmax(220px, var(--sidebar))
+          minmax(22px, 1fr);
+        gap: 42px;
+        padding: 82px 0 92px;
+      }
+
+      .reader {
+        grid-column: 2;
+        min-width: 0;
+      }
+
+      .side {
+        position: sticky;
+        top: 90px;
+        grid-column: 3;
+        align-self: start;
+        min-width: 0;
+      }
+
+      .title {
+        max-width: 900px;
+        margin: 0 0 14px;
+        color: #fff;
+        font-size: clamp(40px, 8vw, 76px);
+        font-weight: 700;
+        letter-spacing: 0;
+        line-height: 0.94;
+      }
+
+      .subtitle {
+        max-width: 640px;
+        margin: 0 0 34px;
+        color: var(--text-soft);
+        font-size: 18px;
+        line-height: 1.6;
+      }
+
+      .markdown-body {
+        color: var(--text-soft);
+      }
+
+      .markdown-body > *:first-child {
+        margin-top: 0;
+      }
+
+      .markdown-body > *:last-child {
+        margin-bottom: 0;
+      }
+
+      .markdown-body h1,
+      .markdown-body h2,
+      .markdown-body h3,
+      .markdown-body h4,
+      .markdown-body h5,
+      .markdown-body h6 {
+        position: relative;
+        color: #fff;
+        font-weight: 650;
+        letter-spacing: 0;
+        line-height: 1.15;
+      }
+
+      .markdown-body h1 {
+        margin: 58px 0 18px;
+        font-size: 36px;
+      }
+
+      .markdown-body h2 {
+        margin: 52px 0 16px;
+        padding-top: 24px;
+        border-top: 1px solid rgb(255 255 255 / 0.09);
+        font-size: 28px;
+      }
+
+      .markdown-body h3 {
+        margin: 38px 0 12px;
+        font-size: 21px;
+      }
+
+      .markdown-body h4 {
+        margin: 30px 0 10px;
+        font-size: 17px;
+      }
+
+      .markdown-body h5,
+      .markdown-body h6 {
+        margin: 26px 0 8px;
+        color: var(--text-soft);
+        font-size: 14px;
+        text-transform: uppercase;
+      }
+
+      .heading-anchor {
+        position: absolute;
+        right: calc(100% + 10px);
+        color: var(--muted-2);
+        opacity: 0;
+        text-decoration: none;
+        transition: opacity 150ms ease;
+      }
+
+      .markdown-body :is(h1, h2, h3, h4, h5, h6):hover .heading-anchor {
+        opacity: 1;
+      }
+
+      .markdown-body p,
+      .markdown-body ul,
+      .markdown-body ol,
+      .markdown-body blockquote,
+      .markdown-body figure,
+      .markdown-body .table-frame,
+      .markdown-body details {
+        margin: 0 0 20px;
+      }
+
+      .markdown-body p {
+        max-width: 72ch;
+      }
+
+      .markdown-body strong {
+        color: #fff;
+        font-weight: 600;
+      }
+
+      .markdown-body em {
+        color: #e7e7e7;
+      }
+
+      .markdown-body hr {
+        height: 1px;
+        margin: 42px 0;
+        border: 0;
+        background: var(--line);
+      }
+
+      .markdown-body ul,
+      .markdown-body ol {
+        padding-left: 1.35rem;
+      }
+
+      .markdown-body li {
+        margin: 7px 0;
+        padding-left: 0.15rem;
+      }
+
+      .markdown-body li::marker {
+        color: var(--muted-2);
+      }
+
+      .markdown-body .task-list-item {
+        position: relative;
+        list-style: none;
+      }
+
+      .markdown-body .task-list-item input {
+        width: 15px;
+        height: 15px;
+        margin: 0 9px 0 -1.35rem;
+        accent-color: #fff;
+        vertical-align: -2px;
+      }
+
+      .markdown-body blockquote {
+        padding: 12px 16px;
+        border-left: 2px solid var(--line-strong);
+        border-radius: 0 var(--radius) var(--radius) 0;
+        background: rgb(255 255 255 / 0.03);
+        color: var(--text-soft);
+      }
+
+      .markdown-body blockquote p:last-child {
+        margin-bottom: 0;
+      }
+
+      .markdown-body blockquote:has(strong:first-child) {
+        border-left-color: var(--cyan);
+        background: rgb(125 211 252 / 0.055);
+      }
+
+      .markdown-body code {
+        border: 1px solid rgb(255 255 255 / 0.1);
+        border-radius: 5px;
+        background: rgb(255 255 255 / 0.055);
+        color: #fff;
+        font-family: var(--font-mono);
+        font-size: 0.91em;
+        padding: 0.14em 0.34em;
+      }
+
+      .code-frame {
+        overflow: hidden;
+        border: 1px solid rgb(255 255 255 / 0.11);
+        border-radius: var(--radius);
+        background: #090909;
+        box-shadow: 0 18px 55px rgb(0 0 0 / 0.26);
+      }
+
+      .code-frame figcaption {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        min-height: 38px;
+        padding: 0 13px;
+        border-bottom: 1px solid rgb(255 255 255 / 0.08);
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 1;
+      }
+
+      .code-language {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .code-copy,
+      .mermaid-control {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 26px;
+        border: 1px solid rgb(255 255 255 / 0.1);
+        border-radius: 6px;
+        background: rgb(255 255 255 / 0.035);
+        color: var(--muted);
+        cursor: pointer;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 500;
+        line-height: 1;
+        transition:
+          background 150ms ease,
+          border-color 150ms ease,
+          color 150ms ease;
+      }
+
+      .code-copy:hover,
+      .mermaid-control:hover {
+        border-color: rgb(255 255 255 / 0.22);
+        background: rgb(255 255 255 / 0.07);
+        color: #fff;
+      }
+
+      .code-copy {
+        min-width: 58px;
+        padding: 0 9px;
+      }
+
+      .code-scroll {
+        max-width: 100%;
+        overflow: auto;
+      }
+
+      .code-grid {
+        display: grid;
+        grid-template-columns: min-content minmax(0, 1fr);
+        width: max-content;
+        min-width: 100%;
+        align-items: stretch;
+      }
+
+      .markdown-body .line-numbers,
+      .markdown-body .code-pre {
+        margin: 0;
+        background: transparent;
+        font-family: var(--font-mono);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      .markdown-body .line-numbers {
+        position: sticky;
+        left: 0;
+        z-index: 1;
+        min-width: 44px;
+        padding: 18px 11px 20px 14px;
+        border-right: 1px solid rgb(255 255 255 / 0.075);
+        background: #090909;
+        color: var(--muted-2);
+        text-align: right;
+        user-select: none;
+      }
+
+      .markdown-body .code-pre {
+        min-width: 0;
+        padding: 18px 18px 20px;
+      }
+
+      .markdown-body .code-pre code {
+        display: block;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        padding: 0;
+        white-space: pre;
+      }
+
+      .table-frame {
+        overflow: hidden;
+        border: 1px solid rgb(255 255 255 / 0.1);
+        border-radius: var(--radius);
+        background: #090909;
+      }
+
+      .table-scroll {
+        width: 100%;
+        overflow-x: auto;
+      }
+
+      .markdown-body table {
+        width: max-content;
+        min-width: 100%;
+        border-collapse: collapse;
+        background: transparent;
+      }
+
+      .markdown-body table code {
+        white-space: nowrap;
+      }
+
+      .markdown-body th,
+      .markdown-body td {
+        min-width: 148px;
+        max-width: 360px;
+        padding: 14px 16px;
+        border-bottom: 1px solid rgb(255 255 255 / 0.08);
+        color: var(--text-soft);
+        text-align: left;
+        vertical-align: top;
+        overflow-wrap: anywhere;
+      }
+
+      .markdown-body th {
+        background: rgb(255 255 255 / 0.045);
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .markdown-body th:not(:last-child),
+      .markdown-body td:not(:last-child) {
+        border-right: 1px solid rgb(255 255 255 / 0.04);
+      }
+
+      .markdown-body tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .markdown-body img,
+      .markdown-body video {
+        max-width: 100%;
+        border: 1px solid rgb(255 255 255 / 0.11);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+
+      .markdown-body .mermaid-wrap {
+        overflow: hidden;
+        border: 1px solid rgb(255 255 255 / 0.11);
+        border-radius: var(--radius);
+        background:
+          linear-gradient(180deg, rgb(255 255 255 / 0.035), transparent),
+          #090909;
+        box-shadow: 0 18px 55px rgb(0 0 0 / 0.24);
+      }
+
+      .markdown-body .mermaid-label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        min-height: 42px;
+        padding: 0 12px 0 13px;
+        border-bottom: 1px solid rgb(255 255 255 / 0.08);
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 1;
+      }
+
+      .mermaid-controls {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .mermaid-control {
+        width: 27px;
+        padding: 0;
+      }
+
+      .mermaid-control.reset {
+        width: auto;
+        padding: 0 8px;
+      }
+
+      .mermaid-viewport {
+        position: relative;
+        min-height: 260px;
+        overflow: hidden;
+        touch-action: none;
+        cursor: grab;
+      }
+
+      .mermaid-viewport.dragging {
+        cursor: grabbing;
+      }
+
+      .markdown-body .mermaid {
+        display: flex;
+        justify-content: center;
+        min-width: 100%;
+        min-height: 260px;
+        padding: 28px;
+        transform-origin: 0 0;
+        will-change: transform;
+      }
+
+      .markdown-body .mermaid svg {
+        max-width: 100%;
+        height: auto;
+      }
+
+      .markdown-body details {
+        border: 1px solid rgb(255 255 255 / 0.1);
+        border-radius: var(--radius);
+        background: rgb(255 255 255 / 0.025);
+      }
+
+      .markdown-body summary {
+        cursor: pointer;
+        padding: 12px 14px;
+        color: #fff;
+        font-weight: 500;
+      }
+
+      .markdown-body details > :not(summary) {
+        margin-inline: 14px;
+      }
+
+      .markdown-body sup a {
+        color: var(--cyan);
+        text-decoration: none;
+      }
+
+      .markdown-body .footnotes {
+        margin-top: 46px;
+        padding-top: 22px;
+        border-top: 1px solid rgb(255 255 255 / 0.09);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .markdown-body .footnotes h2 {
+        margin-top: 0;
+        padding-top: 0;
+        border-top: 0;
+        font-size: 16px;
+      }
+
+      .markdown-body .footnotes li {
+        padding-left: 0.2rem;
+      }
+
+      .markdown-body .footnote-backref {
+        color: var(--muted);
+        text-decoration: none;
+      }
+
+      .side-stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .side-panel {
+        border: 1px solid rgb(255 255 255 / 0.1);
+        border-radius: var(--radius);
+        background: var(--panel-glass);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      .side-section,
+      .properties-panel {
+        padding: 16px;
+      }
+
+      .properties-panel {
+        color: inherit;
+      }
+
+      .properties-panel summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .properties-panel summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .properties-panel summary::after {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-right: 1px solid var(--muted);
+        border-bottom: 1px solid var(--muted);
+        transform: rotate(45deg) translateY(-2px);
+        transition: transform 160ms ease;
+      }
+
+      .properties-panel[open] summary::after {
+        transform: rotate(225deg) translateY(-2px);
+      }
+
+      .side-title {
+        margin: 0;
+        color: #fff;
+        font-size: 15px;
+        font-weight: 500;
+        line-height: 1;
+      }
+
+      .meta-list {
+        display: grid;
+        gap: 2px;
+        margin-top: 14px;
+      }
+
+      .meta-item {
+        display: grid;
+        grid-template-columns: 16px minmax(72px, 0.6fr) minmax(0, 1fr);
+        gap: 10px;
+        align-items: start;
+        min-width: 0;
+        min-height: 33px;
+        padding: 4px 0;
+      }
+
+      .meta-key {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .meta-icon {
+        width: 16px;
+        height: 20px;
+        opacity: 0.7;
+        background:
+          linear-gradient(var(--muted) 0 0) 2px 5px / 12px 1px no-repeat,
+          linear-gradient(var(--muted) 0 0) 2px 10px / 10px 1px no-repeat,
+          linear-gradient(var(--muted) 0 0) 2px 15px / 12px 1px no-repeat;
+      }
+
+      .meta-icon.array {
+        background:
+          radial-gradient(circle, var(--muted) 0 1.4px, transparent 1.5px) 2px 5px / 4px 4px no-repeat,
+          radial-gradient(circle, var(--muted) 0 1.4px, transparent 1.5px) 2px 10px / 4px 4px no-repeat,
+          radial-gradient(circle, var(--muted) 0 1.4px, transparent 1.5px) 2px 15px / 4px 4px no-repeat,
+          linear-gradient(var(--muted) 0 0) 8px 7px / 8px 1px no-repeat,
+          linear-gradient(var(--muted) 0 0) 8px 12px / 8px 1px no-repeat,
+          linear-gradient(var(--muted) 0 0) 8px 17px / 8px 1px no-repeat;
+      }
+
+      .meta-icon.object {
+        position: relative;
+        background: none;
+      }
+
+      .meta-icon.object::before,
+      .meta-icon.object::after {
+        content: "";
+        position: absolute;
+        left: 4px;
+        width: 8px;
+        height: 7px;
+        border-color: var(--muted);
+        border-style: solid;
+        opacity: 0.85;
+      }
+
+      .meta-icon.object::before {
+        top: 4px;
+        border-width: 1px 0 0 1px;
+        border-radius: 3px 0 0;
+      }
+
+      .meta-icon.object::after {
+        bottom: 3px;
+        border-width: 0 0 1px 1px;
+        border-radius: 0 0 0 3px;
+      }
+
+      .meta-section .meta-icon.object {
+        margin-top: 1px;
+      }
+
+      .meta-section .meta-icon.object::before,
+      .meta-section .meta-icon.object::after {
+        left: 5px;
+        width: 7px;
+        height: 6px;
+      }
+
+      .meta-section .meta-icon.object::before {
+        top: 5px;
+      }
+
+      .meta-section .meta-icon.object::after {
+        bottom: 4px;
+      }
+
+      .meta-section-body {
+        position: relative;
+      }
+
+      .meta-section-body::before {
+        content: "";
+        position: absolute;
+        top: 2px;
+        bottom: 4px;
+        left: 7px;
+        width: 1px;
+        background:
+          linear-gradient(var(--muted-2), var(--muted-2)) 0 0 / 1px 100% no-repeat;
+        opacity: 0.42;
+      }
+
+      .meta-value {
+        color: var(--text-soft);
+        font-size: 13px;
+        line-height: 1.45;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .meta-array {
+        display: grid;
+        gap: 3px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .meta-token {
+        display: block;
+        min-width: 0;
+      }
+
+      .meta-section {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+        padding-top: 12px;
+        border-top: 1px solid rgb(255 255 255 / 0.08);
+      }
+
+      .meta-section:first-child {
+        margin-top: 0;
+        padding-top: 0;
+        border-top: 0;
+      }
+
+      .meta-section-title {
+        display: grid;
+        grid-template-columns: 16px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .meta-section-body {
+        display: grid;
+        gap: 2px;
+        padding-left: 26px;
+      }
+
+      .toc {
+        display: grid;
+        gap: 3px;
+      }
+
+      .toc a {
+        display: block;
+        overflow: hidden;
+        padding: 5px 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.3;
+        text-decoration: none;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .toc a:hover {
+        color: #fff;
+      }
+
+      .toc .depth-3 {
+        padding-left: 12px;
+      }
+
+      .toc .depth-4,
+      .toc .depth-5,
+      .toc .depth-6 {
+        padding-left: 22px;
+      }
+
+      .mobile-outline-trigger,
+      .outline-drawer,
+      .drawer-backdrop {
+        display: none;
+      }
+
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 30;
+        max-width: min(360px, calc(100vw - 36px));
+        padding: 11px 13px;
+        border: 1px solid rgb(255 255 255 / 0.14);
+        border-radius: var(--radius);
+        background: #101010;
+        box-shadow: var(--shadow);
+        color: var(--text-soft);
+        font-size: 13px;
+        opacity: 0;
+        transform: translateY(8px);
+        transition:
+          opacity 180ms ease,
+          transform 180ms ease;
+      }
+
+      .toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .empty {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      @media (max-width: 1040px) {
+        .layout {
+          grid-template-columns: minmax(18px, 1fr) minmax(0, 760px) minmax(18px, 1fr);
+          gap: 0;
+        }
+
+        .reader,
+        .side {
+          grid-column: 2;
+        }
+
+        .side {
+          grid-row: 1;
+        }
+
+        .reader {
+          grid-row: 2;
+        }
+
+        .side {
+          position: static;
+          margin-bottom: 40px;
+        }
+
+        .side-panel {
+          box-shadow: none;
+        }
+      }
+
+      @media (max-width: 720px) {
+        body {
+          font-size: 15px;
+        }
+
+        .layout {
+          padding: 38px 0 108px;
+        }
+
+        .title {
+          font-size: 42px;
+          line-height: 1;
+        }
+
+        .subtitle {
+          font-size: 16px;
+        }
+
+        .markdown-body h1 {
+          font-size: 30px;
+        }
+
+        .markdown-body h2 {
+          font-size: 24px;
+        }
+
+        .heading-anchor {
+          position: static;
+          margin-right: 8px;
+          opacity: 1;
+        }
+
+        .side {
+          margin-bottom: 30px;
+        }
+
+        .side-stack {
+          gap: 0;
+        }
+
+        .desktop-outline {
+          display: none;
+        }
+
+        .mobile-outline-trigger {
+          position: fixed;
+          right: 16px;
+          bottom: 16px;
+          z-index: 35;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 42px;
+          padding: 0 16px;
+          border: 1px solid rgb(255 255 255 / 0.16);
+          border-radius: 999px;
+          background: rgb(12 12 12 / 0.88);
+          box-shadow: 0 12px 45px rgb(0 0 0 / 0.46);
+          color: #fff;
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 500;
+          backdrop-filter: blur(18px);
+        }
+
+        .drawer-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 38;
+          background: rgb(0 0 0 / 0.46);
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 180ms ease;
+        }
+
+        .outline-drawer {
+          position: fixed;
+          right: 10px;
+          bottom: 10px;
+          left: 10px;
+          z-index: 40;
+          display: block;
+          max-height: min(68vh, 420px);
+          overflow: auto;
+          border: 1px solid rgb(255 255 255 / 0.13);
+          border-radius: 8px;
+          background: rgb(10 10 10 / 0.96);
+          box-shadow: 0 26px 90px rgb(0 0 0 / 0.68);
+          opacity: 0;
+          pointer-events: none;
+          transform: translateY(18px);
+          transition:
+            opacity 180ms ease,
+            transform 180ms ease;
+          backdrop-filter: blur(20px);
+        }
+
+        .outline-drawer.open,
+        .drawer-backdrop.open {
+          opacity: 1;
+          pointer-events: auto;
+        }
+
+        .outline-drawer.open {
+          transform: translateY(0);
+        }
+
+        .drawer-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          padding: 16px;
+          border-bottom: 1px solid rgb(255 255 255 / 0.08);
+        }
+
+        .drawer-close {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 54px;
+          height: 30px;
+          padding: 0 10px;
+          border: 1px solid rgb(255 255 255 / 0.12);
+          border-radius: 6px;
+          background: rgb(255 255 255 / 0.035);
+          color: var(--muted);
+          cursor: pointer;
+          font-size: 12px;
+          line-height: 1;
+        }
+
+        .drawer-toc {
+          padding: 12px 16px 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <main class="layout">
+        <article class="reader">
+          <h1 class="title" id="doc-title">Untitled document</h1>
+          <p class="subtitle" id="doc-description"></p>
+          <section class="markdown-body" id="content" aria-label="Rendered markdown"></section>
+        </article>
+
+        <aside class="side" aria-label="Document metadata">
+          <div class="side-stack">
+            <details class="side-panel properties-panel" id="properties-panel" open>
+              <summary>
+                <h2 class="side-title">Properties</h2>
+              </summary>
+              <div class="meta-list" id="frontmatter"></div>
+            </details>
+            <section class="side-panel side-section desktop-outline">
+              <h2 class="side-title">Outline</h2>
+              <nav class="toc" id="toc"></nav>
+            </section>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <button class="mobile-outline-trigger" id="outline-trigger" type="button" aria-expanded="false" aria-controls="outline-drawer">
+      Outline
+    </button>
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
+    <aside class="outline-drawer" id="outline-drawer" aria-label="Document outline" aria-hidden="true">
+      <div class="drawer-head">
+        <h2 class="side-title">Outline</h2>
+        <button class="drawer-close" id="drawer-close" type="button">Close</button>
+      </div>
+      <nav class="toc drawer-toc" id="mobile-toc"></nav>
+    </aside>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.5/dist/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js"></script>
+
+    <script type="text/plain" id="sample-markdown">---
+title: Markdown Artifact Preview
+description: A dark, minimal renderer prototype for pagebin Markdown publishing.
+author: Codex
+status: prototype
+tags:
+  - pagebin
+  - markdown
+  - artifacts
+created: 2026-07-01
+review:
+  owner: docs
+  cadence: weekly
+---
+
+# Markdown Artifact Preview
+
+This document exercises the rendering surface that pagebin would need for agent-generated Markdown artifacts: GitHub flavored Markdown, syntax highlighted code, frontmatter, tables, task lists, and Mermaid diagrams.
+
+> **Note:** Frontmatter is parsed once, removed from the body, and rendered in a uniform metadata rail.
+
+## Rendering Contract
+
+- [x] GitHub flavored Markdown tables and task lists
+- [x] Syntax highlighted fenced code blocks
+- [x] Mermaid diagrams using the same dark theme
+- [x] YAML frontmatter rendered predictably
+- [ ] Integration with `pagebin publish`
+
+| Area | Behavior | Prototype state |
+| --- | --- | --- |
+| Frontmatter | Extract and render as metadata | Complete |
+| Code | Highlight known languages, escape unknown code | Complete |
+| Mermaid | Render `mermaid` fences as diagrams | Complete |
+| Export | Copy current rendered HTML | Basic |
+
+## Example Flow
+
+```mermaid
+flowchart LR
+  A[Markdown file] --> B[Parse frontmatter]
+  B --> C[Render GFM]
+  C --> D[Highlight code]
+  C --> E[Render Mermaid]
+  D --> F[Publishable HTML]
+  E --> F
+```
+
+## Code Block
+
+```ts
+interface PublishOptions {
+  ttl?: string;
+  sandbox: "strict" | "relaxed";
+  format: "html" | "markdown";
+}
+
+export function shouldRenderMarkdown(fileName: string): boolean {
+  return /\.md(?:own)?$/i.test(fileName);
+}
+```
+
+```nix
+let
+  markdownExtensions = [ ".md" ".markdown" ];
+in
+lib.any (ext: lib.hasSuffix ext fileName) markdownExtensions
+```
+
+## Details
+
+<details>
+<summary>Renderer notes</summary>
+
+Inline HTML survives sanitization when safe, while scripts and event handlers are removed. That keeps generated artifacts useful without making the published page an arbitrary script runner.
+
+</details>
+
+## Footnote Shape
+
+GitHub-style footnotes are common in generated reports.[^1]
+
+[^1]: This prototype keeps the default Markdown behavior for unsupported extensions, so integration can choose whether to add stricter parity.
+</script>
+
+    <script>
+      const els = {
+        content: document.querySelector("#content"),
+        description: document.querySelector("#doc-description"),
+        drawerBackdrop: document.querySelector("#drawer-backdrop"),
+        drawerClose: document.querySelector("#drawer-close"),
+        frontmatter: document.querySelector("#frontmatter"),
+        mobileToc: document.querySelector("#mobile-toc"),
+        outlineDrawer: document.querySelector("#outline-drawer"),
+        outlineTrigger: document.querySelector("#outline-trigger"),
+        propertiesPanel: document.querySelector("#properties-panel"),
+        title: document.querySelector("#doc-title"),
+        toast: document.querySelector("#toast"),
+        toc: document.querySelector("#toc"),
+      };
+      const mobileQuery = window.matchMedia("(max-width: 720px)");
+
+      const renderer = new marked.Renderer();
+
+      renderer.code = ({ text, lang }) => {
+        const language = (lang || "").trim().split(/\s+/)[0].toLowerCase();
+
+        if (language === "mermaid") {
+          return `<figure class="mermaid-wrap"><figcaption class="mermaid-label"><span>mermaid</span><div class="mermaid-controls" aria-label="Mermaid controls"><button class="mermaid-control" type="button" data-mermaid-action="zoom-out" aria-label="Zoom out">-</button><button class="mermaid-control reset" type="button" data-mermaid-action="reset" aria-label="Reset diagram view">100%</button><button class="mermaid-control" type="button" data-mermaid-action="zoom-in" aria-label="Zoom in">+</button></div></figcaption><div class="mermaid-viewport" data-mermaid-viewport><div class="mermaid">${escapeHtml(text)}</div></div></figure>`;
+        }
+
+        const highlighted =
+          language && hljs.getLanguage(language)
+            ? hljs.highlight(text, { language, ignoreIllegals: true }).value
+            : hljs.highlightAuto(text).value;
+        const label = language || "text";
+        const lineCount = Math.max(1, text.replace(/\n$/, "").split("\n").length);
+        const lineNumbers = Array.from({ length: lineCount }, (_, index) => String(index + 1)).join("\n");
+
+        return `<figure class="code-frame"><figcaption><span class="code-language">${escapeHtml(label)}</span><button class="code-copy" type="button" data-copy-code="true">Copy</button></figcaption><div class="code-scroll"><div class="code-grid"><pre class="line-numbers" aria-hidden="true">${escapeHtml(lineNumbers)}</pre><pre class="code-pre"><code class="hljs language-${escapeAttribute(label)}">${highlighted}</code></pre></div></div></figure>`;
+      };
+
+      marked.use({
+        renderer,
+        gfm: true,
+        breaks: false,
+      });
+
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: "base",
+        themeVariables: {
+          background: "#090909",
+          primaryColor: "#101010",
+          primaryTextColor: "#f7f7f7",
+          primaryBorderColor: "#3a3a3a",
+          lineColor: "#858585",
+          secondaryColor: "#151515",
+          tertiaryColor: "#050505",
+          clusterBkg: "#0d0d0d",
+          clusterBorder: "#303030",
+          edgeLabelBackground: "#101010",
+          fontFamily: "Geist, sans-serif",
+        },
+      });
+
+      function parseFrontmatter(raw) {
+        const normalized = raw.replace(/^\uFEFF/, "");
+        const match = normalized.match(/^---\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)\s*(?:\r?\n|$)/);
+
+        if (!match) {
+          return { attributes: {}, body: normalized };
+        }
+
+        try {
+          return {
+            attributes: jsyaml.load(match[1]) || {},
+            body: normalized.slice(match[0].length),
+          };
+        } catch (error) {
+          return {
+            attributes: {
+              frontmatter_error: error instanceof Error ? error.message : String(error),
+            },
+            body: normalized.slice(match[0].length),
+          };
+        }
+      }
+
+      function renderMarkdown(raw, sourceName = "sample-artifact.md") {
+        const { attributes, body } = parseFrontmatter(raw);
+        const unsafe = marked.parse(preprocessFootnotes(body));
+        const clean = DOMPurify.sanitize(unsafe, {
+          ADD_TAGS: ["iframe"],
+          ADD_ATTR: ["allow", "allowfullscreen", "frameborder", "loading", "referrerpolicy", "target"],
+        });
+
+        els.content.innerHTML = clean;
+        normalizeTaskLists();
+        decorateHeadings();
+        wrapTables();
+        renderDocumentChrome(attributes, body, sourceName);
+        renderFrontmatter(attributes);
+        renderToc();
+        renderMermaid();
+        syncResponsivePanels();
+      }
+
+      function renderDocumentChrome(attributes, body, sourceName) {
+        const title = getString(attributes.title) || findFirstHeading(body) || sourceName.replace(/\.[^.]+$/, "");
+        const description = getString(attributes.description) || getString(attributes.summary) || "";
+
+        els.title.textContent = title;
+        els.description.textContent = description;
+        els.description.hidden = !description;
+      }
+
+      function renderFrontmatter(attributes) {
+        els.frontmatter.replaceChildren();
+
+        if (!attributes || typeof attributes !== "object" || Array.isArray(attributes) || Object.keys(attributes).length === 0) {
+          els.frontmatter.append(makeEmpty("No properties found."));
+          return;
+        }
+
+        for (const [key, value] of Object.entries(attributes)) {
+          els.frontmatter.append(
+            value && typeof value === "object" && !(value instanceof Date) && !Array.isArray(value)
+              ? renderMetaSection(key, value)
+              : renderMetaItem(key, value),
+          );
+        }
+      }
+
+      function renderMetaItem(key, value) {
+        const item = document.createElement("div");
+        item.className = "meta-item";
+
+        const icon = document.createElement("div");
+        icon.className = getMetaIconClass(value);
+        icon.setAttribute("aria-hidden", "true");
+
+        const label = document.createElement("div");
+        label.className = "meta-key";
+        label.textContent = key;
+
+        const rendered = renderMetaValue(value);
+        item.append(icon, label, rendered);
+        return item;
+      }
+
+      function renderMetaSection(key, value) {
+        const section = document.createElement("section");
+        section.className = "meta-section";
+
+        const title = document.createElement("div");
+        title.className = "meta-section-title";
+
+        const icon = document.createElement("div");
+        icon.className = "meta-icon object";
+        icon.setAttribute("aria-hidden", "true");
+
+        const label = document.createElement("div");
+        label.textContent = key;
+        title.append(icon, label);
+
+        const body = document.createElement("div");
+        body.className = "meta-section-body";
+
+        for (const [nestedKey, nestedValue] of Object.entries(value)) {
+          body.append(
+            nestedValue && typeof nestedValue === "object" && !(nestedValue instanceof Date) && !Array.isArray(nestedValue)
+              ? renderMetaSection(nestedKey, nestedValue)
+              : renderMetaItem(nestedKey, nestedValue),
+          );
+        }
+
+        section.append(title, body);
+        return section;
+      }
+
+      function renderMetaValue(value) {
+        if (value instanceof Date) {
+          const primitive = document.createElement("div");
+          primitive.className = "meta-value";
+          primitive.textContent = formatMetaPrimitive(value);
+          return primitive;
+        }
+
+        if (Array.isArray(value)) {
+          const wrapper = document.createElement("ul");
+          wrapper.className = "meta-value meta-array";
+
+          for (const entry of value) {
+            const item = document.createElement("li");
+            item.className = "meta-token";
+
+            if (entry && typeof entry === "object") {
+              item.append(renderMetaValue(entry));
+            } else {
+              item.textContent = formatMetaPrimitive(entry);
+            }
+
+            wrapper.append(item);
+          }
+
+          return wrapper;
+        }
+
+        if (value && typeof value === "object") {
+          const wrapper = document.createElement("div");
+          wrapper.className = "meta-value";
+
+          for (const [nestedKey, nestedValue] of Object.entries(value)) {
+            wrapper.append(renderMetaSection(nestedKey, nestedValue));
+          }
+
+          return wrapper;
+        }
+
+        const primitive = document.createElement("div");
+        primitive.className = "meta-value";
+        primitive.textContent = formatMetaPrimitive(value);
+        return primitive;
+      }
+
+      function getMetaIconClass(value) {
+        if (Array.isArray(value)) {
+          return "meta-icon array";
+        }
+
+        if (value && typeof value === "object" && !(value instanceof Date)) {
+          return "meta-icon object";
+        }
+
+        return "meta-icon";
+      }
+
+      function preprocessFootnotes(markdown) {
+        const lines = markdown.split(/\r?\n/);
+        const body = [];
+        const definitions = new Map();
+
+        for (let index = 0; index < lines.length; index += 1) {
+          const match = lines[index].match(/^\[\^([^\]]+)\]:\s*(.*)$/);
+
+          if (!match) {
+            body.push(lines[index]);
+            continue;
+          }
+
+          const [, id, firstLine] = match;
+          const content = [firstLine];
+
+          for (index += 1; index < lines.length; index += 1) {
+            const line = lines[index];
+
+            if (line.trim() === "") {
+              content.push("");
+              continue;
+            }
+
+            if (/^(?: {2,}|\t)/.test(line)) {
+              content.push(line.replace(/^(?: {2,4}|\t)/, ""));
+              continue;
+            }
+
+            index -= 1;
+            break;
+          }
+
+          definitions.set(id, content.join("\n").trim());
+        }
+
+        const used = [];
+        const rewritten = body.join("\n").replace(/\[\^([^\]]+)\]/g, (match, id) => {
+          if (!definitions.has(id)) {
+            return match;
+          }
+
+          let index = used.findIndex((entry) => entry.id === id);
+
+          if (index === -1) {
+            used.push({ id, content: definitions.get(id) });
+            index = used.length - 1;
+          }
+
+          const number = index + 1;
+          const safeId = slugify(`fn-${id}`);
+          return `<sup id="${safeId}-ref"><a href="#${safeId}" aria-label="Footnote ${number}">${number}</a></sup>`;
+        });
+
+        if (used.length === 0) {
+          return rewritten;
+        }
+
+        const items = used
+          .map(({ id, content }, index) => {
+            const number = index + 1;
+            const safeId = slugify(`fn-${id}`);
+            const rendered = marked.parseInline(content || "");
+            return `<li id="${safeId}">${rendered} <a class="footnote-backref" href="#${safeId}-ref" aria-label="Back to reference ${number}">back</a></li>`;
+          })
+          .join("");
+
+        return `${rewritten}
+
+<section class="footnotes" aria-labelledby="footnotes-label">
+<h2 id="footnotes-label">Footnotes</h2>
+<ol>
+${items}
+</ol>
+</section>`;
+      }
+
+      function renderToc() {
+        els.toc.replaceChildren();
+        els.mobileToc.replaceChildren();
+        const headings = [...els.content.querySelectorAll("h2, h3, h4, h5, h6")];
+
+        if (headings.length === 0) {
+          els.toc.append(makeEmpty("No sections found."));
+          els.mobileToc.append(makeEmpty("No sections found."));
+          return;
+        }
+
+        for (const heading of headings) {
+          const link = document.createElement("a");
+          link.href = `#${heading.id}`;
+          link.className = `depth-${heading.tagName.slice(1)}`;
+          link.textContent = heading.textContent.replace(/^#\s*/, "");
+
+          const mobileLink = link.cloneNode(true);
+          mobileLink.addEventListener("click", closeOutlineDrawer);
+          els.toc.append(link);
+          els.mobileToc.append(mobileLink);
+        }
+      }
+
+      function renderMermaid() {
+        const nodes = [...els.content.querySelectorAll(".mermaid")];
+
+        if (nodes.length === 0) {
+          return;
+        }
+
+        mermaid
+          .run({ nodes })
+          .then(() => setupMermaidViewports())
+          .catch(() => showToast("Mermaid render failed."));
+      }
+
+      function setupMermaidViewports() {
+        for (const viewport of els.content.querySelectorAll("[data-mermaid-viewport]")) {
+          if (viewport.dataset.ready === "true") {
+            continue;
+          }
+
+          const canvas = viewport.querySelector(".mermaid");
+
+          if (!canvas) {
+            continue;
+          }
+
+          const figure = viewport.closest(".mermaid-wrap");
+          const state = { scale: 1, x: 0, y: 0 };
+          viewport.dataset.ready = "true";
+
+          const apply = () => {
+            canvas.style.transform = `translate(${state.x}px, ${state.y}px) scale(${state.scale})`;
+          };
+
+          const zoomAt = (nextScale, clientX, clientY) => {
+            const rect = viewport.getBoundingClientRect();
+            const pointX = clientX - rect.left;
+            const pointY = clientY - rect.top;
+            const previousScale = state.scale;
+            state.scale = clamp(nextScale, 0.35, 4);
+            state.x = pointX - ((pointX - state.x) / previousScale) * state.scale;
+            state.y = pointY - ((pointY - state.y) / previousScale) * state.scale;
+            apply();
+          };
+
+          for (const control of figure.querySelectorAll("[data-mermaid-action]")) {
+            control.addEventListener("click", () => {
+              const rect = viewport.getBoundingClientRect();
+              const centerX = rect.left + rect.width / 2;
+              const centerY = rect.top + rect.height / 2;
+              const action = control.dataset.mermaidAction;
+
+              if (action === "zoom-in") {
+                zoomAt(state.scale * 1.18, centerX, centerY);
+              } else if (action === "zoom-out") {
+                zoomAt(state.scale / 1.18, centerX, centerY);
+              } else {
+                state.scale = 1;
+                state.x = 0;
+                state.y = 0;
+                apply();
+              }
+            });
+          }
+
+          viewport.addEventListener(
+            "wheel",
+            (event) => {
+              event.preventDefault();
+              const delta = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+              zoomAt(state.scale * delta, event.clientX, event.clientY);
+            },
+            { passive: false },
+          );
+
+          viewport.addEventListener("pointerdown", (event) => {
+            if (event.button !== 0) {
+              return;
+            }
+
+            const start = {
+              pointerId: event.pointerId,
+              x: event.clientX,
+              y: event.clientY,
+              originX: state.x,
+              originY: state.y,
+            };
+
+            viewport.classList.add("dragging");
+            viewport.setPointerCapture(event.pointerId);
+
+            const move = (moveEvent) => {
+              if (moveEvent.pointerId !== start.pointerId) {
+                return;
+              }
+
+              state.x = start.originX + moveEvent.clientX - start.x;
+              state.y = start.originY + moveEvent.clientY - start.y;
+              apply();
+            };
+
+            const stop = (upEvent) => {
+              if (upEvent.pointerId !== start.pointerId) {
+                return;
+              }
+
+              viewport.classList.remove("dragging");
+              viewport.releasePointerCapture(start.pointerId);
+              viewport.removeEventListener("pointermove", move);
+              viewport.removeEventListener("pointerup", stop);
+              viewport.removeEventListener("pointercancel", stop);
+            };
+
+            viewport.addEventListener("pointermove", move);
+            viewport.addEventListener("pointerup", stop);
+            viewport.addEventListener("pointercancel", stop);
+          });
+
+          apply();
+        }
+      }
+
+      function normalizeTaskLists() {
+        const items = [...els.content.querySelectorAll("li")];
+
+        for (const item of items) {
+          const input = item.querySelector(':scope > input[type="checkbox"]');
+
+          if (input) {
+            item.classList.add("task-list-item");
+            input.disabled = true;
+          }
+        }
+      }
+
+      function wrapTables() {
+        for (const table of els.content.querySelectorAll("table")) {
+          if (table.closest(".table-frame")) {
+            continue;
+          }
+
+          const frame = document.createElement("div");
+          frame.className = "table-frame";
+
+          const scroll = document.createElement("div");
+          scroll.className = "table-scroll";
+
+          table.replaceWith(frame);
+          scroll.append(table);
+          frame.append(scroll);
+        }
+      }
+
+      function decorateHeadings() {
+        const counts = new Map();
+        const headings = [...els.content.querySelectorAll("h1, h2, h3, h4, h5, h6")];
+
+        for (const heading of headings) {
+          const base = slugify(heading.textContent || "section");
+          const count = counts.get(base) || 0;
+          counts.set(base, count + 1);
+          heading.id = count ? `${base}-${count + 1}` : base;
+
+          const anchor = document.createElement("a");
+          anchor.className = "heading-anchor";
+          anchor.href = `#${heading.id}`;
+          anchor.setAttribute("aria-label", `Link to ${heading.textContent}`);
+          anchor.textContent = "#";
+          heading.prepend(anchor);
+        }
+      }
+
+      async function copyText(text) {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          return;
+        }
+
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.setAttribute("readonly", "");
+        textArea.style.position = "fixed";
+        textArea.style.opacity = "0";
+        document.body.append(textArea);
+        textArea.select();
+        document.execCommand("copy");
+        textArea.remove();
+      }
+
+      function findFirstHeading(markdown) {
+        const match = markdown.match(/^#\s+(.+)$/m);
+        return match ? match[1].trim() : "";
+      }
+
+      function formatMetaPrimitive(value) {
+        if (value instanceof Date) {
+          return value.toISOString().slice(0, 10);
+        }
+
+        if (value === null) {
+          return "null";
+        }
+
+        if (value === undefined) {
+          return "";
+        }
+
+        return String(value);
+      }
+
+      function getString(value) {
+        return typeof value === "string" ? value.trim() : "";
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(Math.max(value, min), max);
+      }
+
+      function makeEmpty(text) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = text;
+        return empty;
+      }
+
+      function slugify(value) {
+        return value
+          .toLowerCase()
+          .trim()
+          .replace(/[#]/g, "")
+          .replace(/[^a-z0-9\s-]/g, "")
+          .replace(/\s+/g, "-")
+          .replace(/-+/g, "-")
+          .replace(/^-|-$/g, "") || "section";
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
+
+      function escapeAttribute(value) {
+        return String(value).replace(/[^a-z0-9_-]/gi, "-");
+      }
+
+      function showToast(message) {
+        els.toast.textContent = message;
+        els.toast.classList.add("show");
+        window.clearTimeout(showToast.timeout);
+        showToast.timeout = window.setTimeout(() => els.toast.classList.remove("show"), 2200);
+      }
+
+      function syncResponsivePanels() {
+        els.propertiesPanel.open = !mobileQuery.matches;
+      }
+
+      function openOutlineDrawer() {
+        els.outlineDrawer.classList.add("open");
+        els.drawerBackdrop.classList.add("open");
+        els.outlineDrawer.setAttribute("aria-hidden", "false");
+        els.outlineTrigger.setAttribute("aria-expanded", "true");
+        els.drawerClose.focus();
+      }
+
+      function closeOutlineDrawer() {
+        els.outlineDrawer.classList.remove("open");
+        els.drawerBackdrop.classList.remove("open");
+        els.outlineDrawer.setAttribute("aria-hidden", "true");
+        els.outlineTrigger.setAttribute("aria-expanded", "false");
+      }
+
+      els.outlineTrigger.addEventListener("click", openOutlineDrawer);
+      els.drawerClose.addEventListener("click", closeOutlineDrawer);
+      els.drawerBackdrop.addEventListener("click", closeOutlineDrawer);
+      mobileQuery.addEventListener("change", syncResponsivePanels);
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          closeOutlineDrawer();
+        }
+      });
+      els.content.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+        const button = target?.closest("[data-copy-code]");
+
+        if (!button) {
+          return;
+        }
+
+        const code = button.closest(".code-frame")?.querySelector("code");
+
+        if (!code) {
+          return;
+        }
+
+        copyText(code.textContent || "")
+          .then(() => {
+            button.textContent = "Copied";
+            window.setTimeout(() => {
+              button.textContent = "Copy";
+            }, 1200);
+          })
+          .catch((error) => showToast(error instanceof Error ? error.message : "Copy failed."));
+      });
+
+      renderMarkdown(document.querySelector("#sample-markdown").textContent.trim(), "sample-artifact.md");
+    </script>
+  </body>
+</html>

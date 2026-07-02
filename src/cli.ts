@@ -5,6 +5,7 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
 
 import packageJson from "../package.json" with { type: "json" };
+import { renderMarkdownDocument } from "./markdown-template.ts";
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SANDBOX = "standard";
@@ -13,6 +14,8 @@ const VERSION = packageJson.version;
 const ARTIFACT_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
+const HTML_EXTENSION = ".html";
+const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
 
 interface PublishResponse {
   id: string;
@@ -102,6 +105,7 @@ interface ParsedCommand {
 }
 
 type SandboxMode = "standard" | "strict";
+type UploadSourceKind = "html" | "markdown";
 
 class CliError extends Error {
   constructor(
@@ -314,7 +318,7 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
   }
 
   if (!filePath) {
-    throw new CliError("publish requires a .html file path.");
+    throw new CliError("publish requires a .html, .md, or .markdown file path.");
   }
 
   return {
@@ -449,7 +453,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
   }
 
   if (!filePath) {
-    throw new CliError("update requires a .html file path.");
+    throw new CliError("update requires a .html, .md, or .markdown file path.");
   }
 
   const target = parseArtifactTarget(targetValue);
@@ -560,8 +564,10 @@ function requireValue(value: string | undefined, flag: string): string {
 }
 
 async function publishArtifact(options: PublishOptions): Promise<void> {
+  assertSandboxSupportsFile(options.filePath, options.sandbox);
+
   const token = readPublishToken();
-  const form = await createHtmlUploadForm(options.filePath);
+  const { form } = await createHtmlUploadForm(options.filePath);
 
   form.set("sandbox", options.sandbox);
 
@@ -589,15 +595,17 @@ async function publishArtifact(options: PublishOptions): Promise<void> {
 
 async function updateArtifact(options: UpdateOptions): Promise<UpdateResponse> {
   const token = readPublishToken();
-  const form = await createHtmlUploadForm(options.filePath);
+  const upload = await createHtmlUploadForm(options.filePath);
   const response = await fetch(`${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}/content`, {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${token}`,
     },
-    body: form,
+    body: upload.form,
   });
   const payload = await readJsonResponse<UpdateResponse>(response);
+
+  warnIfStrictMarkdownUpdate(upload.sourceKind, payload.sandbox);
 
   if (options.json) {
     console.log(JSON.stringify({ ...payload, url: options.url }, null, 2));
@@ -609,13 +617,12 @@ async function updateArtifact(options: UpdateOptions): Promise<UpdateResponse> {
 }
 
 async function watchArtifact(options: WatchOptions): Promise<void> {
-  await updateArtifact(options);
   const watchedFile = resolve(options.filePath);
   const watchedDirectory = dirname(watchedFile);
   const watchedBasename = basename(watchedFile);
 
   let timeout: ReturnType<typeof setTimeout> | null = null;
-  let running = false;
+  let running = true;
   let pending = false;
 
   const runUpdate = (): void => {
@@ -653,6 +660,20 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
 
   console.error(`Watching ${options.filePath}; press Ctrl-C to stop.`);
 
+  try {
+    await updateArtifact(options);
+  } catch (error) {
+    watcher.close();
+    throw error;
+  }
+
+  running = false;
+
+  if (pending) {
+    pending = false;
+    runUpdate();
+  }
+
   await new Promise<void>((resolve) => {
     const stop = (): void => {
       watcher.close();
@@ -664,15 +685,34 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
   });
 }
 
-async function createHtmlUploadForm(filePath: string): Promise<FormData> {
+async function createHtmlUploadForm(filePath: string): Promise<{ form: FormData; sourceKind: UploadSourceKind }> {
+  const upload = await readUploadFile(filePath);
+  const form = new FormData();
+
+  form.set("file", new Blob([upload.bytes], { type: "text/html; charset=utf-8" }), upload.uploadFilename);
+  form.set("filename", upload.displayFilename);
+
+  return { form, sourceKind: upload.sourceKind };
+}
+
+interface HtmlUpload {
+  bytes: Uint8Array;
+  displayFilename: string;
+  sourceKind: UploadSourceKind;
+  uploadFilename: string;
+}
+
+async function readUploadFile(filePath: string): Promise<HtmlUpload> {
   const fileInfo = await stat(filePath);
 
   if (!fileInfo.isFile()) {
     throw new CliError(`${filePath} is not a file.`);
   }
 
-  if (extname(filePath).toLowerCase() !== ".html") {
-    throw new CliError("pagebin only accepts .html files.");
+  const extension = extname(filePath).toLowerCase();
+
+  if (extension !== HTML_EXTENSION && !MARKDOWN_EXTENSIONS.has(extension)) {
+    throw new CliError("pagebin only accepts .html, .md, or .markdown files.");
   }
 
   if (fileInfo.size > DEFAULT_MAX_BYTES) {
@@ -680,11 +720,54 @@ async function createHtmlUploadForm(filePath: string): Promise<FormData> {
   }
 
   const bytes = await readFile(filePath);
-  const form = new FormData();
 
-  form.set("file", new Blob([bytes], { type: "text/html; charset=utf-8" }), basename(filePath));
+  if (extension === HTML_EXTENSION) {
+    return {
+      bytes,
+      displayFilename: basename(filePath),
+      sourceKind: "html",
+      uploadFilename: basename(filePath),
+    };
+  }
 
-  return form;
+  const markdown = decodeUtf8(bytes, "Markdown files must be valid UTF-8 text.");
+  const html = renderMarkdownDocument(markdown, basename(filePath));
+  const htmlBytes = new TextEncoder().encode(html);
+
+  if (htmlBytes.byteLength > DEFAULT_MAX_BYTES) {
+    throw new CliError("Rendered Markdown HTML is larger than the 10 MB upload limit.");
+  }
+
+  return {
+    bytes: htmlBytes,
+    displayFilename: basename(filePath),
+    sourceKind: "markdown",
+    uploadFilename: `${basename(filePath, extension)}.html`,
+  };
+}
+
+function assertSandboxSupportsFile(filePath: string, sandbox: SandboxMode): void {
+  if (sandbox === "strict" && isMarkdownFile(filePath)) {
+    throw new CliError("Markdown rendering requires --sandbox standard because it uses client-side scripts.");
+  }
+}
+
+function warnIfStrictMarkdownUpdate(sourceKind: UploadSourceKind, sandbox: SandboxMode): void {
+  if (sourceKind === "markdown" && sandbox === "strict") {
+    console.error("Warning: this Markdown upload was applied to a strict-sandbox artifact, so scripts will not run in the viewer.");
+  }
+}
+
+function isMarkdownFile(filePath: string): boolean {
+  return MARKDOWN_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
+function decodeUtf8(bytes: Uint8Array, errorMessage: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    throw new CliError(errorMessage);
+  }
 }
 
 async function deleteArtifact(options: DeleteOptions): Promise<void> {
@@ -873,28 +956,28 @@ function isArtifactId(value: string): boolean {
 function helpText(): string {
   return `pagebin
 
-Securely publish local .html artifacts to a Cloudflare Worker/R2 backend and print a protected, unlisted viewer URL.
-Use it for temporary agent-generated HTML reports, plans, visual explanations, and previews.
+Securely publish local .html and Markdown artifacts to a Cloudflare Worker/R2 backend and print a protected, unlisted viewer URL.
+Use it for temporary agent-generated reports, plans, visual explanations, and previews.
 
 Usage:
-  pagebin publish <file.html> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
+  pagebin publish <file.html|file.md> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
   pagebin list [--json] [--endpoint URL]
   pagebin reissue <artifact_id> [--json] [--endpoint URL]
-  pagebin update <artifact_id|viewer_url> <file.html> [--json] [--endpoint URL]
-  pagebin watch <artifact_id|viewer_url> <file.html> [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> <file.html|file.md> [--json] [--endpoint URL]
+  pagebin watch <artifact_id|viewer_url> <file.html|file.md> [--endpoint URL]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
   pagebin version
 
 Behavior:
-  publish              Uploads one .html file and prints only the viewer URL by default.
+  publish              Uploads one .html file, or renders one Markdown file to HTML first.
   --json               Prints id, url, expiresAt, and sandbox as JSON.
   --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
   --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
-  --sandbox strict     Disables iframe sandbox permissions.
+  --sandbox strict     Disables iframe sandbox permissions; Markdown requires standard.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.
-  update               Replaces an artifact's HTML while preserving existing viewer URLs.
-  watch                Updates an artifact whenever the local HTML file changes.
+  update               Replaces an artifact's content while preserving existing viewer URLs.
+  watch                Updates an artifact whenever the local file changes.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
 
 Environment:

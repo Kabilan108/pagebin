@@ -227,6 +227,72 @@ describe("worker", () => {
     expect(JSON.stringify(payload)).not.toContain(token ?? "");
   });
 
+  test("uses the display filename multipart field for stored metadata", async () => {
+    const env = createEnv();
+    const multipart = createMultipartBody({
+      fields: {
+        filename: "agent-report.md",
+        sandbox: "standard",
+      },
+      file: {
+        contents: "<!doctype html><h1>rendered markdown</h1>",
+        filename: "agent-report.html",
+      },
+    });
+    const publishResponse = await worker.fetch(
+      new Request("https://pagebin.test/api/publish", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer publish-secret",
+          "Content-Length": String(multipart.byteLength),
+          "Content-Type": `multipart/form-data; boundary=${multipart.boundary}`,
+        },
+        body: multipart.body,
+      }),
+      env as never,
+    );
+    const listResponse = await worker.fetch(
+      new Request("https://pagebin.test/api/artifacts", {
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+    const payload = (await listResponse.json()) as {
+      artifacts: Array<{ filename: string }>;
+    };
+
+    expect(publishResponse.status).toBe(201);
+    expect(payload.artifacts[0]?.filename).toBe("agent-report.md");
+  });
+
+  test("uses the display filename multipart field when updating metadata", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const updateResponse = await updateFixtureResponse(
+      env,
+      published.id,
+      {
+        contents: "<!doctype html><h1>rendered markdown update</h1>",
+        filename: "agent-report.html",
+      },
+      { filename: "agent-report.md" },
+    );
+    const updatePayload = (await updateResponse.json()) as { filename: string };
+    const listResponse = await worker.fetch(
+      new Request("https://pagebin.test/api/artifacts", {
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+    const listPayload = (await listResponse.json()) as {
+      artifacts: Array<{ filename: string }>;
+    };
+
+    expect(updateResponse.status).toBe(200);
+    expect(updatePayload.filename).toBe("agent-report.md");
+    expect(listPayload.artifacts[0]?.filename).toBe("agent-report.md");
+  });
+
   test("requires publisher authorization to list artifacts", async () => {
     const env = createEnv();
     const response = await worker.fetch(new Request("https://pagebin.test/api/artifacts"), env as never);
@@ -405,6 +471,37 @@ describe("worker", () => {
     expect(invalidTtlResponse.status).toBe(400);
   });
 
+  test("rejects direct markdown uploads at the worker boundary", async () => {
+    const env = createEnv();
+    const publishMultipart = createMultipartBody({
+      fields: { sandbox: "standard" },
+      file: {
+        contents: "# Not pre-rendered",
+        filename: "agent-report.md",
+      },
+    });
+    const publishResponse = await worker.fetch(
+      new Request("https://pagebin.test/api/publish", {
+        body: publishMultipart.body,
+        headers: {
+          Authorization: "Bearer publish-secret",
+          "Content-Length": String(publishMultipart.byteLength),
+          "Content-Type": `multipart/form-data; boundary=${publishMultipart.boundary}`,
+        },
+        method: "POST",
+      }),
+      env as never,
+    );
+    const published = await publishFixture(env);
+    const updateResponse = await updateFixtureResponse(env, published.id, {
+      contents: "# Not pre-rendered",
+      filename: "agent-report.md",
+    });
+
+    expect(publishResponse.status).toBe(400);
+    expect(updateResponse.status).toBe(400);
+  });
+
   test("rejects publish requests without a bounded content length", async () => {
     const env = createEnv();
     const request = new Request("https://pagebin.test/api/publish", {
@@ -551,9 +648,10 @@ async function updateFixtureResponse(
   env: TestEnv,
   id: string,
   file: { contents: string; filename: string },
+  fields: Record<string, string> = {},
 ): Promise<Response> {
   const multipart = createMultipartBody({
-    fields: {},
+    fields,
     file,
   });
 

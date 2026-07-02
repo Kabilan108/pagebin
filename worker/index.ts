@@ -164,7 +164,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
     parsedOptions.ttlSeconds === null ? null : new Date(now.getTime() + parsedOptions.ttlSeconds * 1000).toISOString();
   const metadata: ArtifactMetadata = {
     id,
-    filename: upload.file.name,
+    filename: upload.displayFilename,
     tokenHash,
     createdAt: nowIso,
     updatedAt: nowIso,
@@ -232,7 +232,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   const updatedAt = new Date().toISOString();
   const nextMetadata: ArtifactMetadata = {
     ...metadata,
-    filename: upload.file.name,
+    filename: upload.displayFilename,
     updatedAt,
     size: upload.file.size,
   };
@@ -552,7 +552,7 @@ async function isAuthorized(request: Request, env: Env): Promise<boolean> {
 async function readHtmlUpload(
   request: Request,
   env: Env,
-): Promise<{ file: UploadedFile; form: FormData; html: string } | { error: string; status: 400 | 413 | 415 }> {
+): Promise<{ displayFilename: string; file: UploadedFile; form: FormData; html: string } | { error: string; status: 400 | 413 | 415 }> {
   const maxBytes = readMaxBytes(env);
   const contentLength = readContentLength(request);
 
@@ -602,6 +602,7 @@ async function readHtmlUpload(
   }
 
   return {
+    displayFilename: readDisplayFilename(formResult.form, file.name),
     file,
     form: formResult.form,
     html,
@@ -643,6 +644,26 @@ function parsePublishOptions(form: FormData): { ttlSeconds: number | null; sandb
       error: error instanceof Error ? error.message : "Invalid publish options.",
     };
   }
+}
+
+function readDisplayFilename(form: FormData, fallback: string): string {
+  const value = form.get("filename");
+
+  if (typeof value !== "string") {
+    return normalizeDisplayFilename(fallback);
+  }
+
+  return normalizeDisplayFilename(value) || normalizeDisplayFilename(fallback);
+}
+
+function normalizeDisplayFilename(value: string): string {
+  const normalized = value.trim().replaceAll("\0", "").replaceAll("\\", "/");
+  const filename = normalized
+    .split("/")
+    .filter((part) => part.length > 0)
+    .at(-1);
+
+  return filename?.slice(0, 255) ?? "";
 }
 
 function parseOptionalPositiveInt(value: unknown): number | null {

@@ -463,19 +463,41 @@ iframe{display:block;width:100%;height:100%;border:0}
 <iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 <script>
 const pagebinFrame = document.getElementById("pagebin-frame");
+const pagebinMinDelayMs = 2000;
+const pagebinMaxDelayMs = 60000;
 let pagebinVersion = ${JSON.stringify(version)};
+let pagebinDelayMs = pagebinMinDelayMs;
+let pagebinTimer = null;
+function pagebinSchedule() {
+  clearTimeout(pagebinTimer);
+  if (!document.hidden) {
+    pagebinTimer = setTimeout(pagebinPoll, pagebinDelayMs);
+  }
+}
 async function pagebinPoll() {
+  let changed = false;
   try {
     const response = await fetch(${JSON.stringify(versionPath)}, { cache: "no-store" });
-    if (!response.ok) return;
-    const payload = await response.json();
-    if (payload.updatedAt && payload.updatedAt !== pagebinVersion) {
-      pagebinVersion = payload.updatedAt;
-      pagebinFrame.src = ${JSON.stringify(rawPath)} + "?v=" + encodeURIComponent(pagebinVersion);
+    if (response.ok) {
+      const payload = await response.json();
+      if (payload.updatedAt && payload.updatedAt !== pagebinVersion) {
+        pagebinVersion = payload.updatedAt;
+        pagebinFrame.src = ${JSON.stringify(rawPath)} + "?v=" + encodeURIComponent(pagebinVersion);
+        changed = true;
+      }
     }
   } catch {}
+  pagebinDelayMs = changed ? pagebinMinDelayMs : Math.min(pagebinDelayMs * 1.5, pagebinMaxDelayMs);
+  pagebinSchedule();
 }
-setInterval(pagebinPoll, 1000);
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(pagebinTimer);
+  if (!document.hidden) {
+    pagebinDelayMs = pagebinMinDelayMs;
+    pagebinPoll();
+  }
+});
+pagebinSchedule();
 </script>
 </body>
 </html>`;

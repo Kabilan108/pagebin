@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 - 2026-07-07
+
+- Changed viewer auto-reload polling to pause while the tab is hidden and back off from 2s to 60s while content is unchanged, instead of polling every second forever. Polling resets to 2s when the tab becomes visible or an update is detected. This cuts worker invocations from an abandoned viewer tab by ~98%.
+- Fixed the weekly cleanup cron schedule to use `SUN` instead of `0` for the day of week, which Cloudflare's cron validation rejects.
+
 ## 0.6.0 - 2026-07-07
 
 - Added `pagebin watch <file.html|file.md|file.markdown>` to publish a file, print the new viewer URL, and keep updating that artifact when the file changes.

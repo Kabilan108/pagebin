@@ -84,7 +84,9 @@ describe("worker", () => {
     expect(viewerResponse.status).toBe(200);
     expect(viewerHtml).toContain('sandbox="allow-scripts allow-forms allow-popups allow-downloads"');
     expect(viewerHtml).toContain("/version/");
-    expect(viewerHtml).toContain("setInterval(pagebinPoll, 1000)");
+    expect(viewerHtml).not.toContain("setInterval(");
+    expect(viewerHtml).toContain("setTimeout(pagebinPoll, pagebinDelayMs)");
+    expect(viewerHtml).toContain('document.addEventListener("visibilitychange"');
     expect(viewerResponse.headers.get("X-Robots-Tag")).toBe("noindex, nofollow, noarchive");
 
     const rawUrl = published.url.replace("/p/", "/raw/");

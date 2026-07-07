@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 - 2026-07-07
+
+- Added `pagebin watch <file.html|file.md|file.markdown>` to publish a file, print the new viewer URL, and keep updating that artifact when the file changes.
+- Fixed `pagebin watch` validation so watch-specific argument errors no longer mention `update`.
+- Added `-h` and `--help` support for every subcommand.
+
 ## 0.5.0 - 2026-07-02
 
 - Added Markdown publishing support for `.md` and `.markdown` files. The CLI renders Markdown to a dark HTML document before upload, with YAML frontmatter properties, GitHub-flavored Markdown, syntax-highlighted code blocks, and Mermaid diagrams. Markdown publishing uses the standard sandbox because the generated page needs scripts for rendering and interaction.

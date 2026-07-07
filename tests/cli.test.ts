@@ -147,9 +147,84 @@ describe("parseArgs", () => {
         filePath: "plan.html",
         id: "abc1234567890123",
         json: false,
+        mode: "update",
         url: "https://pagebin.test/p/abc1234567890123/view-token",
       },
     });
+  });
+
+  test("parses watch with a file path as publish-then-watch", () => {
+    expect(parseArgs(["watch", "plan.md"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+      command: "watch",
+      options: {
+        endpoint: "https://example.com",
+        filePath: "plan.md",
+        json: false,
+        mode: "publish",
+        sandbox: "standard",
+        ttlSeconds: null,
+      },
+    });
+  });
+
+  test("parses watch publish options", () => {
+    expect(
+      parseArgs(["watch", "plan.html", "--ttl", "7d", "--sandbox", "strict"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
+      command: "watch",
+      options: {
+        endpoint: "https://example.com",
+        filePath: "plan.html",
+        json: false,
+        mode: "publish",
+        sandbox: "strict",
+        ttlSeconds: 604800,
+      },
+    });
+  });
+
+  test("parses watch for markdown extension variants", () => {
+    expect(parseArgs(["watch", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }).options).toMatchObject({
+      filePath: "plan.html",
+      mode: "publish",
+    });
+    expect(parseArgs(["watch", "plan.markdown"], { PAGEBIN_ENDPOINT: "https://example.com" }).options).toMatchObject({
+      filePath: "plan.markdown",
+      mode: "publish",
+    });
+  });
+
+  test("rejects update-only options on watch with an artifact target", () => {
+    expect(() => parseArgs(["watch", "abc1234567890123", "plan.html", "--ttl", "7d"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
+      "--ttl can only be used with pagebin watch <file>.",
+    );
+    expect(() => parseArgs(["watch", "abc1234567890123", "plan.html", "--sandbox", "strict"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
+      "--sandbox can only be used with pagebin watch <file>.",
+    );
+  });
+
+  test("rejects json for watch", () => {
+    expect(() => parseArgs(["watch", "plan.html", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
+      "watch does not support --json because it is a long-running command.",
+    );
+  });
+
+  test("reports watch errors for missing file path after artifact target", () => {
+    expect(() => parseArgs(["watch", "abc1234567890123"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
+      "watch with an artifact target also requires a .html, .md, or .markdown file path.",
+    );
+  });
+
+  test("parses subcommand help without endpoint configuration", () => {
+    const commands = ["publish", "list", "reissue", "update", "watch", "delete", "version"] as const;
+
+    for (const command of commands) {
+      expect(parseArgs([command, "--help"], {})).toEqual({ command: "help", options: { topic: command } });
+      expect(parseArgs([command, "-h"], {})).toEqual({ command: "help", options: { topic: command } });
+      expect(parseArgs(["help", command], {})).toEqual({ command: "help", options: { topic: command } });
+    }
   });
 });
 
@@ -160,6 +235,20 @@ describe("normalizeEndpoint", () => {
 
   test("requires https for non-local endpoints", () => {
     expect(() => normalizeEndpoint("http://example.com")).toThrow();
+  });
+});
+
+describe("help command", () => {
+  test("prints subcommand help without endpoint configuration", async () => {
+    const commands = ["publish", "list", "reissue", "update", "watch", "delete", "version"];
+
+    for (const command of commands) {
+      const result = await runPagebin([command, "--help"], {});
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain(`pagebin ${command}`);
+    }
   });
 });
 
@@ -766,6 +855,181 @@ describe("update command", () => {
 });
 
 describe("watch command", () => {
+  test("publishes markdown before watching a file path", async () => {
+    const filePath = await writeTempFile("cli-watch.md", "# First\n");
+    const uploads: string[] = [];
+    let resolveUpdateUpload: (() => void) | null = null;
+    const updateUpload = new Promise<void>((resolve) => {
+      resolveUpdateUpload = resolve;
+    });
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(file).toBeInstanceOf(File);
+
+        const html = await (file as File).text();
+        uploads.push(html);
+
+        if (request.method === "POST") {
+          const origin = new URL(request.url).origin;
+
+          expect(new URL(request.url).pathname).toBe("/api/publish");
+          expect(form.get("sandbox")).toBe("standard");
+          expect(form.get("ttlSeconds")).toBeNull();
+          expect(form.get("filename")).toBe("cli-watch.md");
+          expect((file as File).name).toBe("cli-watch.html");
+          expect(html).toContain("First");
+          expect(html).toContain('<script type="application/json" id="markdown-source"');
+
+          return Response.json(
+            {
+              id: "artifact-id-1234",
+              url: `${origin}/p/artifact-id-1234/view-token`,
+              expiresAt: null,
+              sandbox: "standard",
+            },
+            { status: 201 },
+          );
+        }
+
+        expect(request.method).toBe("PUT");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/content");
+        expect(form.get("filename")).toBe("cli-watch.md");
+        expect((file as File).name).toBe("cli-watch.html");
+        expect(html).toContain("Second");
+        resolveUpdateUpload?.();
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-watch.md",
+          updatedAt: "2026-06-18T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: html.length,
+        });
+      },
+    });
+    const proc = Bun.spawn([process.execPath, "src/cli.ts", "watch", filePath, "--endpoint", server.url.origin], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    let stdout = "";
+    let stderr = "";
+
+    try {
+      await waitFor(() => uploads.length === 1);
+
+      const nextPath = join(dirname(filePath), "cli-watch-next.md");
+      await writeFile(nextPath, "# Second\n");
+      await rename(nextPath, filePath);
+      await withTimeout(updateUpload, 3000);
+    } finally {
+      proc.kill("SIGTERM");
+      await proc.exited;
+      server.stop(true);
+      stdout = await new Response(proc.stdout).text();
+      stderr = await new Response(proc.stderr).text();
+    }
+
+    expect(stdout.split("\n")[0]).toBe(`${server.url.origin}/p/artifact-id-1234/view-token`);
+    expect(stderr).toContain(`Watching ${filePath}; press Ctrl-C to stop.`);
+    expect(uploads).toHaveLength(2);
+  });
+
+  test("publishes html before watching a file path", async () => {
+    const filePath = await writeTempFile("cli-watch.html", "<!doctype html><h1>first</h1>");
+    const uploads: string[] = [];
+    let resolveUpdateUpload: (() => void) | null = null;
+    const updateUpload = new Promise<void>((resolve) => {
+      resolveUpdateUpload = resolve;
+    });
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(file).toBeInstanceOf(File);
+
+        const html = await (file as File).text();
+        uploads.push(html);
+
+        if (request.method === "POST") {
+          const origin = new URL(request.url).origin;
+
+          expect(new URL(request.url).pathname).toBe("/api/publish");
+          expect(form.get("sandbox")).toBe("strict");
+          expect(form.get("ttlSeconds")).toBe("604800");
+          expect(form.get("filename")).toBe("cli-watch.html");
+          expect((file as File).name).toBe("cli-watch.html");
+          expect(html).toBe("<!doctype html><h1>first</h1>");
+
+          return Response.json(
+            {
+              id: "artifact-id-1234",
+              url: `${origin}/p/artifact-id-1234/view-token`,
+              expiresAt: "2026-06-25T00:00:00.000Z",
+              sandbox: "strict",
+            },
+            { status: 201 },
+          );
+        }
+
+        expect(request.method).toBe("PUT");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/content");
+        expect(form.get("filename")).toBe("cli-watch.html");
+        expect((file as File).name).toBe("cli-watch.html");
+        expect(html).toBe("<!doctype html><h1>second</h1>");
+        resolveUpdateUpload?.();
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-watch.html",
+          updatedAt: "2026-06-18T00:00:00.000Z",
+          expiresAt: "2026-06-25T00:00:00.000Z",
+          sandbox: "strict",
+          size: html.length,
+        });
+      },
+    });
+    const proc = Bun.spawn([process.execPath, "src/cli.ts", "watch", filePath, "--endpoint", server.url.origin, "--ttl", "7d", "--sandbox", "strict"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    let stdout = "";
+
+    try {
+      await waitFor(() => uploads.length === 1);
+
+      const nextPath = join(dirname(filePath), "cli-watch-next.html");
+      await writeFile(nextPath, "<!doctype html><h1>second</h1>");
+      await rename(nextPath, filePath);
+      await withTimeout(updateUpload, 3000);
+    } finally {
+      proc.kill("SIGTERM");
+      await proc.exited;
+      server.stop(true);
+      stdout = await new Response(proc.stdout).text();
+      await new Response(proc.stderr).text();
+    }
+
+    expect(stdout.split("\n")[0]).toBe(`${server.url.origin}/p/artifact-id-1234/view-token`);
+    expect(uploads).toEqual(["<!doctype html><h1>first</h1>", "<!doctype html><h1>second</h1>"]);
+  });
+
   test("continues updating after atomic file replacement", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>first</h1>");
     const uploads: string[] = [];

@@ -86,11 +86,23 @@ interface UpdateOptions {
   url: string | null;
 }
 
-interface WatchOptions extends UpdateOptions {}
+interface WatchPublishOptions extends PublishOptions {
+  mode: "publish";
+}
+
+interface WatchUpdateOptions extends UpdateOptions {
+  mode: "update";
+}
+
+type WatchOptions = WatchPublishOptions | WatchUpdateOptions;
 
 interface ListOptions {
   endpoint: string;
   json: boolean;
+}
+
+interface HelpOptions {
+  topic: HelpTopic | null;
 }
 
 interface ArtifactTarget {
@@ -101,11 +113,12 @@ interface ArtifactTarget {
 
 interface ParsedCommand {
   command: "publish" | "delete" | "reissue" | "update" | "watch" | "list" | "help" | "version";
-  options?: PublishOptions | DeleteOptions | ReissueOptions | UpdateOptions | WatchOptions | ListOptions;
+  options?: PublishOptions | DeleteOptions | ReissueOptions | UpdateOptions | WatchOptions | ListOptions | HelpOptions;
 }
 
 type SandboxMode = "standard" | "strict";
 type UploadSourceKind = "html" | "markdown";
+type HelpTopic = Exclude<ParsedCommand["command"], "help">;
 
 class CliError extends Error {
   constructor(
@@ -179,8 +192,16 @@ export function normalizeEndpoint(value: string): string {
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): ParsedCommand {
   const [command, ...rest] = argv;
 
-  if (!command || command === "help" || command === "--help" || command === "-h") {
-    return { command: "help" };
+  if (!command || isHelpFlag(command)) {
+    return { command: "help", options: { topic: null } };
+  }
+
+  if (command === "help") {
+    return parseHelpOptions(rest);
+  }
+
+  if (isHelpTopic(command) && rest.some(isHelpFlag)) {
+    return { command: "help", options: { topic: command } };
   }
 
   if (command === "version" || command === "--version" || command === "-v") {
@@ -218,7 +239,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
   if (command === "watch") {
     return {
       command,
-      options: parseUpdateOptions(rest, env),
+      options: parseWatchOptions(rest, env),
     };
   }
 
@@ -259,7 +280,7 @@ async function main(): Promise<void> {
         console.log(VERSION);
         return;
       case "help":
-        console.log(helpText());
+        console.log(helpText((parsed.options as HelpOptions | undefined)?.topic ?? null));
         return;
     }
   } catch (error) {
@@ -271,6 +292,20 @@ async function main(): Promise<void> {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
+}
+
+function parseHelpOptions(args: string[]): ParsedCommand {
+  const [topic] = args;
+
+  if (args.length === 0 || (args.length === 1 && isHelpFlag(topic))) {
+    return { command: "help", options: { topic: null } };
+  }
+
+  if (args.length === 1 && topic && isHelpTopic(topic)) {
+    return { command: "help", options: { topic } };
+  }
+
+  throw new CliError("help accepts one command name, for example: pagebin help watch.");
 }
 
 function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOptions {
@@ -468,6 +503,99 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
   };
 }
 
+function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions {
+  const values: string[] = [];
+  let sandbox: SandboxMode = DEFAULT_SANDBOX;
+  let sandboxProvided = false;
+  let ttlProvided = false;
+  let ttlSeconds: number | null = null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--json") {
+      throw new CliError("watch does not support --json because it is a long-running command.");
+    }
+
+    if (arg === "--endpoint") {
+      index += 1;
+      requireValue(args[index], "--endpoint");
+      continue;
+    }
+
+    if (arg === "--ttl") {
+      index += 1;
+      ttlProvided = true;
+      ttlSeconds = parseTtlSeconds(requireValue(args[index], "--ttl"));
+      continue;
+    }
+
+    if (arg === "--sandbox") {
+      index += 1;
+      sandboxProvided = true;
+      sandbox = parseSandbox(requireValue(args[index], "--sandbox"));
+      continue;
+    }
+
+    if (arg?.startsWith("-") && !isArtifactId(arg)) {
+      throw new CliError(`Unknown option for watch: ${arg}`);
+    }
+
+    values.push(arg ?? "");
+
+    if (values.length > 2) {
+      throw new CliError("watch accepts either one file path or one artifact target and one file path.");
+    }
+  }
+
+  if (values.length === 0) {
+    throw new CliError("watch requires a .html, .md, or .markdown file path.");
+  }
+
+  if (values.length === 1) {
+    const filePath = values[0] ?? "";
+
+    if (isArtifactTargetLike(filePath)) {
+      throw new CliError("watch with an artifact target also requires a .html, .md, or .markdown file path.");
+    }
+
+    return {
+      endpoint: normalizeEndpoint(readEndpoint(args, env)),
+      filePath,
+      json: false,
+      mode: "publish",
+      sandbox,
+      ttlSeconds,
+    };
+  }
+
+  if (ttlProvided) {
+    throw new CliError("--ttl can only be used with pagebin watch <file>.");
+  }
+
+  if (sandboxProvided) {
+    throw new CliError("--sandbox can only be used with pagebin watch <file>.");
+  }
+
+  const [targetValue, filePath] = values;
+
+  if (!targetValue || !filePath) {
+    throw new CliError("watch accepts either one file path or one artifact target and one file path.");
+  }
+
+  const target = parseArtifactTarget(targetValue);
+  const endpoint = normalizeEndpoint(readEndpointOption(args) ?? target.urlOrigin ?? env.PAGEBIN_ENDPOINT ?? "");
+
+  return {
+    endpoint,
+    filePath,
+    id: target.id,
+    json: false,
+    mode: "update",
+    url: target.url,
+  };
+}
+
 function parseListOptions(args: string[], env: NodeJS.ProcessEnv): ListOptions {
   const endpoint = normalizeEndpoint(readEndpoint(args, env));
   let json = false;
@@ -563,7 +691,7 @@ function requireValue(value: string | undefined, flag: string): string {
   return value;
 }
 
-async function publishArtifact(options: PublishOptions): Promise<void> {
+async function publishArtifact(options: PublishOptions): Promise<PublishResponse> {
   assertSandboxSupportsFile(options.filePath, options.sandbox);
 
   const token = readPublishToken();
@@ -587,10 +715,11 @@ async function publishArtifact(options: PublishOptions): Promise<void> {
 
   if (options.json) {
     console.log(JSON.stringify(payload, null, 2));
-    return;
+    return payload;
   }
 
   console.log(payload.url);
+  return payload;
 }
 
 async function updateArtifact(options: UpdateOptions): Promise<UpdateResponse> {
@@ -621,18 +750,24 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
   const watchedDirectory = dirname(watchedFile);
   const watchedBasename = basename(watchedFile);
 
+  let updateOptions: UpdateOptions | null = null;
   let timeout: ReturnType<typeof setTimeout> | null = null;
   let running = true;
   let pending = false;
 
   const runUpdate = (): void => {
+    if (!updateOptions) {
+      pending = true;
+      return;
+    }
+
     if (running) {
       pending = true;
       return;
     }
 
     running = true;
-    updateArtifact({ ...options, json: false })
+    updateArtifact({ ...updateOptions, json: false })
       .catch((error: unknown) => {
         console.error(error instanceof Error ? error.message : String(error));
       })
@@ -661,7 +796,26 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
   console.error(`Watching ${options.filePath}; press Ctrl-C to stop.`);
 
   try {
-    await updateArtifact(options);
+    if (options.mode === "publish") {
+      const payload = await publishArtifact(options);
+
+      updateOptions = {
+        endpoint: options.endpoint,
+        filePath: options.filePath,
+        id: payload.id,
+        json: false,
+        url: payload.url,
+      };
+    } else {
+      updateOptions = {
+        endpoint: options.endpoint,
+        filePath: options.filePath,
+        id: options.id,
+        json: false,
+        url: options.url,
+      };
+      await updateArtifact(updateOptions);
+    }
   } catch (error) {
     watcher.close();
     throw error;
@@ -953,20 +1107,142 @@ function isArtifactId(value: string): boolean {
   return ARTIFACT_ID_PATTERN.test(value);
 }
 
-function helpText(): string {
+function isArtifactTargetLike(value: string): boolean {
+  if (isArtifactId(value)) {
+    return true;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.pathname.startsWith("/p/") || url.pathname.startsWith("/raw/");
+  } catch {
+    return false;
+  }
+}
+
+function isHelpFlag(value: string | undefined): boolean {
+  return value === "--help" || value === "-h";
+}
+
+function isHelpTopic(value: string): value is HelpTopic {
+  return value === "publish" || value === "list" || value === "reissue" || value === "update" || value === "watch" || value === "delete" || value === "version";
+}
+
+function helpText(topic: HelpTopic | null = null): string {
+  switch (topic) {
+    case "publish":
+      return `pagebin publish
+
+Uploads one local .html, .md, or .markdown file and prints a protected viewer URL.
+
+Usage:
+  pagebin publish <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
+
+Options:
+  --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
+  --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
+  --sandbox strict     Disables iframe sandbox permissions; Markdown requires standard.
+  --json               Prints id, url, expiresAt, and sandbox as JSON.
+  --endpoint URL       Worker endpoint. Defaults to PAGEBIN_ENDPOINT.
+  -h, --help           Show this help.
+`;
+    case "list":
+      return `pagebin list
+
+Lists stored artifacts. Viewer URLs are not shown because view tokens are not stored.
+
+Usage:
+  pagebin list [--json] [--endpoint URL]
+
+Options:
+  --json               Prints artifacts as JSON.
+  --endpoint URL       Worker endpoint. Defaults to PAGEBIN_ENDPOINT.
+  -h, --help           Show this help.
+`;
+    case "reissue":
+      return `pagebin reissue
+
+Generates a new viewer URL for an artifact and revokes the old URL.
+
+Usage:
+  pagebin reissue <artifact_id> [--json] [--endpoint URL]
+
+Options:
+  --json               Prints id, url, expiresAt, and sandbox as JSON.
+  --endpoint URL       Worker endpoint. Defaults to PAGEBIN_ENDPOINT.
+  -h, --help           Show this help.
+`;
+    case "update":
+      return `pagebin update
+
+Replaces an artifact's content while preserving existing viewer URLs.
+
+Usage:
+  pagebin update <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+
+Options:
+  --json               Prints id, filename, dates, sandbox, size, and url as JSON.
+  --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
+  -h, --help           Show this help.
+`;
+    case "watch":
+      return `pagebin watch
+
+Publishes a file and keeps updating it, or watches a file for an existing artifact.
+
+Usage:
+  pagebin watch <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
+  pagebin watch <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--endpoint URL]
+
+Options:
+  --ttl 7d             Sets an expiration for publish-then-watch mode only.
+  --sandbox standard   Default for publish-then-watch mode.
+  --sandbox strict     Publish-then-watch HTML only; Markdown requires standard.
+  --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
+  -h, --help           Show this help.
+`;
+    case "delete":
+      return `pagebin delete
+
+Deletes an artifact by id.
+
+Usage:
+  pagebin delete <artifact_id> [--json] [--endpoint URL]
+
+Options:
+  --json               Prints id and deleted status as JSON.
+  --endpoint URL       Worker endpoint. Defaults to PAGEBIN_ENDPOINT.
+  -h, --help           Show this help.
+`;
+    case "version":
+      return `pagebin version
+
+Prints the pagebin CLI version.
+
+Usage:
+  pagebin version
+  pagebin --version
+  pagebin -v
+`;
+    case null:
+      break;
+  }
+
   return `pagebin
 
 Securely publish local .html and Markdown artifacts to a Cloudflare Worker/R2 backend and print a protected, unlisted viewer URL.
 Use it for temporary agent-generated reports, plans, visual explanations, and previews.
 
 Usage:
-  pagebin publish <file.html|file.md> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
+  pagebin publish <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
   pagebin list [--json] [--endpoint URL]
   pagebin reissue <artifact_id> [--json] [--endpoint URL]
-  pagebin update <artifact_id|viewer_url> <file.html|file.md> [--json] [--endpoint URL]
-  pagebin watch <artifact_id|viewer_url> <file.html|file.md> [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin watch <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
+  pagebin watch <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--endpoint URL]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
   pagebin version
+  pagebin <command> --help
 
 Behavior:
   publish              Uploads one .html file, or renders one Markdown file to HTML first.
@@ -977,7 +1253,7 @@ Behavior:
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.
   update               Replaces an artifact's content while preserving existing viewer URLs.
-  watch                Updates an artifact whenever the local file changes.
+  watch                Publishes a file, then updates that artifact whenever the file changes.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
 
 Environment:

@@ -1,8 +1,15 @@
 name = "pagebin"
 main = "worker/index.ts"
 compatibility_date = "2024-11-01"
-workers_dev = true
+workers_dev = false
 preview_urls = false
+keep_vars = true
+
+routes = [
+  { pattern = "page-bin.com", custom_domain = true },
+  { pattern = "api.page-bin.com", custom_domain = true },
+  { pattern = "admin.page-bin.com", custom_domain = true },
+]
 
 [[r2_buckets]]
 binding = "ARTIFACTS"
@@ -10,6 +17,10 @@ bucket_name = "pagebin-artifacts"
 
 [vars]
 PAGEBIN_MAX_BYTES = "10485760"
+PAGEBIN_PUBLIC_ORIGIN = "https://page-bin.com"
+PAGEBIN_CAPABILITY_KEY_VERSION = "v1"
+PAGEBIN_ACCESS_TEAM_DOMAIN = "stochastic-ape.cloudflareaccess.com"
+PAGEBIN_ACCESS_AUD = "7d9a15dcd0594c4a1cb3247c8ca6f4057e716aa0b6f8b9c1faaaba4bf2fda797"
 
 [triggers]
 crons = ["0 0 * * SUN"]

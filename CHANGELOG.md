@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0 - 2026-07-12
+
+- Added monotonic revisions, SHA-256 content identity, ETag-conditioned metadata mutations, tombstones, versioned content objects, legacy migration, and orphan cleanup to prevent lost updates and viewer-token resurrection.
+- Added `pagebin verify` and `publish --verify` for raw-byte or stored-hash verification.
+- Added inferred repository, project, host, Git, title, artifact-type, status, source-path, and agent metadata with explicit overrides.
+- Versioned machine output with `schemaVersion: 1`; `watch --json` now emits JSON Lines events.
+- Added protected local publication receipts, duplicate-publish prevention, file-only update lookup, `receipts`, and `show`.
+- Added watcher ownership metadata and explicit supervision guidance.
+- Added public `page-bin.com`, CLI `api.page-bin.com`, and Access-protected `admin.page-bin.com` origin separation.
+- Added AES-256-GCM viewer-token recovery for dashboard Open and Copy link without exposing tokens in list responses.
+- Added a responsive artifact dashboard with project/host grouping, search, filters, reissue, and delete actions.
+- Expanded the `html-plans` skill with artifact contracts, focused recipes, verification guidance, and reusable HTML/log shells.
+- Existing `*.workers.dev` viewer URLs are not redirected after the custom-domain migration. Reissue or reconstruct them on `page-bin.com`; configure `PAGEBIN_ENDPOINT=https://api.page-bin.com` for CLI management commands.
+
 ## 0.7.0 - 2026-07-07
 
 - Changed viewer auto-reload polling to pause while the tab is hidden and back off from 2s to 60s while content is unchanged, instead of polling every second forever. Polling resets to 2s when the tab becomes visible or an update is detected. This cuts worker invocations from an abandoned viewer tab by ~98%.

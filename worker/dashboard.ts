@@ -88,7 +88,7 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 #deskOutline .label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #deskOutline .count{color:var(--faint);font-size:11.5px}
 }
-@media(max-width:640px){main{padding:28px 16px 140px}.name{white-space:normal}.line1{flex-wrap:wrap}}
+@media(max-width:640px){main{padding:28px 16px 140px}.name{white-space:normal}.line1 .when,.line1 .acts{align-self:flex-start;margin-top:2px}}
 `;
 
 const SCRIPT = `

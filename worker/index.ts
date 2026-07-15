@@ -1,3 +1,5 @@
+import { FAVICON_SVG, dashboardHtml } from "./dashboard";
+
 interface Env {
   ARTIFACTS: R2Bucket;
   PAGEBIN_MAX_BYTES?: string;
@@ -7,6 +9,7 @@ interface Env {
   PAGEBIN_CAPABILITY_KEY_VERSION?: string;
   PAGEBIN_ACCESS_TEAM_DOMAIN?: string;
   PAGEBIN_ACCESS_AUD?: string;
+  PAGEBIN_DEV_ADMIN_HOSTNAMES?: string;
 }
 
 interface ArtifactMetadata {
@@ -140,7 +143,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const hostname = url.hostname;
 
-  if (isAdminHostname(hostname)) {
+  if (request.method === "GET" && (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")) {
+    return serveFavicon();
+  }
+
+  if (isAdminHostname(hostname, env)) {
     const dashboardResponse = await routeDashboard(request, env, url, hostname);
 
     if (dashboardResponse) {
@@ -269,8 +276,23 @@ function hasDashboardMutationHeader(request: Request): boolean {
   return request.headers.get("X-PageBin-Dashboard") === "1";
 }
 
-function isAdminHostname(hostname: string): boolean {
-  return hostname === "admin.page-bin.com" || hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+function isAdminHostname(hostname: string, env: Env): boolean {
+  return (
+    hostname === "admin.page-bin.com" ||
+    isLocalDevHostname(hostname) ||
+    devAdminHostnames(env).includes(hostname)
+  );
+}
+
+function isLocalDevHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function devAdminHostnames(env: Env): string[] {
+  return (env.PAGEBIN_DEV_ADMIN_HOSTNAMES ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 
@@ -386,7 +408,7 @@ async function readAllArtifactMetadata(env: Env): Promise<ArtifactMetadata[]> {
 }
 
 async function isDashboardAuthorized(request: Request, env: Env, hostname: string): Promise<boolean> {
-  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+  if (isLocalDevHostname(hostname) || devAdminHostnames(env).includes(hostname)) {
     return true;
   }
 
@@ -891,33 +913,20 @@ async function deleteArtifact(request: Request, env: Env, id: string): Promise<R
 }
 
 function serveDashboard(): Response {
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PageBin artifacts</title>
-<style>
-:root{color-scheme:light dark;--bg:#f4f1ea;--surface:#fffdf8;--text:#1d2724;--muted:#68716d;--line:#d8d4ca;--accent:#99602f;--danger:#a33a32}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 ui-sans-serif,system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:40px 24px 80px}header{display:flex;align-items:end;justify-content:space-between;gap:24px;margin-bottom:28px}h1{font:700 clamp(2rem,5vw,4rem)/.95 ui-serif,Georgia,serif;margin:0}header p{color:var(--muted);max-width:42rem;margin:8px 0 0}.filters{display:grid;grid-template-columns:2fr repeat(3,1fr);gap:10px;margin:24px 0}input,select,button{font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);padding:10px 12px}button{cursor:pointer}button:hover{border-color:var(--accent)}button.danger{color:var(--danger)}.summary{color:var(--muted);margin:12px 0}.group{margin-top:30px}.group h2{font:700 1.1rem ui-monospace,monospace;border-bottom:1px solid var(--line);padding-bottom:8px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}.card h3{margin:0 0 4px;font-size:1rem}.meta{color:var(--muted);font-size:.85rem;overflow-wrap:anywhere}.badges{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}.badge{border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-size:.75rem}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}.actions button{padding:6px 9px;font-size:.82rem}.empty{padding:60px 20px;text-align:center;color:var(--muted)}@media(max-width:760px){header{display:block}.filters{grid-template-columns:1fr 1fr}.filters input{grid-column:1/-1}}@media(prefers-color-scheme:dark){:root{--bg:#171b19;--surface:#202522;--text:#edf0ed;--muted:#a6aea9;--line:#3a423e;--accent:#d39a62;--danger:#ef8c82}}
-</style>
-</head>
-<body><main><header><div><h1>PageBin</h1><p>Unlisted plans, reports, reviews, and implementation logs. Access to this catalog is protected by Cloudflare Access.</p></div><button id="refresh">Refresh</button></header><section class="filters" aria-label="Artifact filters"><input id="search" type="search" placeholder="Search title, filename, project, or host"><select id="project"><option value="">All projects</option></select><select id="host"><option value="">All hosts</option></select><select id="status"><option value="">All statuses</option><option>draft</option><option>active</option><option>done</option><option>superseded</option><option>archived</option></select></section><p class="summary" id="summary">Loading artifacts…</p><div id="artifacts"></div></main>
-<script>
-const state={artifacts:[]};const $=id=>document.getElementById(id);const text=(tag,value,className)=>{const node=document.createElement(tag);node.textContent=value;if(className)node.className=className;return node};
-function option(select,value){if(!value||[...select.options].some(item=>item.value===value))return;const node=document.createElement('option');node.value=value;node.textContent=value;select.append(node)}
-async function load(){const response=await fetch('/api/dashboard/artifacts');if(!response.ok)throw new Error('Unable to load artifacts');const payload=await response.json();state.artifacts=payload.artifacts;for(const item of state.artifacts){option($('project'),item.attributes.project);option($('host'),item.attributes.sourceHost)}render()}
-function matches(item){const query=$('search').value.trim().toLowerCase();const values=[item.attributes.title,item.filename,item.attributes.project,item.attributes.sourceHost].filter(Boolean).join(' ').toLowerCase();return(!query||values.includes(query))&&(!$('project').value||item.attributes.project===$('project').value)&&(!$('host').value||item.attributes.sourceHost===$('host').value)&&(!$('status').value||item.attributes.status===$('status').value)}
-function button(label,handler,className){const node=text('button',label,className);node.type='button';node.addEventListener('click',handler);return node}
-async function copyLink(id){const response=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/link');const payload=await response.json();if(!response.ok)throw new Error(payload.error||'Unable to recover link');await navigator.clipboard.writeText(payload.url)}
-async function reissue(id){if(!confirm('Reissue this link? The previous public URL will stop working.'))return;const response=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/reissue',{method:'POST',headers:{'X-PageBin-Dashboard':'1'}});const payload=await response.json();if(!response.ok)throw new Error(payload.error||'Unable to reissue');await navigator.clipboard.writeText(payload.url);await load()}
-async function remove(id){if(!confirm('Delete this artifact permanently?'))return;const response=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id),{method:'DELETE',headers:{'X-PageBin-Dashboard':'1'}});if(!response.ok)throw new Error('Unable to delete');await load()}
-function render(){const root=$('artifacts');root.replaceChildren();const items=state.artifacts.filter(matches);$('summary').textContent=items.length+' of '+state.artifacts.length+' artifacts';if(!items.length){root.append(text('div','No artifacts match these filters.','empty'));return}const groups=new Map;for(const item of items){const key=item.attributes.project||'Uncategorized';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item)}for(const [name,artifacts] of [...groups].sort(([a],[b])=>a.localeCompare(b))){const section=document.createElement('section');section.className='group';section.append(text('h2',name));const grid=document.createElement('div');grid.className='grid';for(const item of artifacts){const card=document.createElement('article');card.className='card';card.append(text('h3',item.attributes.title||item.filename),text('div',[item.attributes.sourceHost,item.attributes.gitBranch,item.attributes.gitCommit?.slice(0,8)].filter(Boolean).join(' · ')||'No source metadata','meta'));const badges=document.createElement('div');badges.className='badges';for(const value of [item.attributes.artifactType,item.attributes.status,item.expiresAt?'expires '+new Date(item.expiresAt).toLocaleDateString():'long-lived'])if(value)badges.append(text('span',value,'badge'));card.append(badges,text('div','Updated '+new Date(item.updatedAt).toLocaleString()+' · revision '+item.revision,'meta'));const actions=document.createElement('div');actions.className='actions';actions.append(button('Open',()=>window.open('/api/dashboard/artifacts/'+encodeURIComponent(item.id)+'/open','_blank')),button('Copy link',()=>copyLink(item.id).catch(alert)),button('Reissue',()=>reissue(item.id).catch(alert)),button('Delete',()=>remove(item.id).catch(alert),'danger'));card.append(actions);grid.append(card)}section.append(grid);root.append(section)}}
-for(const id of ['search','project','host','status'])$(id).addEventListener('input',render);$('refresh').addEventListener('click',()=>load().catch(error=>$('summary').textContent=error.message));load().catch(error=>$('summary').textContent=error.message);
-</script></body></html>`;
-
-  return text(html, 200, {
-    "Content-Security-Policy": "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  return text(dashboardHtml(), 200, {
+    "Content-Security-Policy":
+      "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     "Content-Type": "text/html; charset=utf-8",
+  });
+}
+
+function serveFavicon(): Response {
+  return new Response(FAVICON_SVG, {
+    status: 200,
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=86400",
+    },
   });
 }
 

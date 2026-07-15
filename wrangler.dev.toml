@@ -11,6 +11,7 @@ bucket_name = "pagebin-artifacts-local"
 PAGEBIN_MAX_BYTES = "10485760"
 PAGEBIN_PUBLIC_ORIGIN = "http://127.0.0.1:8787"
 PAGEBIN_CAPABILITY_KEY_VERSION = "v1"
+PAGEBIN_DEV_ADMIN_HOSTNAMES = "jacurutu.sole-pierce.ts.net,100.108.28.4"
 
 [observability]
 enabled = false

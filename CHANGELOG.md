@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0 - 2026-07-15
+
+- Redesigned the dashboard: flat editorial layout (serif titles, hairline rows) replaces the card grid. Artifacts group by normalized repository origin (`https://`, `git@`, and bare `host/org/name` remotes collapse to one section) with project fallback, so the same repo checked out in different folders lands in one group.
+- Each artifact row shows relative age plus always-visible copy-link, reissue, and delete icon actions; metadata renders on two lines — status glyph, color-coded artifact type, branch with checkout folder — then source host, agent, and expiry (only when set).
+- Added inline brand icons for coding agents (Anthropic mark for `claude*`, OpenAI for `codex*`, OpenCode; a stand-in bolt for `amp`) and small colored glyphs for branch and host.
+- Sections cap at five rows with an expander; navigation via a fixed section outline rail on wide screens and a floating jump button on mobile. Filters are single-line chip groups for status and host.
+- Clipboard actions fall back to a copy prompt on insecure origins, and reissue re-renders before copying so a rotated URL is never lost.
+- Added an SVG favicon served at `/favicon.svg` and `/favicon.ico`.
+- Added `PAGEBIN_DEV_ADMIN_HOSTNAMES` (dev-only, set in `wrangler.dev.toml`) to whitelist extra dashboard hostnames such as a Tailscale address; production configuration is unchanged.
+- Rethemed the Markdown viewer to match the dashboard: warm charcoal palette, serif headings, amber accent, matching Mermaid theme. Side panels are more compact, frontmatter arrays of primitives render comma-separated, nested frontmatter sections use small-caps labels instead of bracket icons, and the mobile outline trigger is now a round hamburger button.
+
 ## 0.8.0 - 2026-07-12
 
 - Added monotonic revisions, SHA-256 content identity, ETag-conditioned metadata mutations, tombstones, versioned content objects, legacy migration, and orphan cleanup to prevent lost updates and viewer-token resurrection.

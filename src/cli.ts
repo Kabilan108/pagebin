@@ -45,7 +45,7 @@ interface UpdateResponse {
   sandbox: SandboxMode;
   size: number;
   revision: number;
-  contentSha256: string;
+  contentSha256: string | null;
   attributes: ArtifactAttributes;
 }
 
@@ -79,7 +79,6 @@ interface ArtifactAttributes {
   gitCommit?: string;
   sourcePath?: string;
   artifactType?: ArtifactType;
-  status?: ArtifactStatus;
   agent?: string;
 }
 
@@ -149,21 +148,23 @@ interface ReissueOptions {
 
 interface UpdateOptions {
   endpoint: string;
-  filePath: string;
+  filePath: string | null;
   id: string;
   json: boolean;
   url: string | null;
   inferMetadata: boolean;
   attributes: ArtifactAttributes;
   receiptLookup: boolean;
+  ttlSeconds: number | null | undefined;
 }
 
 interface WatchPublishOptions extends PublishOptions {
   mode: "publish";
 }
 
-interface WatchUpdateOptions extends UpdateOptions {
+interface WatchUpdateOptions extends Omit<UpdateOptions, "filePath"> {
   mode: "update";
+  filePath: string;
 }
 
 type WatchOptions = WatchPublishOptions | WatchUpdateOptions;
@@ -208,7 +209,6 @@ interface ParsedCommand {
 type SandboxMode = "standard" | "strict";
 type UploadSourceKind = "html" | "markdown";
 type ArtifactType = "plan" | "report" | "review" | "explainer" | "implementation-log" | "other";
-type ArtifactStatus = "draft" | "active" | "done" | "superseded" | "archived";
 type HelpTopic = Exclude<ParsedCommand["command"], "help">;
 
 const ATTRIBUTE_FLAGS: Record<string, keyof ArtifactAttributes> = {
@@ -220,7 +220,6 @@ const ATTRIBUTE_FLAGS: Record<string, keyof ArtifactAttributes> = {
   "--git-commit": "gitCommit",
   "--source-path": "sourcePath",
   "--type": "artifactType",
-  "--status": "status",
   "--agent": "agent",
 };
 
@@ -612,6 +611,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
   let json = false;
   let targetValue: string | null = null;
   let inferMetadata = true;
+  let ttlSeconds: number | null | undefined;
   const attributes: ArtifactAttributes = {};
 
   for (let index = 0; index < args.length; index += 1) {
@@ -624,6 +624,13 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
 
     if (arg === "--no-infer") {
       inferMetadata = false;
+      continue;
+    }
+
+    if (arg === "--ttl") {
+      index += 1;
+      const value = requireValue(args[index], "--ttl");
+      ttlSeconds = value === "never" ? null : parseTtlSeconds(value);
       continue;
     }
 
@@ -671,11 +678,16 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
       inferMetadata,
       attributes,
       receiptLookup: true,
+      ttlSeconds,
     };
   }
 
-  if (!filePath) {
-    throw new CliError("update requires a .html, .md, or .markdown file path.");
+  if (!filePath && ttlSeconds === undefined) {
+    throw new CliError("update requires a file path, --ttl, or both.");
+  }
+
+  if (!filePath && (!inferMetadata || Object.keys(attributes).length > 0)) {
+    throw new CliError("Metadata options require a file path when updating an artifact.");
   }
 
   const target = parseArtifactTarget(targetValue);
@@ -690,6 +702,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
     inferMetadata,
     attributes,
     receiptLookup: false,
+    ttlSeconds,
   };
 }
 
@@ -813,6 +826,7 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
     inferMetadata: false,
     attributes: {},
     receiptLookup: false,
+    ttlSeconds: undefined,
   };
 }
 
@@ -999,20 +1013,12 @@ function parseArtifactAttributeOption(
     throw new CliError("--type must be plan, report, review, explainer, implementation-log, or other.");
   }
 
-  if (key === "status" && !isArtifactStatus(value)) {
-    throw new CliError("--status must be draft, active, done, superseded, or archived.");
-  }
-
   (attributes as Record<string, string>)[key] = value;
   return index + 1;
 }
 
 function isArtifactType(value: string): value is ArtifactType {
   return value === "plan" || value === "report" || value === "review" || value === "explainer" || value === "implementation-log" || value === "other";
-}
-
-function isArtifactStatus(value: string): value is ArtifactStatus {
-  return value === "draft" || value === "active" || value === "done" || value === "superseded" || value === "archived";
 }
 
 function parseSandbox(value: string): SandboxMode {
@@ -1202,21 +1208,43 @@ async function sha256Bytes(bytes: Uint8Array): Promise<string> {
 async function updateArtifact(options: UpdateOptions, output = true): Promise<UpdateResponse> {
   const resolvedOptions = options.receiptLookup ? await resolveUpdateReceipt(options) : options;
   const token = readPublishToken();
-  const upload = await createHtmlUploadForm(resolvedOptions.filePath);
-  const attributes = await resolveArtifactAttributes(resolvedOptions.filePath, resolvedOptions.attributes, resolvedOptions.inferMetadata);
-  setArtifactAttributes(upload.form, attributes);
-  const response = await fetch(`${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}/content`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    body: upload.form,
-  });
+  const attributes = resolvedOptions.filePath
+    ? await resolveArtifactAttributes(resolvedOptions.filePath, resolvedOptions.attributes, resolvedOptions.inferMetadata)
+    : resolvedOptions.attributes;
+  let sourceKind: UploadSourceKind | null = null;
+  let response: Response;
+
+  if (resolvedOptions.filePath) {
+    const upload = await createHtmlUploadForm(resolvedOptions.filePath);
+    sourceKind = upload.sourceKind;
+    setArtifactAttributes(upload.form, attributes);
+
+    if (resolvedOptions.ttlSeconds !== undefined) {
+      upload.form.set("ttlSeconds", resolvedOptions.ttlSeconds === null ? "never" : String(resolvedOptions.ttlSeconds));
+    }
+
+    response = await fetch(`${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}/content`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+      body: upload.form,
+    });
+  } else {
+    response = await fetch(`${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ttlSeconds: resolvedOptions.ttlSeconds }),
+    });
+  }
   const payload = await readJsonResponse<UpdateResponse>(response);
 
   await updateReceiptAfterContent(resolvedOptions, payload, attributes);
 
-  warnIfStrictMarkdownUpdate(upload.sourceKind, payload.sandbox);
+  if (sourceKind) {
+    warnIfStrictMarkdownUpdate(sourceKind, payload.sandbox);
+  }
 
   if (!output) {
     return payload;
@@ -1304,6 +1332,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
           inferMetadata: options.inferMetadata,
           attributes: options.attributes,
           receiptLookup: false,
+          ttlSeconds: undefined,
         };
         const payload = await updateArtifact(updateOptions, false);
 
@@ -1322,6 +1351,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
           inferMetadata: options.inferMetadata,
           attributes: options.attributes,
           receiptLookup: false,
+          ttlSeconds: undefined,
         };
       }
     } else {
@@ -1334,6 +1364,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
         inferMetadata: false,
         attributes: {},
         receiptLookup: false,
+        ttlSeconds: undefined,
       };
       const payload = await updateArtifact(updateOptions, false);
 
@@ -1421,7 +1452,6 @@ async function resolveArtifactAttributes(
   const inferred: ArtifactAttributes = {
     sourceHost: hostname(),
     artifactType: inferArtifactType(absolutePath),
-    status: "active",
   };
   const title = await inferArtifactTitle(absolutePath);
   const agent = inferAgent();
@@ -1540,16 +1570,16 @@ export function sanitizeRepositoryRemote(value: string): string {
 }
 
 function inferAgent(): string | undefined {
-  if (process.env.PAGEBIN_AGENT?.trim()) {
-    return process.env.PAGEBIN_AGENT.trim();
-  }
-
-  if (process.env.CODEX_HOME) {
+  if (process.env.CODEX_THREAD_ID?.trim()) {
     return "codex";
   }
 
-  if (process.env.CLAUDE_CODE || process.env.CLAUDECODE) {
+  if (process.env.CLAUDE_CODE_CHILD_SESSION === "1" || process.env.CLAUDECODE === "1") {
     return "claude-code";
+  }
+
+  if (process.env.OPENCODE === "1") {
+    return "opencode";
   }
 
   return undefined;
@@ -1748,6 +1778,10 @@ async function findReceiptByFile(endpoint: string, filePath: string): Promise<Ar
 }
 
 async function resolveUpdateReceipt(options: UpdateOptions): Promise<UpdateOptions> {
+  if (!options.filePath) {
+    throw new CliError("Receipt-based updates require a file path.");
+  }
+
   const receipt = await findReceiptByFile(options.endpoint, resolve(options.filePath));
 
   if (!receipt) {
@@ -1778,6 +1812,11 @@ async function updateReceiptAfterContent(
 ): Promise<void> {
   await mutateReceiptStore((store) => {
     const existing = store.artifacts.find((receipt) => receipt.endpoint === options.endpoint && receipt.id === options.id);
+
+    if (!options.filePath && !existing) {
+      return;
+    }
+
     const now = new Date().toISOString();
     const url = options.url ?? existing?.url ?? null;
     const receipt: ArtifactReceipt = {
@@ -1785,7 +1824,7 @@ async function updateReceiptAfterContent(
       id: options.id,
       url,
       rawUrl: url ? toRawUrl(url) : null,
-      filePath: resolve(options.filePath),
+      filePath: options.filePath ? resolve(options.filePath) : existing?.filePath ?? "",
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       revision: payload.revision ?? existing?.revision ?? 1,
@@ -2114,7 +2153,7 @@ Options:
   --sandbox strict     Disables iframe sandbox permissions; Markdown requires standard.
   --verify             Fetches the uploaded raw content and verifies its SHA-256 hash.
   --force-new          Intentionally creates another artifact for a file with a local receipt.
-  --no-infer           Disables repository, host, title, type, and status inference.
+  --no-infer           Disables repository, host, title, type, and agent inference.
   --title/--project    Override inferred metadata. See README for every metadata option.
   --json               Prints id, url, expiresAt, and sandbox as JSON.
   --endpoint URL       Worker endpoint. Defaults to PAGEBIN_ENDPOINT.
@@ -2149,13 +2188,14 @@ Options:
     case "update":
       return `pagebin update
 
-Replaces an artifact's content while preserving existing viewer URLs.
+Replaces content, changes expiration, or does both atomically while preserving existing viewer URLs.
 
 Usage:
-  pagebin update <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> [file.html|file.md|file.markdown] [--ttl 7d|never] [--json] [--endpoint URL]
   pagebin update <file.html|file.md|file.markdown> [--json] [--endpoint URL]
 
 Options:
+  --ttl 7d|never       Sets expiration relative to update time, or removes it.
   --json               Prints id, filename, dates, sandbox, size, and url as JSON.
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
   -h, --help           Show this help.
@@ -2236,13 +2276,13 @@ Usage:
   return `pagebin
 
 Securely publish local .html and Markdown artifacts to a Cloudflare Worker/R2 backend and print a protected, unlisted viewer URL.
-Use it for temporary agent-generated reports, plans, visual explanations, and previews.
+Use it for durable or temporary agent-generated reports, plans, visual explanations, and previews.
 
 Usage:
   pagebin publish <file.html|file.md|file.markdown> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--verify] [--json] [--endpoint URL]
   pagebin list [--json] [--endpoint URL]
   pagebin reissue <artifact_id> [--json] [--endpoint URL]
-  pagebin update <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> [file.html|file.md|file.markdown] [--ttl 7d|never] [--json] [--endpoint URL]
   pagebin watch <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
   pagebin watch <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--endpoint URL]
   pagebin verify <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
@@ -2255,12 +2295,12 @@ Usage:
 Behavior:
   publish              Uploads one .html file, or renders one Markdown file to HTML first.
   --json               Prints id, url, expiresAt, and sandbox as JSON.
-  --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
+  --ttl 7d             Sets expiration; update also accepts never to remove it.
   --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
   --sandbox strict     Disables iframe sandbox permissions; Markdown requires standard.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.
-  update               Replaces an artifact's content while preserving existing viewer URLs.
+  update               Replaces content, changes expiration, or does both atomically.
   watch                Publishes a file, then updates that artifact whenever the file changes.
   verify               Compares the local rendered bytes with raw content or the stored hash.
   receipts             Lists protected local publication receipts.

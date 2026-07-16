@@ -87,7 +87,7 @@ describe("parseArgs", () => {
   test("parses metadata overrides and disables inference", () => {
     expect(
       parseArgs(
-        ["publish", "plan.html", "--no-infer", "--title", "Dashboard plan", "--project", "dashboard", "--type", "plan", "--status", "draft"],
+        ["publish", "plan.html", "--no-infer", "--title", "Dashboard plan", "--project", "dashboard", "--type", "plan"],
         { PAGEBIN_ENDPOINT: "https://example.com" },
       ),
     ).toMatchObject({
@@ -98,7 +98,6 @@ describe("parseArgs", () => {
           title: "Dashboard plan",
           project: "dashboard",
           artifactType: "plan",
-          status: "draft",
         },
       },
     });
@@ -226,6 +225,30 @@ describe("parseArgs", () => {
         receiptLookup: true,
       },
     });
+  });
+
+  test("parses TTL-only and permanent updates", () => {
+    expect(parseArgs(["update", "artifact-id-1234", "--ttl", "7d"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+      command: "update",
+      options: { filePath: null, id: "artifact-id-1234", ttlSeconds: 604800 },
+    });
+    expect(parseArgs(["update", "artifact-id-1234", "--ttl", "never"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+      command: "update",
+      options: { filePath: null, id: "artifact-id-1234", ttlSeconds: null },
+    });
+  });
+
+  test("rejects metadata options on TTL-only updates", () => {
+    expect(() =>
+      parseArgs(["update", "artifact-id-1234", "--ttl", "7d", "--title", "Ignored"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("Metadata options require a file path");
+    expect(() =>
+      parseArgs(["update", "artifact-id-1234", "--ttl", "never", "--no-infer"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("Metadata options require a file path");
   });
 
   test("parses watch with a viewer URL", () => {
@@ -516,7 +539,6 @@ describe("publish command", () => {
           title: "Explicit title",
           project: "dashboard",
           artifactType: "plan",
-          status: "draft",
         });
         return Response.json(
           {
@@ -547,13 +569,51 @@ describe("publish command", () => {
           "dashboard",
           "--type",
           "plan",
-          "--status",
-          "draft",
         ],
         { PAGEBIN_PUBLISH_TOKEN: "publish-token" },
       );
 
       expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("infers Codex from CODEX_THREAD_ID and only --agent overrides it", async () => {
+    const filePath = await writeTempFile("cli-agent-plan.html", "<!doctype html><title>Agent plan</title>");
+    const agents: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const form = await request.formData();
+        const attributes = JSON.parse(String(form.get("attributes"))) as { agent?: string };
+        agents.push(attributes.agent ?? "");
+        return Response.json({
+          id: `artifact-id-${agents.length}`,
+          url: `https://pagebin.test/p/artifact-id-${agents.length}/view-token`,
+          expiresAt: null,
+          sandbox: "standard",
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes,
+        }, { status: 201 });
+      },
+    });
+
+    try {
+      const env = {
+        PAGEBIN_ENDPOINT: server.url.origin,
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        PAGEBIN_AGENT: "legacy-override",
+        CODEX_THREAD_ID: "thread-id",
+        PAGEBIN_STATE_PATH: join(tmpdir(), `pagebin-agent-test-${Date.now()}.json`),
+      };
+      const inferred = await runPagebin(["publish", filePath], env);
+      const overridden = await runPagebin(["publish", filePath, "--agent", "custom-agent", "--force-new"], env);
+
+      expect(inferred.exitCode).toBe(0);
+      expect(overridden.exitCode).toBe(0);
+      expect(agents).toEqual(["codex", "custom-agent"]);
     } finally {
       server.stop(true);
     }
@@ -713,7 +773,7 @@ describe("local receipt workflow", () => {
           size: 42,
           revision: 2,
           contentSha256: "b".repeat(64),
-          attributes: { title: "Receipt plan", status: "active" },
+          attributes: { title: "Receipt plan" },
         });
       },
     });
@@ -986,6 +1046,72 @@ describe("reissue command", () => {
 });
 
 describe("update command", () => {
+  test("updates only the TTL without uploading content", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("PATCH");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234");
+        expect(await request.json()).toEqual({ ttlSeconds: null });
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "plan.html",
+          updatedAt: "2026-07-15T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: 31,
+          revision: 2,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+        });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["update", "artifact-id-1234", "--ttl", "never", "--endpoint", server.url.origin, "--json"], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ id: "artifact-id-1234", expiresAt: null, revision: 2 });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("sends content and TTL in one request", async () => {
+    const filePath = await writeTempFile("cli-plan-ttl.html", "<!doctype html><h1>updated</h1>");
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("PUT");
+        const form = await request.formData();
+        expect(form.get("ttlSeconds")).toBe("604800");
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "cli-plan-ttl.html",
+          updatedAt: "2026-07-15T00:00:00.000Z",
+          expiresAt: "2026-07-22T00:00:00.000Z",
+          sandbox: "standard",
+          size: 31,
+          revision: 2,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+        });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--ttl", "7d", "--endpoint", server.url.origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+      expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("updates content and prints the target URL when a URL was provided", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>updated</h1>");
     let requestCount = 0;

@@ -7,7 +7,6 @@ labels:
   - gamma
 links:
   docs:
-    status: draft
     owners:
       - platform
       - docs

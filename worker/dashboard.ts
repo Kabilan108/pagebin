@@ -68,8 +68,6 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 .mi.agent.brand-claude svg{fill:#d97757}.mi.agent.brand-codex svg{fill:#c9c3b4}.mi.agent.brand-opencode svg{fill:#c9c3b4}.mi.agent.brand-amp svg{fill:#e56a50}
 .t-plan{color:#d4b45f}.t-report{color:#63b0a1}.t-review{color:#c98299}.t-explainer{color:#7da2c4}.t-implementation-log{color:#93b06e}}
 .line1 .when{align-self:center}
-.glyph{font-family:ui-monospace,monospace}
-.glyph.active{color:#3d8b58}.glyph.done{color:#4a76c9}.glyph.draft{color:#c9a13f}
 .more{font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;color:var(--accent);background:none;border:none;cursor:pointer;padding:10px 0 2px;text-decoration:underline dotted;text-underline-offset:3px}
 .empty{padding:60px 0;text-align:center;color:var(--muted);font-style:italic}
 .fab{position:fixed;bottom:22px;right:22px;width:46px;height:46px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.16);font-size:17px;z-index:40}
@@ -92,8 +90,8 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 `;
 
 const SCRIPT = `
-const settings={groupBy:'repo',cap:5,filterStyle:'chips',metaFont:'sans',fields:{status:true,type:true,branch:true,host:true,agent:true,expiry:true}};
-const state={artifacts:[],query:'',host:'',status:'',expanded:new Set()};
+const settings={groupBy:'repo',cap:5,filterStyle:'chips',metaFont:'sans',fields:{type:true,branch:true,host:true,agent:true,expiry:true}};
+const state={artifacts:[],query:'',host:'',expanded:new Set()};
 const $=id=>document.getElementById(id);
 const el=(tag,cls,txt)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(txt!=null)n.textContent=txt;return n};
 
@@ -117,12 +115,9 @@ function iconed(kind,value,title){const s=el('span','mi '+kind);s.innerHTML=ICON
 async function load(){const r=await fetch('/api/dashboard/artifacts');if(!r.ok)throw new Error('Unable to load artifacts');state.artifacts=(await r.json()).artifacts;if(state.host&&!hosts().includes(state.host))state.host='';renderFilters();render()}
 function repoLabel(repo){try{const u=new URL(repo);const path=u.pathname.replace(/^\\/+|\\.git$|\\/+$/g,'');return path||u.hostname}catch{return repo.replace(/^git@[^:]+:/,'').replace(/\\.git$/,'').replace(/^[\\w.-]+\\.[a-z]{2,}\\//i,'')}}
 function groupKey(a){if(settings.groupBy==='repo'&&a.attributes.repo)return repoLabel(a.attributes.repo);if(a.attributes.project)return a.attributes.project;return 'Uncategorized'}
-function matches(a){const q=state.query.trim().toLowerCase();const hay=[a.attributes.title,a.filename,a.attributes.project,a.attributes.repo,a.attributes.sourceHost,a.attributes.gitBranch].filter(Boolean).join(' ').toLowerCase();return(!q||hay.includes(q))&&(!state.host||a.attributes.sourceHost===state.host)&&(!state.status||a.attributes.status===state.status)}
+function matches(a){const q=state.query.trim().toLowerCase();const hay=[a.attributes.title,a.filename,a.attributes.project,a.attributes.repo,a.attributes.sourceHost,a.attributes.gitBranch].filter(Boolean).join(' ').toLowerCase();return(!q||hay.includes(q))&&(!state.host||a.attributes.sourceHost===state.host)}
 function relTime(iso){const s=(Date.now()-Date.parse(iso))/1000;if(s<60)return'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';if(s<86400*14)return Math.floor(s/86400)+'d ago';if(s<86400*60)return Math.floor(s/86400/7)+'w ago';return new Date(iso).toLocaleDateString()}
 function hosts(){return[...new Set(state.artifacts.map(a=>a.attributes.sourceHost).filter(Boolean))].sort()}
-const STATUSES=['draft','active','done','superseded','archived'];
-const GLYPH={active:'\\u25cf',done:'\\u2713',draft:'\\u25d0',superseded:'\\u25cb',archived:'\\u25cb'};
-
 function openArtifact(id){window.open('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/open','_blank')}
 async function copyText(value){try{await navigator.clipboard.writeText(value)}catch{prompt('Copy this link:',value)}}
 async function copyLink(id){const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/link');const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to recover link');await copyText(p.url)}
@@ -140,11 +135,10 @@ wrap.append(trigger,menu,native);return wrap}
 function closeMenus(except){for(const dd of document.querySelectorAll('.dd.open'))if(dd!==except)dd.classList.remove('open')}
 document.addEventListener('click',()=>closeMenus());
 function renderFilters(){const box=$('filters');box.replaceChildren();
-if(settings.filterStyle==='chips'){box.append(chipGroup('status',STATUSES,'status'),chipGroup('host',hosts(),'host'))}
-else{box.append(dropdown('All statuses',STATUSES,'status'),dropdown('All hosts',hosts(),'host'))}}
+if(settings.filterStyle==='chips'){box.append(chipGroup('host',hosts(),'host'))}
+else{box.append(dropdown('All hosts',hosts(),'host'))}}
 
 function metaRows(a){const f=settings.fields;const row1=[],row2=[];
-if(f.status&&a.attributes.status){const g=el('span','glyph '+a.attributes.status,GLYPH[a.attributes.status]||'\\u00b7');const s=el('span');s.append(g,document.createTextNode(' '+a.attributes.status));row1.push(s)}
 if(f.type&&a.attributes.artifactType)row1.push(el('span','t-'+a.attributes.artifactType,a.attributes.artifactType));
 if(f.branch&&a.attributes.gitBranch){const b=iconed('branch',a.attributes.gitBranch,'branch');if(a.attributes.project)b.append(el('span','faint','('+a.attributes.project+')'));row1.push(b)}
 if(f.host&&a.attributes.sourceHost)row2.push(iconed('host',a.attributes.sourceHost,'source host'));

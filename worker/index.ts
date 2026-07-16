@@ -44,7 +44,6 @@ interface ArtifactAttributes {
   gitCommit?: string;
   sourcePath?: string;
   artifactType?: ArtifactType;
-  status?: ArtifactStatus;
   agent?: string;
 }
 
@@ -74,7 +73,7 @@ interface UpdatePayload {
   sandbox: SandboxMode;
   size: number;
   revision: number;
-  contentSha256: string;
+  contentSha256: string | null;
   attributes: ArtifactAttributes;
 }
 
@@ -109,7 +108,6 @@ interface StoredArtifactMetadata {
 
 type SandboxMode = "standard" | "strict";
 type ArtifactType = "plan" | "report" | "review" | "explainer" | "implementation-log" | "other";
-type ArtifactStatus = "draft" | "active" | "done" | "superseded" | "archived";
 
 interface UploadedFile {
   name: string;
@@ -207,6 +205,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return getArtifact(request, env, deleteMatch[1]);
   }
 
+  if (request.method === "PATCH" && deleteMatch?.[1]) {
+    return updateArtifactTtl(request, env, deleteMatch[1]);
+  }
+
   if (request.method === "DELETE" && deleteMatch?.[1]) {
     return deleteArtifact(request, env, deleteMatch[1]);
   }
@@ -300,7 +302,7 @@ async function dashboardArtifacts(env: Env, url: URL): Promise<Response> {
   const search = url.searchParams.get("search")?.trim().toLowerCase() ?? "";
   const project = url.searchParams.get("project")?.trim() ?? "";
   const sourceHost = url.searchParams.get("sourceHost")?.trim() ?? "";
-  const status = url.searchParams.get("status")?.trim() ?? "";
+  const now = Date.now();
   const artifacts = (await readAllArtifactMetadata(env))
     .filter((artifact) => {
       const haystack = [artifact.filename, artifact.attributes.title, artifact.attributes.project, artifact.attributes.sourceHost]
@@ -312,7 +314,7 @@ async function dashboardArtifacts(env: Env, url: URL): Promise<Response> {
         (!search || haystack.includes(search)) &&
         (!project || artifact.attributes.project === project) &&
         (!sourceHost || artifact.attributes.sourceHost === sourceHost) &&
-        (!status || artifact.attributes.status === status)
+        (!artifact.expiresAt || now < Date.parse(artifact.expiresAt))
       );
     })
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -640,9 +642,12 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   const contentSha256 = await sha256Hex(upload.html);
   const nextContentKey = versionedHtmlKey(id, revision);
   let attributes: ArtifactAttributes;
+  let ttlSeconds: number | null | undefined;
 
   try {
     attributes = parseArtifactAttributes(upload.form);
+    const ttlValue = upload.form.get("ttlSeconds");
+    ttlSeconds = ttlValue === null ? undefined : parseUpdateTtl(ttlValue);
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "Invalid artifact attributes." }, 400);
   }
@@ -659,6 +664,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
       ...metadata.attributes,
       ...attributes,
     },
+    expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
   };
 
   await env.ARTIFACTS.put(nextContentKey, upload.html, {
@@ -683,19 +689,65 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     throw error;
   }
 
-  const payload: UpdatePayload = {
-    id,
-    filename: nextMetadata.filename,
+  return json(updatePayload(nextMetadata));
+}
+
+async function updateArtifactTtl(request: Request, env: Env, id: string): Promise<Response> {
+  if (!(await isAuthorized(request, env))) {
+    return json({ error: "Unauthorized." }, 401);
+  }
+
+  if (!isValidId(id)) {
+    return notFound();
+  }
+
+  const stored = await readStoredMetadata(env, id);
+
+  if (!stored || stored.metadata.deletedAt) {
+    return notFound();
+  }
+
+  if (stored.metadata.expiresAt && Date.now() >= Date.parse(stored.metadata.expiresAt)) {
+    return json({ error: "Artifact has expired." }, 410);
+  }
+
+  let body: unknown;
+
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "TTL update body must be valid JSON." }, 400);
+  }
+
+  if (!isPlainObject(body) || !Object.hasOwn(body, "ttlSeconds") || Object.keys(body).length !== 1) {
+    return json({ error: "TTL update body must contain only ttlSeconds." }, 400);
+  }
+
+  let ttlSeconds: number | null | undefined;
+
+  try {
+    ttlSeconds = parseUpdateTtl(body.ttlSeconds);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Invalid TTL." }, 400);
+  }
+
+  if (ttlSeconds === undefined) {
+    return json({ error: "ttlSeconds is required." }, 400);
+  }
+
+  const updatedAt = new Date().toISOString();
+  const nextMetadata: ArtifactMetadata = {
+    ...stored.metadata,
     updatedAt,
-    expiresAt: nextMetadata.expiresAt,
-    sandbox: nextMetadata.sandbox,
-    size: nextMetadata.size,
-    revision,
-    contentSha256,
-    attributes: nextMetadata.attributes,
+    revision: stored.metadata.revision + 1,
+    expiresAt: updatedExpiration(stored.metadata.expiresAt, ttlSeconds, updatedAt),
   };
 
-  return json(payload);
+  if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
+    return conflict();
+  }
+
+  return json(updatePayload(nextMetadata));
 }
 
 async function listArtifacts(request: Request, env: Env): Promise<Response> {
@@ -1228,7 +1280,6 @@ function parseArtifactAttributes(form: FormData): ArtifactAttributes {
       gitCommit: readOptionalAttribute(parsed, "gitCommit", 128),
       sourcePath: readOptionalAttribute(parsed, "sourcePath", 1024),
       artifactType: readArtifactType(parsed.artifactType),
-      status: readArtifactStatus(parsed.status),
       agent: readOptionalAttribute(parsed, "agent", 255),
     }).filter(([, attribute]) => attribute !== undefined),
   ) as ArtifactAttributes;
@@ -1258,18 +1309,6 @@ function readArtifactType(value: unknown): ArtifactType | undefined {
   }
 
   throw new Error("Invalid artifact attribute: artifactType.");
-}
-
-function readArtifactStatus(value: unknown): ArtifactStatus | undefined {
-  if (value === undefined || value === null || value === "") {
-    return undefined;
-  }
-
-  if (value === "draft" || value === "active" || value === "done" || value === "superseded" || value === "archived") {
-    return value;
-  }
-
-  throw new Error("Invalid artifact attribute: status.");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1312,6 +1351,52 @@ function parseOptionalPositiveInt(value: unknown): number | null {
   }
 
   return parsed;
+}
+
+function parseUpdateTtl(value: unknown): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null || value === "never") {
+    return null;
+  }
+
+  const normalized = typeof value === "number" ? String(value) : value;
+
+  if (typeof normalized !== "string" || !/^[1-9]\d*$/.test(normalized)) {
+    throw new Error("TTL must be a positive integer number of seconds or never.");
+  }
+
+  const parsed = Number(normalized);
+
+  if (!Number.isSafeInteger(parsed) || parsed > MAX_TTL_SECONDS) {
+    throw new Error("TTL must be 10 years or less.");
+  }
+
+  return parsed;
+}
+
+function updatedExpiration(current: string | null, ttlSeconds: number | null | undefined, updatedAt: string): string | null {
+  if (ttlSeconds === undefined) {
+    return current;
+  }
+
+  return ttlSeconds === null ? null : new Date(Date.parse(updatedAt) + ttlSeconds * 1000).toISOString();
+}
+
+function updatePayload(metadata: ArtifactMetadata): UpdatePayload {
+  return {
+    id: metadata.id,
+    filename: metadata.filename,
+    updatedAt: metadata.updatedAt,
+    expiresAt: metadata.expiresAt,
+    sandbox: metadata.sandbox,
+    size: metadata.size,
+    revision: metadata.revision,
+    contentSha256: metadata.contentSha256,
+    attributes: metadata.attributes,
+  };
 }
 
 function parseSandbox(value: unknown): SandboxMode {
@@ -1563,13 +1648,16 @@ function isValidId(id: string): boolean {
 }
 
 function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
+  const attributes = { ...(metadata.attributes ?? {}) } as ArtifactAttributes & Record<string, unknown>;
+  delete attributes.status;
+
   return {
     ...metadata,
     updatedAt: metadata.updatedAt ?? metadata.createdAt,
     revision: metadata.revision ?? 1,
     contentKey: metadata.contentKey ?? htmlKey(metadata.id),
     contentSha256: metadata.contentSha256 ?? null,
-    attributes: metadata.attributes ?? {},
+    attributes,
   };
 }
 

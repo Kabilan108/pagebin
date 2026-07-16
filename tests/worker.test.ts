@@ -200,6 +200,76 @@ describe("worker", () => {
     });
   });
 
+  test("changes or removes TTL without uploading content", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const expiringResponse = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer publish-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ ttlSeconds: 604800 }),
+      }),
+      env as never,
+    );
+    const expiring = (await expiringResponse.json()) as { expiresAt: string | null; revision: number };
+
+    expect(expiringResponse.status).toBe(200);
+    expect(expiring.expiresAt).not.toBeNull();
+    expect(expiring.revision).toBe(2);
+
+    const permanentResponse = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer publish-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ ttlSeconds: null }),
+      }),
+      env as never,
+    );
+    const permanent = (await permanentResponse.json()) as { expiresAt: string | null; revision: number };
+
+    expect(permanentResponse.status).toBe(200);
+    expect(permanent.expiresAt).toBeNull();
+    expect(permanent.revision).toBe(3);
+    expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(200);
+  });
+
+  test("commits content and TTL as one conditional metadata update", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const response = await updateFixtureResponse(
+      env,
+      published.id,
+      { contents: "<!doctype html><h1>expiring update</h1>", filename: "updated.html" },
+      { ttlSeconds: "604800" },
+    );
+    const payload = (await response.json()) as { expiresAt: string | null; revision: number };
+
+    expect(response.status).toBe(200);
+    expect(payload.expiresAt).not.toBeNull();
+    expect(payload.revision).toBe(2);
+  });
+
+  test("preserves expiration when a content update omits TTL", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env, { ttlSeconds: "604800" });
+    const beforeResponse = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+    const before = (await beforeResponse.json()) as { expiresAt: string | null };
+    const updateResponse = await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>still expiring</h1>",
+      filename: "updated.html",
+    });
+    const updated = (await updateResponse.json()) as { expiresAt: string | null };
+
+    expect(updateResponse.status).toBe(200);
+    expect(before.expiresAt).not.toBeNull();
+    expect(updated.expiresAt).toBe(before.expiresAt);
+  });
+
   test("requires publisher authorization to update artifacts", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
@@ -351,7 +421,6 @@ describe("worker", () => {
           project: "pagebin",
           sourceHost: "sietch",
           artifactType: "plan",
-          status: "draft",
         }),
       },
       file: { contents: "<!doctype html><h1>plan</h1>", filename: "plan.html" },
@@ -376,14 +445,13 @@ describe("worker", () => {
       env,
       published.id,
       { contents: "<!doctype html><h1>done</h1>", filename: "plan.html" },
-      { attributes: JSON.stringify({ status: "done", gitCommit: "abc123" }) },
+      { attributes: JSON.stringify({ gitCommit: "abc123" }) },
     );
     const updated = (await updateResponse.json()) as { attributes: Record<string, string> };
 
     expect(updated.attributes).toMatchObject({
       title: "Dashboard plan",
       project: "pagebin",
-      status: "done",
       gitCommit: "abc123",
     });
   });
@@ -421,6 +489,30 @@ describe("worker", () => {
     );
 
     expect(response.status).toBe(400);
+  });
+
+  test("accepts and discards legacy status attributes", async () => {
+    const env = createEnv();
+    const multipart = createMultipartBody({
+      fields: { attributes: JSON.stringify({ title: "Legacy client", status: "active" }) },
+      file: { contents: "<!doctype html><h1>legacy</h1>", filename: "legacy.html" },
+    });
+    const response = await worker.fetch(
+      new Request("https://pagebin.test/api/publish", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer publish-secret",
+          "Content-Length": String(multipart.byteLength),
+          "Content-Type": `multipart/form-data; boundary=${multipart.boundary}`,
+        },
+        body: multipart.body,
+      }),
+      env as never,
+    );
+    const payload = (await response.json()) as { attributes: Record<string, string> };
+
+    expect(response.status).toBe(201);
+    expect(payload.attributes).toEqual({ title: "Legacy client" });
   });
 
   test("uses the display filename multipart field when updating metadata", async () => {
@@ -654,6 +746,25 @@ describe("worker", () => {
     expect(missingCsrf.status).toBe(403);
   });
 
+  test("omits expired artifacts from the dashboard index", async () => {
+    const env = createEnv();
+    const originalDateNow = Date.now;
+    const expired = await publishFixture(env, { ttlSeconds: "1" });
+    const active = await publishFixture(env);
+
+    try {
+      Date.now = () => originalDateNow() + 2000;
+      const response = await worker.fetch(new Request("http://localhost/api/dashboard/artifacts"), env as never);
+      const payload = (await response.json()) as { artifacts: Array<{ id: string }> };
+
+      expect(response.status).toBe(200);
+      expect(payload.artifacts.map((artifact) => artifact.id)).toEqual([active.id]);
+      expect(payload.artifacts.some((artifact) => artifact.id === expired.id)).toBe(false);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
   test("keeps public, API, and admin origins isolated", async () => {
     const env = createEnv();
 
@@ -828,6 +939,27 @@ describe("worker", () => {
     expect(response.status).toBe(409);
     expect(await rawResponse.text()).toContain("<script>globalThis.ok = true</script>");
     expect([...env.ARTIFACTS.objects.keys()].filter((key) => key.includes("/content/"))).toHaveLength(0);
+  });
+
+  test("rejects a concurrent TTL update without changing expiration", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    env.ARTIFACTS.invalidateNextConditionalPut = true;
+
+    const response = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer publish-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ ttlSeconds: 604800 }),
+      }),
+      env as never,
+    );
+    const metadata = await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`);
+    const stored = JSON.parse((await metadata?.text()) ?? "{}") as { expiresAt: string | null };
+
+    expect(response.status).toBe(409);
+    expect(stored.expiresAt).toBeNull();
   });
 
   test("rejects concurrent reissue and preserves the current viewer token", async () => {

@@ -17,10 +17,12 @@ export PAGEBIN_ENDPOINT="https://api.page-bin.com"
 export PAGEBIN_PUBLISH_TOKEN="..."
 
 pagebin publish ./plan.html --verify --json
-pagebin publish ./report.md --type report --status done
+pagebin publish ./report.md --type report
 pagebin publish ./scratch.html --ttl 7d
 pagebin update ./plan.html --json
 pagebin update <artifact_id_or_viewer_url> ./plan.html
+pagebin update <artifact_id_or_viewer_url> --ttl never
+pagebin update <artifact_id_or_viewer_url> ./plan.html --ttl 7d
 pagebin verify <artifact_id_or_viewer_url> ./plan.html --json
 pagebin watch ./implementation-log.html --json
 pagebin list
@@ -40,10 +42,9 @@ Publish and update infer:
 - project and repository from the Git root and origin;
 - source host, repository-relative path, branch, and commit;
 - artifact type from the filename/path;
-- status `active` unless overridden;
-- agent from `PAGEBIN_AGENT`, Codex, or Claude Code environment hints.
+- agent from Codex, Claude Code, or OpenCode environment hints.
 
-Override with `--title`, `--project`, `--repo`, `--source-host`, `--source-path`, `--git-branch`, `--git-commit`, `--type`, `--status`, or `--agent`. Use `--no-infer` to send only explicit fields.
+Override with `--title`, `--project`, `--repo`, `--source-host`, `--source-path`, `--git-branch`, `--git-commit`, `--type`, or `--agent`. `--agent` is the only authoritative agent override; there is no environment-variable override. Use `--no-infer` to send only explicit fields.
 
 ### Local receipts
 
@@ -63,8 +64,8 @@ The dashboard supports:
 
 - recent artifacts grouped by project;
 - title, filename, project, and host search;
-- project, host, and status filters;
-- status, expiration, revision, and provenance display;
+- project and host filters;
+- expiration, revision, and provenance display;
 - Open and Copy link through encrypted capability recovery;
 - reissue and delete actions.
 

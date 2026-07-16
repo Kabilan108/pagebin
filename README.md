@@ -30,9 +30,12 @@ pagebin receipts
 pagebin show <artifact_id_or_file>
 pagebin reissue <artifact_id>
 pagebin delete <artifact_id>
+pagebin skill
 ```
 
 Artifacts do not expire unless `--ttl` is provided. Markdown is rendered to static HTML in the CLI before upload, including GFM tables, highlighted code, frontmatter properties, and document outlines. Only documents containing Mermaid diagrams load the pinned Mermaid browser runtime.
+
+`pagebin skill` prints concise, version-matched instructions for agents and does not require endpoint credentials.
 
 ### Metadata inference
 
@@ -110,7 +113,7 @@ Create a Cloudflare Access self-hosted application for `admin.page-bin.com` with
 The custom domains are declared in `wrangler.toml`; `workers.dev` and preview URLs are disabled. Deploy with:
 
 ```bash
-bun run deploy
+direnv exec . bun run deploy
 ```
 
 After deployment, smoke-test publish with `--verify`, dashboard authentication, link recovery, reissue revocation, host isolation, and deletion.

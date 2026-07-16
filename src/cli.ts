@@ -201,7 +201,7 @@ interface ArtifactTarget {
 }
 
 interface ParsedCommand {
-  command: "publish" | "delete" | "reissue" | "update" | "watch" | "list" | "verify" | "receipts" | "show" | "help" | "version";
+  command: "publish" | "delete" | "reissue" | "update" | "watch" | "list" | "verify" | "receipts" | "show" | "skill" | "help" | "version";
   options?: PublishOptions | DeleteOptions | ReissueOptions | UpdateOptions | WatchOptions | ListOptions | VerifyOptions | ReceiptListOptions | ShowOptions | HelpOptions;
 }
 
@@ -310,6 +310,14 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     return { command: "version" };
   }
 
+  if (command === "skill") {
+    if (rest.length > 0) {
+      throw new CliError("skill does not accept arguments.");
+    }
+
+    return { command: "skill" };
+  }
+
   if (command === "publish") {
     return {
       command,
@@ -406,6 +414,9 @@ async function main(): Promise<void> {
         return;
       case "version":
         console.log(VERSION);
+        return;
+      case "skill":
+        console.log(skillText());
         return;
       case "help":
         console.log(helpText((parsed.options as HelpOptions | undefined)?.topic ?? null));
@@ -2150,7 +2161,7 @@ function isHelpFlag(value: string | undefined): boolean {
 }
 
 function isHelpTopic(value: string): value is HelpTopic {
-  return value === "publish" || value === "list" || value === "reissue" || value === "update" || value === "watch" || value === "verify" || value === "receipts" || value === "show" || value === "delete" || value === "version";
+  return value === "publish" || value === "list" || value === "reissue" || value === "update" || value === "watch" || value === "verify" || value === "receipts" || value === "show" || value === "delete" || value === "skill" || value === "version";
 }
 
 function helpText(topic: HelpTopic | null = null): string {
@@ -2285,6 +2296,14 @@ Usage:
   pagebin --version
   pagebin -v
 `;
+    case "skill":
+      return `pagebin skill
+
+Prints concise, version-matched instructions for agents using pagebin.
+
+Usage:
+  pagebin skill
+`;
     case null:
       break;
   }
@@ -2305,6 +2324,7 @@ Usage:
   pagebin receipts [--json]
   pagebin show <artifact_id|viewer_url|file> [--json]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
+  pagebin skill
   pagebin version
   pagebin <command> --help
 
@@ -2322,10 +2342,50 @@ Behavior:
   receipts             Lists protected local publication receipts.
   show                 Recovers a viewer URL from a local receipt.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
+  skill                Prints concise, version-matched agent instructions.
 
 Environment:
   PAGEBIN_ENDPOINT        Worker endpoint, for example https://pagebin.example.workers.dev
   PAGEBIN_PUBLISH_TOKEN  Publisher token shared with the Worker
+`;
+}
+
+function skillText(): string {
+  return `---
+name: pagebin
+description: Publish, update, verify, recover, list, reissue, and delete protected PageBin artifacts from the command line.
+---
+
+# PageBin CLI ${VERSION}
+
+Use PageBin to publish a local HTML or Markdown file at an unlisted capability URL. Anyone with a viewer URL can read that artifact, so never publish credentials or secrets.
+
+## Core workflow
+
+Publish once, capture the JSON result, and preserve the artifact identity:
+
+\`\`\`sh
+pagebin publish /absolute/path/artifact.html --verify --json
+pagebin update /absolute/path/artifact.html --json
+pagebin verify <viewer-url-or-id> /absolute/path/artifact.html --json
+\`\`\`
+
+PageBin infers repository, project, host, branch, commit, source path, title, type, and agent. Override incorrect inference with metadata flags such as \`--title\`, \`--type\`, or \`--agent\`; use \`--no-infer\` only when inference is unwanted.
+
+Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally temporary. Change an existing lifetime with \`pagebin update <id-or-url> --ttl 7d\`; use \`--ttl never\` to remove expiration.
+
+## Commands
+
+- \`publish <file>\`: create an artifact. Use \`--force-new\` only when a second artifact for the same source file is intentional.
+- \`update <file>\`: update by protected local receipt. An artifact ID or viewer URL may be supplied explicitly.
+- \`watch <file>\`: publish or update continuously. Prefer explicit checkpoint updates unless continuous watch is useful.
+- \`verify <id-or-url> <file>\`: confirm the published content matches the local file.
+- \`receipts\` and \`show <target>\`: recover locally stored viewer URLs without reissuing them.
+- \`list\`: list server-side artifact metadata; viewer tokens are intentionally absent.
+- \`reissue <id>\`: create a new viewer URL and revoke the old one.
+- \`delete <id>\`: permanently remove an artifact.
+
+Use \`--json\` for agent-friendly output. Viewer URLs and receipt files are capability secrets: do not print them unnecessarily or commit them. Run \`pagebin <command> --help\` for the exact options supported by this version.
 `;
 }
 

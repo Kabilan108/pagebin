@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import packageJson from "../package.json" with { type: "json" };
 import { normalizeEndpoint, parseArgs, parseTtlSeconds, sanitizeRepositoryRemote } from "../src/cli";
 
 interface CliRun {
@@ -363,7 +364,7 @@ describe("parseArgs", () => {
   });
 
   test("parses subcommand help without endpoint configuration", () => {
-    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "receipts", "show", "delete", "version"] as const;
+    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "receipts", "show", "delete", "skill", "version"] as const;
 
     for (const command of commands) {
       expect(parseArgs([command, "--help"], {})).toEqual({ command: "help", options: { topic: command } });
@@ -385,7 +386,7 @@ describe("normalizeEndpoint", () => {
 
 describe("help command", () => {
   test("prints subcommand help without endpoint configuration", async () => {
-    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "receipts", "show", "delete", "version"];
+    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "receipts", "show", "delete", "skill", "version"];
 
     for (const command of commands) {
       const result = await runPagebin([command, "--help"], {});
@@ -394,6 +395,23 @@ describe("help command", () => {
       expect(result.stderr).toBe("");
       expect(result.stdout).toContain(`pagebin ${command}`);
     }
+  });
+});
+
+describe("skill command", () => {
+  test("prints version-matched instructions without endpoint configuration", async () => {
+    const result = await runPagebin(["skill"], {});
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("name: pagebin");
+    expect(result.stdout).toContain(`# PageBin CLI ${packageJson.version}`);
+    expect(result.stdout).toContain("pagebin publish /absolute/path/artifact.html --verify --json");
+    expect(result.stdout).not.toContain("highlight.js");
+  });
+
+  test("rejects skill arguments", () => {
+    expect(() => parseArgs(["skill", "--json"], {})).toThrow("skill does not accept arguments");
   });
 });
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "PageBin Release and Deploy"
+  short_description: "Safely deploy the PageBin Worker or publish a CLI release"
+  default_prompt: "Deploy or release PageBin with verification, secret-safe credential loading, and explicit reporting of what was published."

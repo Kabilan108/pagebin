@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.0 - 2026-07-16
+
+- Added `pagebin skill`, a credential-free command that prints concise, version-matched instructions for agents using the CLI.
+- Added a project-local release/deployment skill and consolidated project skill discovery around `.agents/skills` with Claude and Codex compatibility symlinks.
+- Updated PageBin verification guidance for the local Wrangler configuration, Helium tab handling, sandbox socket permissions, and ephemeral-port test behavior.
+- Documented the secret-safe `direnv exec . bun run deploy` production workflow and durable repository guidance learned from the PageBin implementation cycle.
+
+## 0.10.0 - 2026-07-16
+
+- Made artifacts permanent by default, added explicit TTL updates and removal, and hid expired artifacts that can no longer be reissued.
+- Removed artifact status tracking and added reliable Codex, Claude Code, and OpenCode agent inference with `--agent` as the sole explicit override.
+- Added a branded public not-found page while preserving plain API errors.
+- Pre-rendered Markdown, frontmatter, document navigation, and syntax highlighting in the CLI; only Mermaid documents retain a browser rendering dependency.
+- Added bounded-concurrency dashboard metadata reads and interactive CLI progress without changing stdout or JSON contracts.
+
 ## 0.9.0 - 2026-07-15
 
 - Redesigned the dashboard: flat editorial layout (serif titles, hairline rows) replaces the card grid. Artifacts group by normalized repository origin (`https://`, `git@`, and bare `host/org/name` remotes collapse to one section) with project fallback, so the same repo checked out in different folders lands in one group.

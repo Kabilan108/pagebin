@@ -653,9 +653,10 @@ flowchart LR
 
         const html = await (file as File).text();
 
-        expect(html).toContain('<script type="application/json" id="markdown-source"');
+        expect(html).toContain('<h1 id="cli-markdown">');
         expect(html).toContain("CLI Markdown");
         expect(html).toContain("data-mermaid-viewport");
+        expect(html).toContain("mermaid@11.6.0");
         expect(html).toContain("data-copy-code");
         expect(html).toContain("Properties");
         expect(html).toContain("Outline");
@@ -686,8 +687,8 @@ flowchart LR
     }
   });
 
-  test("rejects publishing markdown with the strict sandbox before sending a request", async () => {
-    const filePath = await writeTempFile("cli-plan.md", "# CLI Markdown\n");
+  test("rejects publishing Mermaid markdown with the strict sandbox before sending a request", async () => {
+    const filePath = await writeTempFile("cli-plan.md", "# CLI Markdown\n\n```mermaid\nA --> B\n```\n");
     let requestCount = 0;
     const server = Bun.serve({
       port: 0,
@@ -703,8 +704,41 @@ flowchart LR
       });
 
       expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain("Markdown rendering requires --sandbox standard");
+      expect(result.stderr).toContain("Mermaid diagrams require --sandbox standard");
       expect(requestCount).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("publishes static markdown with the strict sandbox", async () => {
+    const filePath = await writeTempFile("strict-plan.md", "# Strict Markdown\n\nStatic content.\n");
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const form = await request.formData();
+        const file = form.get("file");
+
+        expect(form.get("sandbox")).toBe("strict");
+        expect(file).toBeInstanceOf(File);
+        expect(await (file as File).text()).toContain("Static content.");
+
+        return Response.json({
+          id: "artifact-id",
+          url: "https://pagebin.test/p/artifact-id/view-token",
+          expiresAt: null,
+          sandbox: "strict",
+        }, { status: 201 });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["publish", filePath, "--endpoint", server.url.origin, "--sandbox", "strict"], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
     } finally {
       server.stop(true);
     }
@@ -1242,7 +1276,7 @@ describe("update command", () => {
     }
   });
 
-  test("warns when updating a strict-sandbox artifact with markdown", async () => {
+  test("updates a strict-sandbox artifact with static markdown without a warning", async () => {
     const filePath = await writeTempFile("cli-update.md", "# Updated\n");
     const server = Bun.serve({
       port: 0,
@@ -1274,7 +1308,46 @@ describe("update command", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("artifact-id-1234\n");
-      expect(result.stderr).toContain("strict-sandbox artifact");
+      expect(result.stderr).toBe("");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects a Mermaid update when the artifact uses the strict sandbox", async () => {
+    const filePath = await writeTempFile("strict-diagram.md", "# Diagram\n\n```mermaid\nflowchart LR\nA --> B\n```\n");
+    let putCount = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        if (request.method === "GET") {
+          return Response.json({
+            id: "artifact-id-1234",
+            filename: "strict-diagram.md",
+            createdAt: "2026-06-18T00:00:00.000Z",
+            updatedAt: "2026-06-18T00:00:00.000Z",
+            expiresAt: null,
+            sandbox: "strict",
+            size: 120,
+            revision: 1,
+            contentSha256: "abc",
+            attributes: {},
+          });
+        }
+
+        putCount += 1;
+        return Response.json({ error: "unexpected" }, { status: 500 });
+      },
+    });
+
+    try {
+      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Mermaid diagrams require --sandbox standard");
+      expect(putCount).toBe(0);
     } finally {
       server.stop(true);
     }
@@ -1387,7 +1460,8 @@ describe("watch command", () => {
           expect(form.get("filename")).toBe("cli-watch.md");
           expect((file as File).name).toBe("cli-watch.html");
           expect(html).toContain("First");
-          expect(html).toContain('<script type="application/json" id="markdown-source"');
+          expect(html).toContain('<h1 id="first">');
+          expect(html).not.toContain("markdown-source");
 
           return Response.json(
             {

@@ -13,6 +13,11 @@ class MemoryR2Bucket {
   failHtmlDelete = false;
   failMetadataPut = false;
   invalidateNextConditionalPut = false;
+  maxMetadataGets = 0;
+  metadataGetDelayMs = 0;
+  listPageSize = Number.POSITIVE_INFINITY;
+  listRequestCount = 0;
+  private activeMetadataGets = 0;
   private etagSequence = 0;
 
   async put(
@@ -61,7 +66,22 @@ class MemoryR2Bucket {
     arrayBuffer: () => Promise<ArrayBuffer>;
     etag: string;
   } | null> {
+    const tracksConcurrency = key.endsWith("/metadata.json");
+
+    if (tracksConcurrency) {
+      this.activeMetadataGets += 1;
+      this.maxMetadataGets = Math.max(this.maxMetadataGets, this.activeMetadataGets);
+
+      if (this.metadataGetDelayMs > 0) {
+        await Bun.sleep(this.metadataGetDelayMs);
+      }
+    }
+
     const object = this.objects.get(key);
+
+    if (tracksConcurrency) {
+      this.activeMetadataGets -= 1;
+    }
 
     if (!object) {
       return null;
@@ -88,12 +108,20 @@ class MemoryR2Bucket {
     objects: { key: string; uploaded: Date }[];
     truncated: boolean;
   }> {
+    this.listRequestCount += 1;
+    const offset = Number(options.cursor ?? "0");
+    const objects = [...this.objects.keys()]
+      .filter((key) => !options.prefix || key.startsWith(options.prefix))
+      .sort()
+      .map((key) => ({ key, uploaded: this.objects.get(key)?.uploaded ?? new Date(0) }));
+    const page = objects.slice(offset, offset + this.listPageSize);
+    const nextOffset = offset + page.length;
+    const truncated = nextOffset < objects.length;
+
     return {
-      objects: [...this.objects.keys()]
-        .filter((key) => !options.prefix || key.startsWith(options.prefix))
-        .sort()
-        .map((key) => ({ key, uploaded: this.objects.get(key)?.uploaded ?? new Date(0) })),
-      truncated: false,
+      ...(truncated ? { cursor: String(nextOffset) } : {}),
+      objects: page,
+      truncated,
     };
   }
 
@@ -633,11 +661,35 @@ describe("worker", () => {
 
     try {
       Date.now = () => originalDateNow() + 2000;
-      expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(404);
-      expect((await worker.fetch(new Request("https://pagebin.test/p/unknownunknownunknown/t"), env as never)).status).toBe(404);
+      const expiredResponse = await worker.fetch(new Request(published.url), env as never);
+      const unknownResponse = await worker.fetch(
+        new Request("https://pagebin.test/p/unknownunknownunknown/t"),
+        env as never,
+      );
+
+      expect(expiredResponse.status).toBe(404);
+      expect(expiredResponse.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+      expect(expiredResponse.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
+      expect(await expiredResponse.text()).toContain("Artifact not found");
+      expect(unknownResponse.status).toBe(404);
+      expect(await unknownResponse.text()).toContain("Artifact not found");
     } finally {
       Date.now = originalDateNow;
     }
+  });
+
+  test("site routes use the branded 404 while API routes keep plain errors", async () => {
+    const env = createEnv();
+    const siteResponse = await worker.fetch(new Request("https://pagebin.test/missing"), env as never);
+    const apiResponse = await worker.fetch(new Request("https://pagebin.test/api/missing"), env as never);
+
+    expect(siteResponse.status).toBe(404);
+    expect(siteResponse.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    expect(siteResponse.headers.get("X-Robots-Tag")).toContain("noindex");
+    expect(await siteResponse.text()).toContain("PageBin · missing page");
+    expect(apiResponse.status).toBe(404);
+    expect(apiResponse.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    expect(await apiResponse.text()).toBe("Not found.\n");
   });
 
   test("scheduled cleanup deletes expired artifacts and keeps active artifacts", async () => {
@@ -762,6 +814,68 @@ describe("worker", () => {
       expect(payload.artifacts.some((artifact) => artifact.id === expired.id)).toBe(false);
     } finally {
       Date.now = originalDateNow;
+    }
+  });
+
+  test("reads dashboard metadata with bounded concurrency and skips corrupt entries", async () => {
+    const env = createEnv();
+    const originalConsoleError = console.error;
+
+    for (let index = 0; index < 8; index += 1) {
+      await publishFixture(env, { title: `Artifact ${index}` });
+    }
+
+    await env.ARTIFACTS.put("artifacts/corruptcorruptcorr/metadata.json", "not json");
+    env.ARTIFACTS.maxMetadataGets = 0;
+    env.ARTIFACTS.metadataGetDelayMs = 5;
+
+    const errors: unknown[][] = [];
+    console.error = (...values: unknown[]) => errors.push(values);
+
+    try {
+      const response = await worker.fetch(new Request("http://localhost/api/dashboard/artifacts"), env as never);
+      const payload = await response.json() as { artifacts: unknown[]; total: number };
+
+      expect(response.status).toBe(200);
+      expect(payload.total).toBe(8);
+      expect(payload.artifacts).toHaveLength(8);
+      expect(env.ARTIFACTS.maxMetadataGets).toBe(6);
+      expect(errors).toHaveLength(1);
+      expect(String(errors[0]?.[0])).toContain("corruptcorruptcorr");
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("reads every metadata page for the authenticated artifact list", async () => {
+    const env = createEnv();
+    const originalConsoleError = console.error;
+
+    for (let index = 0; index < 4; index += 1) {
+      await publishFixture(env, { title: `Listed artifact ${index}` });
+    }
+
+    await env.ARTIFACTS.put("artifacts/corruptcorruptcorr/metadata.json", "not json");
+    env.ARTIFACTS.listPageSize = 3;
+    env.ARTIFACTS.listRequestCount = 0;
+    const errors: unknown[][] = [];
+    console.error = (...values: unknown[]) => errors.push(values);
+
+    try {
+      const response = await worker.fetch(
+        new Request("https://pagebin.test/api/artifacts", {
+          headers: { Authorization: "Bearer publish-secret" },
+        }),
+        env as never,
+      );
+      const payload = await response.json() as { artifacts: unknown[] };
+
+      expect(response.status).toBe(200);
+      expect(payload.artifacts).toHaveLength(4);
+      expect(env.ARTIFACTS.listRequestCount).toBeGreaterThan(1);
+      expect(errors).toHaveLength(1);
+    } finally {
+      console.error = originalConsoleError;
     }
   });
 

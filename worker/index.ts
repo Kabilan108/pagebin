@@ -1,4 +1,5 @@
 import { FAVICON_SVG, dashboardHtml } from "./dashboard";
+import { NOT_FOUND_HTML } from "./not-found";
 
 interface Env {
   ARTIFACTS: R2Bucket;
@@ -119,6 +120,7 @@ const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 const MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
 const ORPHAN_CONTENT_GRACE_MS = 60 * 60 * 1000;
+const METADATA_READ_CONCURRENCY = 6;
 const STANDARD_SANDBOX = "allow-scripts allow-forms allow-popups allow-downloads";
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -153,7 +155,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     }
 
     if (hostname === "admin.page-bin.com") {
-      return notFound();
+      return siteNotFound();
     }
   }
 
@@ -225,7 +227,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return serveRaw(env, rawMatch[1], rawMatch[2]);
   }
 
-  return notFound();
+  return url.pathname.startsWith("/api/") || hostname === "api.page-bin.com" ? notFound() : siteNotFound();
 }
 
 async function routeDashboard(request: Request, env: Env, url: URL, hostname: string): Promise<Response | null> {
@@ -387,26 +389,50 @@ async function readAllArtifactMetadata(env: Env): Promise<ArtifactMetadata[]> {
 
     cursor = result.truncated ? result.cursor : undefined;
 
-    for (const object of result.objects) {
-      if (!object.key.endsWith("/metadata.json")) {
+    artifacts.push(...await readListedArtifactMetadata(env, result.objects));
+  } while (cursor);
+
+  return artifacts;
+}
+
+async function readListedArtifactMetadata(env: Env, objects: R2Object[]): Promise<ArtifactMetadata[]> {
+  const keys = objects.filter((object) => object.key.endsWith("/metadata.json")).map((object) => object.key);
+  const results = new Array<ArtifactMetadata | null>(keys.length).fill(null);
+  let nextIndex = 0;
+
+  const readNext = async (): Promise<void> => {
+    while (nextIndex < keys.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const key = keys[index];
+
+      if (!key) {
         continue;
       }
 
-      const stored = await env.ARTIFACTS.get(object.key);
+      const stored = await env.ARTIFACTS.get(key);
 
       if (!stored) {
         continue;
       }
 
-      const metadata = normalizeMetadata(JSON.parse(await stored.text()) as ArtifactMetadata);
+      const serialized = await stored.text();
 
-      if (!metadata.deletedAt) {
-        artifacts.push(metadata);
+      try {
+        const metadata = normalizeMetadata(JSON.parse(serialized) as ArtifactMetadata);
+
+        if (!metadata.deletedAt) {
+          results[index] = metadata;
+        }
+      } catch (error) {
+        console.error(`Unable to read artifact metadata at ${key}.`, error);
       }
     }
-  } while (cursor);
+  };
 
-  return artifacts;
+  await Promise.all(Array.from({ length: Math.min(METADATA_READ_CONCURRENCY, keys.length) }, readNext));
+
+  return results.filter((metadata): metadata is ArtifactMetadata => metadata !== null);
 }
 
 async function isDashboardAuthorized(request: Request, env: Env, hostname: string): Promise<boolean> {
@@ -755,33 +781,7 @@ async function listArtifacts(request: Request, env: Env): Promise<Response> {
     return json({ error: "Unauthorized." }, 401);
   }
 
-  const artifacts: ListedArtifact[] = [];
-  let cursor: string | undefined;
-
-  do {
-    const options: R2ListOptions = cursor ? { cursor, prefix: "artifacts/" } : { prefix: "artifacts/" };
-    const result = await env.ARTIFACTS.list(options);
-
-    cursor = result.truncated ? result.cursor : undefined;
-
-    for (const object of result.objects) {
-      if (!object.key.endsWith("/metadata.json")) {
-        continue;
-      }
-
-      const metadata = await env.ARTIFACTS.get(object.key);
-
-      if (!metadata) {
-        continue;
-      }
-
-      const artifact = normalizeMetadata(JSON.parse(await metadata.text()) as ArtifactMetadata);
-
-      if (artifact.deletedAt) {
-        continue;
-      }
-
-      artifacts.push({
+  const artifacts: ListedArtifact[] = (await readAllArtifactMetadata(env)).map((artifact) => ({
         id: artifact.id,
         filename: artifact.filename,
         createdAt: artifact.createdAt,
@@ -791,9 +791,7 @@ async function listArtifacts(request: Request, env: Env): Promise<Response> {
         revision: artifact.revision,
         contentSha256: artifact.contentSha256,
         attributes: artifact.attributes,
-      });
-    }
-  } while (cursor);
+      }));
 
   artifacts.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 
@@ -986,7 +984,7 @@ async function serveViewer(env: Env, requestUrl: string, id: string, token: stri
   const metadata = await readAuthorizedMetadata(env, id, token);
 
   if (!metadata) {
-    return notFound();
+    return siteNotFound();
   }
 
   const url = new URL(requestUrl);
@@ -1060,7 +1058,7 @@ async function serveRaw(env: Env, id: string, token: string): Promise<Response> 
   const metadata = await readAuthorizedMetadata(env, id, token);
 
   if (!metadata) {
-    return notFound();
+    return siteNotFound();
   }
 
   let object = await env.ARTIFACTS.get(metadata.contentKey);
@@ -1069,13 +1067,13 @@ async function serveRaw(env: Env, id: string, token: string): Promise<Response> 
     const currentMetadata = await readAuthorizedMetadata(env, id, token);
 
     if (!currentMetadata || currentMetadata.contentKey === metadata.contentKey) {
-      return notFound();
+      return siteNotFound();
     }
 
     object = await env.ARTIFACTS.get(currentMetadata.contentKey);
 
     if (!object) {
-      return notFound();
+      return siteNotFound();
     }
   }
 
@@ -1722,6 +1720,13 @@ function text(body: string, status = 200, headers: HeadersInit = {}): Response {
 function notFound(): Response {
   return text("Not found.\n", 404, {
     "Content-Type": "text/plain; charset=utf-8",
+  });
+}
+
+function siteNotFound(): Response {
+  return text(NOT_FOUND_HTML, 404, {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "Content-Type": "text/html; charset=utf-8",
   });
 }
 

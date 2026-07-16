@@ -32,7 +32,7 @@ pagebin reissue <artifact_id>
 pagebin delete <artifact_id>
 ```
 
-Artifacts do not expire unless `--ttl` is provided. Markdown is rendered locally with GFM tables, highlighted code, frontmatter properties, and Mermaid diagrams.
+Artifacts do not expire unless `--ttl` is provided. Markdown is rendered to static HTML in the CLI before upload, including GFM tables, highlighted code, frontmatter properties, and document outlines. Only documents containing Mermaid diagrams load the pinned Mermaid browser runtime.
 
 ### Metadata inference
 
@@ -78,6 +78,7 @@ Legacy artifacts remain viewable but cannot be opened from the dashboard until r
 - A second AES-256-GCM encrypted token copy enables single-artifact dashboard recovery. The key is a Worker secret and is never stored in R2.
 - Dashboard endpoints validate the Cloudflare Access JWT signature, issuer, audience, and expiry. The CLI publisher token is never exposed to browser JavaScript.
 - Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers.
+- Markdown permits raw HTML without sanitization, matching direct HTML uploads. Treat published source as trusted; use the strict sandbox for static Markdown when scripts and other interactive permissions are unnecessary. Mermaid requires the standard sandbox.
 - Metadata mutation uses R2 ETag preconditions, monotonic revisions, tombstones, and versioned content objects to prevent lost updates and token resurrection.
 - Superseded/orphan content is removed after a grace period; expired and deleted artifacts are tombstoned before content removal.
 

@@ -6,7 +6,6 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, relative, resolve } from "node:path";
 
 import packageJson from "../package.json" with { type: "json" };
-import { renderMarkdownDocument } from "./markdown-template.ts";
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SANDBOX = "standard";
@@ -1038,10 +1037,7 @@ function requireValue(value: string | undefined, flag: string): string {
 }
 
 async function publishArtifact(options: PublishOptions, output = true): Promise<PublishResponse> {
-  assertSandboxSupportsFile(options.filePath, options.sandbox);
-
   const token = readPublishToken();
-  const { form } = await createHtmlUploadForm(options.filePath);
   const attributes = await resolveArtifactAttributes(options.filePath, options.attributes, options.inferMetadata);
   const absoluteFilePath = resolve(options.filePath);
   const existingReceipt = await findReceiptByFile(options.endpoint, absoluteFilePath);
@@ -1053,6 +1049,10 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
     );
   }
 
+  reportStage(options.json, isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
+  const { form, hasMermaid, sourceKind } = await createHtmlUploadForm(options.filePath);
+  assertSandboxSupportsUpload(sourceKind, hasMermaid, options.sandbox);
+
   form.set("sandbox", options.sandbox);
   setArtifactAttributes(form, attributes);
 
@@ -1060,6 +1060,7 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
     form.set("ttlSeconds", String(options.ttlSeconds));
   }
 
+  reportStage(options.json, "Uploading artifact…");
   const response = await fetch(`${options.endpoint}/api/publish`, {
     method: "POST",
     headers: {
@@ -1085,11 +1086,12 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
 
   if (options.verify) {
     try {
+      reportStage(options.json, "Verifying upload…");
       verification = await verifyArtifactContent({
         endpoint: options.endpoint,
         filePath: options.filePath,
         id: payload.id,
-        json: false,
+        json: options.json,
         url: payload.url,
       });
     } catch (error) {
@@ -1129,6 +1131,7 @@ async function verifyArtifact(options: VerifyOptions): Promise<void> {
 }
 
 async function verifyArtifactContent(options: VerifyOptions): Promise<VerificationResult> {
+  reportStage(options.json, isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
   const upload = await readUploadFile(options.filePath);
   const localSha256 = await sha256Bytes(upload.bytes);
 
@@ -1211,18 +1214,24 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
   const attributes = resolvedOptions.filePath
     ? await resolveArtifactAttributes(resolvedOptions.filePath, resolvedOptions.attributes, resolvedOptions.inferMetadata)
     : resolvedOptions.attributes;
-  let sourceKind: UploadSourceKind | null = null;
   let response: Response;
 
   if (resolvedOptions.filePath) {
+    reportStage(options.json, isMarkdownFile(resolvedOptions.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
     const upload = await createHtmlUploadForm(resolvedOptions.filePath);
-    sourceKind = upload.sourceKind;
+
+    if (upload.hasMermaid) {
+      const artifact = await fetchArtifactDetail(resolvedOptions.endpoint, resolvedOptions.id, token);
+      assertSandboxSupportsUpload(upload.sourceKind, upload.hasMermaid, artifact.sandbox);
+    }
+
     setArtifactAttributes(upload.form, attributes);
 
     if (resolvedOptions.ttlSeconds !== undefined) {
       upload.form.set("ttlSeconds", resolvedOptions.ttlSeconds === null ? "never" : String(resolvedOptions.ttlSeconds));
     }
 
+    reportStage(options.json, "Uploading artifact…");
     response = await fetch(`${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}/content`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}` },
@@ -1241,10 +1250,6 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
   const payload = await readJsonResponse<UpdateResponse>(response);
 
   await updateReceiptAfterContent(resolvedOptions, payload, attributes);
-
-  if (sourceKind) {
-    warnIfStrictMarkdownUpdate(sourceKind, payload.sandbox);
-  }
 
   if (!output) {
     return payload;
@@ -1281,7 +1286,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
     }
 
     running = true;
-    updateArtifact({ ...updateOptions, json: false }, false)
+    updateArtifact(updateOptions, false)
       .then((payload) => {
         emitWatchEvent(options.json, "updated", { ...payload, url: updateOptions?.url ?? null });
       })
@@ -1327,7 +1332,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
           endpoint: options.endpoint,
           filePath: options.filePath,
           id: receipt.id,
-          json: false,
+          json: options.json,
           url: receipt.url,
           inferMetadata: options.inferMetadata,
           attributes: options.attributes,
@@ -1338,7 +1343,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
 
         emitWatchEvent(options.json, "updated", { ...payload, url: updateOptions.url });
       } else {
-        const payload = await publishArtifact({ ...options, json: false }, false);
+        const payload = await publishArtifact(options, false);
 
         emitWatchEvent(options.json, "published", payload);
 
@@ -1346,7 +1351,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
           endpoint: options.endpoint,
           filePath: options.filePath,
           id: payload.id,
-          json: false,
+          json: options.json,
           url: payload.url,
           inferMetadata: options.inferMetadata,
           attributes: options.attributes,
@@ -1359,7 +1364,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
         endpoint: options.endpoint,
         filePath: options.filePath,
         id: options.id,
-        json: false,
+        json: options.json,
         url: options.url,
         inferMetadata: false,
         attributes: {},
@@ -1422,14 +1427,14 @@ function emitWatchEvent(json: boolean, event: "published" | "updated", payload: 
   }
 }
 
-async function createHtmlUploadForm(filePath: string): Promise<{ form: FormData; sourceKind: UploadSourceKind }> {
+async function createHtmlUploadForm(filePath: string): Promise<{ form: FormData; hasMermaid: boolean; sourceKind: UploadSourceKind }> {
   const upload = await readUploadFile(filePath);
   const form = new FormData();
 
-  form.set("file", new Blob([upload.bytes], { type: "text/html; charset=utf-8" }), upload.uploadFilename);
+  form.set("file", new Blob([new Uint8Array(upload.bytes)], { type: "text/html; charset=utf-8" }), upload.uploadFilename);
   form.set("filename", upload.displayFilename);
 
-  return { form, sourceKind: upload.sourceKind };
+  return { form, hasMermaid: upload.hasMermaid, sourceKind: upload.sourceKind };
 }
 
 function setArtifactAttributes(form: FormData, attributes: ArtifactAttributes): void {
@@ -1592,6 +1597,7 @@ function compactAttributes(attributes: ArtifactAttributes): ArtifactAttributes {
 interface HtmlUpload {
   bytes: Uint8Array;
   displayFilename: string;
+  hasMermaid: boolean;
   sourceKind: UploadSourceKind;
   uploadFilename: string;
 }
@@ -1619,13 +1625,15 @@ async function readUploadFile(filePath: string): Promise<HtmlUpload> {
     return {
       bytes,
       displayFilename: basename(filePath),
+      hasMermaid: false,
       sourceKind: "html",
       uploadFilename: basename(filePath),
     };
   }
 
   const markdown = decodeUtf8(bytes, "Markdown files must be valid UTF-8 text.");
-  const html = renderMarkdownDocument(markdown, basename(filePath));
+  const { renderMarkdownArtifact } = await import("./markdown-renderer.ts");
+  const { hasMermaid, html } = renderMarkdownArtifact(markdown, basename(filePath));
   const htmlBytes = new TextEncoder().encode(html);
 
   if (htmlBytes.byteLength > DEFAULT_MAX_BYTES) {
@@ -1635,20 +1643,28 @@ async function readUploadFile(filePath: string): Promise<HtmlUpload> {
   return {
     bytes: htmlBytes,
     displayFilename: basename(filePath),
+    hasMermaid,
     sourceKind: "markdown",
     uploadFilename: `${basename(filePath, extension)}.html`,
   };
 }
 
-function assertSandboxSupportsFile(filePath: string, sandbox: SandboxMode): void {
-  if (sandbox === "strict" && isMarkdownFile(filePath)) {
-    throw new CliError("Markdown rendering requires --sandbox standard because it uses client-side scripts.");
+function assertSandboxSupportsUpload(sourceKind: UploadSourceKind, hasMermaid: boolean, sandbox: SandboxMode): void {
+  if (sourceKind === "markdown" && hasMermaid && sandbox === "strict") {
+    throw new CliError("Mermaid diagrams require --sandbox standard because they use client-side scripts.");
   }
 }
 
-function warnIfStrictMarkdownUpdate(sourceKind: UploadSourceKind, sandbox: SandboxMode): void {
-  if (sourceKind === "markdown" && sandbox === "strict") {
-    console.error("Warning: this Markdown upload was applied to a strict-sandbox artifact, so scripts will not run in the viewer.");
+async function fetchArtifactDetail(endpoint: string, id: string, token: string): Promise<ArtifactDetailResponse> {
+  const response = await fetch(`${endpoint}/api/artifacts/${encodeURIComponent(id)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return readJsonResponse<ArtifactDetailResponse>(response);
+}
+
+function reportStage(json: boolean, message: string): void {
+  if (!json && process.stderr.isTTY) {
+    console.error(message);
   }
 }
 
@@ -2150,7 +2166,7 @@ Usage:
 Options:
   --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
   --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
-  --sandbox strict     Disables iframe sandbox permissions; Markdown requires standard.
+  --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   --verify             Fetches the uploaded raw content and verifies its SHA-256 hash.
   --force-new          Intentionally creates another artifact for a file with a local receipt.
   --no-infer           Disables repository, host, title, type, and agent inference.
@@ -2212,7 +2228,7 @@ Usage:
 Options:
   --ttl 7d             Sets an expiration for publish-then-watch mode only.
   --sandbox standard   Default for publish-then-watch mode.
-  --sandbox strict     Publish-then-watch HTML only; Markdown requires standard.
+  --sandbox strict     Supports HTML and static Markdown; Mermaid requires standard.
   --json               Emits versioned JSON Lines publish, update, and error events.
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
   -h, --help           Show this help.
@@ -2297,7 +2313,7 @@ Behavior:
   --json               Prints id, url, expiresAt, and sandbox as JSON.
   --ttl 7d             Sets expiration; update also accepts never to remove it.
   --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
-  --sandbox strict     Disables iframe sandbox permissions; Markdown requires standard.
+  --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.
   update               Replaces content, changes expiration, or does both atomically.

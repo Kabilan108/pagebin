@@ -25,9 +25,26 @@ interface ArtifactMetadata {
   revision: number;
   contentKey: string;
   contentSha256: string | null;
+  versions: ArtifactVersion[];
   deletedAt?: string;
   attributes: ArtifactAttributes;
   encryptedToken?: EncryptedViewerToken;
+}
+
+interface ArtifactVersion {
+  version: number;
+  contentKey: string;
+  contentSha256: string | null;
+  size: number;
+  createdAt: string;
+}
+
+interface ArtifactVersionSummary {
+  version: number;
+  size: number;
+  createdAt: string;
+  contentSha256: string | null;
+  current: boolean;
 }
 
 interface EncryptedViewerToken {
@@ -54,6 +71,7 @@ interface PublishPayload {
   expiresAt: string | null;
   sandbox: SandboxMode;
   revision: number;
+  version: number;
   contentSha256: string;
   attributes: ArtifactAttributes;
 }
@@ -74,6 +92,7 @@ interface UpdatePayload {
   sandbox: SandboxMode;
   size: number;
   revision: number;
+  version: number;
   contentSha256: string | null;
   attributes: ArtifactAttributes;
 }
@@ -83,6 +102,7 @@ interface VersionPayload {
   updatedAt: string;
   size: number;
   revision: number;
+  version: number;
   contentSha256: string | null;
 }
 
@@ -100,6 +120,8 @@ interface ListedArtifact {
 
 interface ArtifactDetail extends ListedArtifact {
   updatedAt: string;
+  version: number;
+  versions: ArtifactVersionSummary[];
 }
 
 interface StoredArtifactMetadata {
@@ -120,6 +142,7 @@ const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 const MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
 const ORPHAN_CONTENT_GRACE_MS = 60 * 60 * 1000;
+const MAX_ARTIFACT_VERSIONS = 10;
 const METADATA_READ_CONCURRENCY = 6;
 const STANDARD_SANDBOX = "allow-scripts allow-forms allow-popups allow-downloads";
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
@@ -159,7 +182,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  const publicVersionPath = /^\/api\/artifacts\/[^/]+\/version\/[^/]+$/.test(url.pathname);
+  const publicVersionPath =
+    /^\/api\/artifacts\/[^/]+\/version\/[^/]+$/.test(url.pathname) ||
+    /^\/api\/artifacts\/[^/]+\/versions\/[^/]+$/.test(url.pathname);
 
   if (hostname === "page-bin.com" && url.pathname.startsWith("/api/") && !publicVersionPath) {
     return misdirected();
@@ -195,6 +220,18 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return reissueArtifact(request, env, reissueMatch[1]);
   }
 
+  const rollbackMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/rollback$/);
+
+  if (request.method === "POST" && rollbackMatch?.[1]) {
+    return rollbackArtifact(request, env, rollbackMatch[1]);
+  }
+
+  const versionsMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/versions\/([^/]+)$/);
+
+  if (request.method === "GET" && versionsMatch?.[1] && versionsMatch[2]) {
+    return artifactVersions(env, versionsMatch[1], versionsMatch[2]);
+  }
+
   const versionMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/version\/([^/]+)$/);
 
   if (request.method === "GET" && versionMatch?.[1] && versionMatch[2]) {
@@ -215,10 +252,22 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return deleteArtifact(request, env, deleteMatch[1]);
   }
 
+  const pinnedViewerMatch = url.pathname.match(/^\/p\/([^/]+)\/([^/]+)\/v\/([^/]+)$/);
+
+  if (request.method === "GET" && pinnedViewerMatch?.[1] && pinnedViewerMatch[2] && pinnedViewerMatch[3]) {
+    return servePinnedViewer(env, request.url, pinnedViewerMatch[1], pinnedViewerMatch[2], pinnedViewerMatch[3]);
+  }
+
   const viewerMatch = url.pathname.match(/^\/p\/([^/]+)\/([^/]+)$/);
 
   if (request.method === "GET" && viewerMatch?.[1] && viewerMatch[2]) {
     return serveViewer(env, request.url, viewerMatch[1], viewerMatch[2]);
+  }
+
+  const pinnedRawMatch = url.pathname.match(/^\/raw\/([^/]+)\/([^/]+)\/v\/([^/]+)$/);
+
+  if (request.method === "GET" && pinnedRawMatch?.[1] && pinnedRawMatch[2] && pinnedRawMatch[3]) {
+    return servePinnedRaw(env, pinnedRawMatch[1], pinnedRawMatch[2], pinnedRawMatch[3]);
   }
 
   const rawMatch = url.pathname.match(/^\/raw\/([^/]+)\/([^/]+)$/);
@@ -547,6 +596,7 @@ async function getArtifact(request: Request, env: Env, id: string): Promise<Resp
   }
 
   const metadata = stored.metadata;
+  const head = artifactHead(metadata);
   const payload: ArtifactDetail = {
     id: metadata.id,
     filename: metadata.filename,
@@ -558,6 +608,8 @@ async function getArtifact(request: Request, env: Env, id: string): Promise<Resp
     revision: metadata.revision,
     contentSha256: metadata.contentSha256,
     attributes: metadata.attributes,
+    version: head.version,
+    versions: artifactVersionSummaries(metadata),
   };
 
   return json(payload);
@@ -601,6 +653,15 @@ async function publish(request: Request, env: Env): Promise<Response> {
     revision: 1,
     contentKey: htmlKey(id),
     contentSha256,
+    versions: [
+      {
+        version: 1,
+        contentKey: htmlKey(id),
+        contentSha256,
+        size: upload.file.size,
+        createdAt: nowIso,
+      },
+    ],
     attributes: parsedOptions.attributes,
     ...(encryptedToken ? { encryptedToken } : {}),
   };
@@ -630,6 +691,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
     expiresAt,
     sandbox: parsedOptions.sandbox,
     revision: metadata.revision,
+    version: 1,
     contentSha256,
     attributes: metadata.attributes,
   };
@@ -663,10 +725,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     return json({ error: upload.error }, upload.status);
   }
 
-  const updatedAt = new Date().toISOString();
-  const revision = metadata.revision + 1;
   const contentSha256 = await sha256Hex(upload.html);
-  const nextContentKey = versionedHtmlKey(id, revision);
   let attributes: ArtifactAttributes;
   let ttlSeconds: number | null | undefined;
 
@@ -678,6 +737,49 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     return json({ error: error instanceof Error ? error.message : "Invalid artifact attributes." }, 400);
   }
 
+  const mergedAttributes = {
+    ...metadata.attributes,
+    ...attributes,
+  };
+  const head = artifactHead(metadata);
+
+  if (metadata.contentSha256 !== null && contentSha256 === metadata.contentSha256) {
+    const isNoOp =
+      upload.displayFilename === metadata.filename &&
+      JSON.stringify(mergedAttributes) === JSON.stringify(metadata.attributes) &&
+      ttlSeconds === undefined;
+
+    if (isNoOp) {
+      return json(updatePayload(metadata));
+    }
+
+    const updatedAt = new Date().toISOString();
+    const nextMetadata: ArtifactMetadata = {
+      ...metadata,
+      filename: upload.displayFilename,
+      updatedAt,
+      revision: metadata.revision + 1,
+      attributes: mergedAttributes,
+      expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
+    };
+
+    if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
+      return conflict();
+    }
+
+    return json(updatePayload(nextMetadata));
+  }
+
+  const updatedAt = new Date().toISOString();
+  const revision = metadata.revision + 1;
+  const nextContentKey = versionedHtmlKey(id, revision);
+  const nextVersion: ArtifactVersion = {
+    version: head.version + 1,
+    contentKey: nextContentKey,
+    contentSha256,
+    size: upload.file.size,
+    createdAt: updatedAt,
+  };
   const nextMetadata: ArtifactMetadata = {
     ...metadata,
     filename: upload.displayFilename,
@@ -686,10 +788,8 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     revision,
     contentKey: nextContentKey,
     contentSha256,
-    attributes: {
-      ...metadata.attributes,
-      ...attributes,
-    },
+    versions: appendArtifactVersion(metadata.versions, nextVersion),
+    attributes: mergedAttributes,
     expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
   };
 
@@ -845,6 +945,89 @@ async function reissueArtifact(request: Request, env: Env, id: string): Promise<
   return json(payload);
 }
 
+async function rollbackArtifact(request: Request, env: Env, id: string): Promise<Response> {
+  if (!(await isAuthorized(request, env))) {
+    return json({ error: "Unauthorized." }, 401);
+  }
+
+  if (!isValidId(id)) {
+    return notFound();
+  }
+
+  const stored = await readStoredMetadata(env, id);
+
+  if (!stored || stored.metadata.deletedAt) {
+    return notFound();
+  }
+
+  const { metadata } = stored;
+
+  if (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt)) {
+    return json({ error: "Artifact has expired." }, 410);
+  }
+
+  let body: unknown;
+
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Rollback body must be valid JSON." }, 400);
+  }
+
+  if (!isPlainObject(body) || !Object.hasOwn(body, "version") || Object.keys(body).length !== 1) {
+    return json({ error: "Rollback body must contain only version." }, 400);
+  }
+
+  if (typeof body.version !== "number" || !Number.isSafeInteger(body.version) || body.version <= 0) {
+    return json({ error: "Rollback version must be a positive integer." }, 400);
+  }
+
+  const head = artifactHead(metadata);
+  const target = metadata.versions.find((entry) => entry.version === body.version);
+
+  if (!target) {
+    return json({ error: `Version ${body.version} is not available for this artifact.` }, 400);
+  }
+
+  if (target.version === head.version) {
+    return json({ error: `Version ${body.version} is already the current version.` }, 400);
+  }
+
+  const targetIsCurrentContent =
+    target.contentKey === metadata.contentKey ||
+    (target.contentSha256 !== null &&
+      metadata.contentSha256 !== null &&
+      target.contentSha256 === metadata.contentSha256);
+
+  if (targetIsCurrentContent) {
+    return json(updatePayload(metadata));
+  }
+
+  const updatedAt = new Date().toISOString();
+  const nextVersion: ArtifactVersion = {
+    version: head.version + 1,
+    contentKey: target.contentKey,
+    contentSha256: target.contentSha256,
+    size: target.size,
+    createdAt: updatedAt,
+  };
+  const nextMetadata: ArtifactMetadata = {
+    ...metadata,
+    updatedAt,
+    size: target.size,
+    revision: metadata.revision + 1,
+    contentKey: target.contentKey,
+    contentSha256: target.contentSha256,
+    versions: appendArtifactVersion(metadata.versions, nextVersion),
+  };
+
+  if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
+    return conflict();
+  }
+
+  return json(updatePayload(nextMetadata));
+}
+
 async function artifactVersion(env: Env, id: string, token: string): Promise<Response> {
   const metadata = await readAuthorizedMetadata(env, id, token);
 
@@ -857,10 +1040,25 @@ async function artifactVersion(env: Env, id: string, token: string): Promise<Res
     updatedAt: metadata.updatedAt,
     size: metadata.size,
     revision: metadata.revision,
+    version: artifactHead(metadata).version,
     contentSha256: metadata.contentSha256,
   };
 
   return json(payload);
+}
+
+async function artifactVersions(env: Env, id: string, token: string): Promise<Response> {
+  const metadata = await readAuthorizedMetadata(env, id, token);
+
+  if (!metadata) {
+    return notFound();
+  }
+
+  return json({
+    id: metadata.id,
+    version: artifactHead(metadata).version,
+    versions: artifactVersionSummaries(metadata),
+  });
 }
 
 async function cleanupExpiredArtifacts(env: Env): Promise<void> {
@@ -928,7 +1126,13 @@ async function cleanupOrphanedContent(env: Env, object: R2Object): Promise<void>
 
   const stored = await readStoredMetadata(env, id);
 
-  if (stored?.metadata.contentKey === object.key) {
+  const referencedKeys = new Set(stored?.metadata.versions.map((version) => version.contentKey) ?? []);
+
+  if (stored) {
+    referencedKeys.add(stored.metadata.contentKey);
+  }
+
+  if (referencedKeys.has(object.key)) {
     return;
   }
 
@@ -1054,6 +1258,54 @@ pagebinSchedule();
   });
 }
 
+async function servePinnedViewer(
+  env: Env,
+  requestUrl: string,
+  id: string,
+  token: string,
+  versionValue: string,
+): Promise<Response> {
+  const metadata = await readAuthorizedMetadata(env, id, token);
+  const version = parseArtifactVersionNumber(versionValue);
+  const entry = version === null ? null : metadata?.versions.find((candidate) => candidate.version === version);
+
+  if (!metadata || !entry) {
+    return siteNotFound();
+  }
+
+  const url = new URL(requestUrl);
+  const rawPath = `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}`;
+  const latestPath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+  const sandbox = iframeSandboxAttribute(metadata.sandbox);
+  const head = artifactHead(metadata);
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<title>${escapeHtml(metadata.filename)} · Version ${entry.version}</title>
+<style>
+html,body{height:100%;margin:0;background:#fff}
+body{padding-top:32px;box-sizing:border-box}
+.pagebin-version{position:fixed;inset:0 0 auto;height:32px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:.4rem;border-bottom:1px solid #ddd;background:#f7f7f7;color:#333;font:12px/1.2 system-ui,sans-serif;z-index:1}
+.pagebin-version a{color:#155eef}
+iframe{display:block;width:100%;height:100%;border:0}
+</style>
+</head>
+<body>
+<div class="pagebin-version">Version ${entry.version} of ${head.version} · <a href="${escapeHtml(latestPath)}">View latest</a></div>
+<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+</body>
+</html>`;
+
+  return text(html, 200, {
+    "Content-Security-Policy": "default-src 'none'; connect-src 'self'; frame-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Content-Type": "text/html; charset=utf-8",
+    Link: `<${url.origin}/robots.txt>; rel="robots"`,
+  });
+}
+
 async function serveRaw(env: Env, id: string, token: string): Promise<Response> {
   const metadata = await readAuthorizedMetadata(env, id, token);
 
@@ -1075,6 +1327,35 @@ async function serveRaw(env: Env, id: string, token: string): Promise<Response> 
     if (!object) {
       return siteNotFound();
     }
+  }
+
+  return new Response(object.body, {
+    status: 200,
+    headers: secureHeaders({
+      "Content-Security-Policy": rawSandboxCsp(metadata.sandbox),
+      "Content-Type": "text/html; charset=utf-8",
+    }),
+  });
+}
+
+async function servePinnedRaw(
+  env: Env,
+  id: string,
+  token: string,
+  versionValue: string,
+): Promise<Response> {
+  const metadata = await readAuthorizedMetadata(env, id, token);
+  const version = parseArtifactVersionNumber(versionValue);
+  const entry = version === null ? null : metadata?.versions.find((candidate) => candidate.version === version);
+
+  if (!metadata || !entry) {
+    return siteNotFound();
+  }
+
+  const object = await env.ARTIFACTS.get(entry.contentKey);
+
+  if (!object) {
+    return siteNotFound();
   }
 
   return new Response(object.body, {
@@ -1392,6 +1673,7 @@ function updatePayload(metadata: ArtifactMetadata): UpdatePayload {
     sandbox: metadata.sandbox,
     size: metadata.size,
     revision: metadata.revision,
+    version: artifactHead(metadata).version,
     contentSha256: metadata.contentSha256,
     attributes: metadata.attributes,
   };
@@ -1648,15 +1930,72 @@ function isValidId(id: string): boolean {
 function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
   const attributes = { ...(metadata.attributes ?? {}) } as ArtifactAttributes & Record<string, unknown>;
   delete attributes.status;
+  const updatedAt = metadata.updatedAt ?? metadata.createdAt;
+  const contentKey = metadata.contentKey ?? htmlKey(metadata.id);
+  const contentSha256 = metadata.contentSha256 ?? null;
+  let versions =
+    Array.isArray(metadata.versions) && metadata.versions.length > 0
+      ? metadata.versions
+      : [
+          {
+            version: 1,
+            contentKey,
+            contentSha256,
+            size: metadata.size,
+            createdAt: updatedAt,
+          },
+        ];
+  const lastVersion = versions[versions.length - 1] as ArtifactVersion;
+
+  if (lastVersion.contentKey !== contentKey) {
+    versions = appendArtifactVersion(versions, {
+      version: lastVersion.version + 1,
+      contentKey,
+      contentSha256,
+      size: metadata.size,
+      createdAt: updatedAt,
+    });
+  }
 
   return {
     ...metadata,
-    updatedAt: metadata.updatedAt ?? metadata.createdAt,
+    updatedAt,
     revision: metadata.revision ?? 1,
-    contentKey: metadata.contentKey ?? htmlKey(metadata.id),
-    contentSha256: metadata.contentSha256 ?? null,
+    contentKey,
+    contentSha256,
+    versions,
     attributes,
   };
+}
+
+function artifactHead(metadata: ArtifactMetadata): ArtifactVersion {
+  return metadata.versions[metadata.versions.length - 1] as ArtifactVersion;
+}
+
+function appendArtifactVersion(versions: ArtifactVersion[], version: ArtifactVersion): ArtifactVersion[] {
+  return [...versions, version].slice(-MAX_ARTIFACT_VERSIONS);
+}
+
+function artifactVersionSummaries(metadata: ArtifactMetadata): ArtifactVersionSummary[] {
+  const head = artifactHead(metadata);
+
+  return metadata.versions.map((entry) => ({
+    version: entry.version,
+    size: entry.size,
+    createdAt: entry.createdAt,
+    contentSha256: entry.contentSha256,
+    current: entry.version === head.version,
+  }));
+}
+
+function parseArtifactVersionNumber(value: string): number | null {
+  if (!/^[1-9]\d*$/.test(value)) {
+    return null;
+  }
+
+  const version = Number(value);
+
+  return Number.isSafeInteger(version) ? version : null;
 }
 
 async function readStoredMetadata(env: Env, id: string): Promise<StoredArtifactMetadata | null> {

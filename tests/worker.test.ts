@@ -193,6 +193,7 @@ describe("worker", () => {
       filename: string;
       id: string;
       revision: number;
+      version: number;
       updatedAt: string;
       size: number;
     };
@@ -205,6 +206,7 @@ describe("worker", () => {
       id: string;
       contentSha256: string;
       revision: number;
+      version: number;
       updatedAt: string;
       size: number;
     };
@@ -215,6 +217,7 @@ describe("worker", () => {
     expect(typeof payload.updatedAt).toBe("string");
     expect(payload.size).toBe(31);
     expect(payload.revision).toBe(2);
+    expect(payload.version).toBe(2);
     expect(payload.contentSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(rawResponse.status).toBe(200);
     expect(await rawResponse.text()).toBe("<!doctype html><h1>updated</h1>");
@@ -223,9 +226,340 @@ describe("worker", () => {
       id: published.id,
       contentSha256: payload.contentSha256,
       revision: 2,
+      version: 2,
       updatedAt: payload.updatedAt,
       size: 31,
     });
+  });
+
+  test("seeds content history on publish and appends it on update", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const initial = await readMetadataFixture(env, published.id);
+
+    expect(published.version).toBe(1);
+    expect(initial.versions).toHaveLength(1);
+    expect(initial.versions[0]).toMatchObject({
+      version: 1,
+      contentKey: initial.contentKey,
+      contentSha256: initial.contentSha256,
+      size: initial.size,
+      createdAt: initial.updatedAt,
+    });
+
+    const response = await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>second</h1>",
+      filename: "second.html",
+    });
+    const payload = (await response.json()) as { version: number };
+    const updated = await readMetadataFixture(env, published.id);
+
+    expect(payload.version).toBe(2);
+    expect(updated.versions.map((entry) => entry.version)).toEqual([1, 2]);
+    expect(updated.versions.at(-1)).toMatchObject({
+      version: 2,
+      contentKey: updated.contentKey,
+      contentSha256: updated.contentSha256,
+      size: updated.size,
+    });
+  });
+
+  test("deduplicates identical content without creating version noise", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const metadataKey = `artifacts/${published.id}/metadata.json`;
+    const before = env.ARTIFACTS.objects.get(metadataKey);
+    const objectCount = env.ARTIFACTS.objects.size;
+    const contents = "<!doctype html><script>globalThis.ok = true</script>";
+    const noOpResponse = await updateFixtureResponse(env, published.id, {
+      contents,
+      filename: "plan.html",
+    });
+    const noOp = (await noOpResponse.json()) as { revision: number; version: number };
+
+    expect(noOpResponse.status).toBe(200);
+    expect(noOp).toMatchObject({ revision: 1, version: 1 });
+    expect(env.ARTIFACTS.objects.get(metadataKey)?.etag).toBe(before?.etag);
+    expect(env.ARTIFACTS.objects.size).toBe(objectCount);
+
+    const metadataOnlyResponse = await updateFixtureResponse(
+      env,
+      published.id,
+      { contents, filename: "plan.html" },
+      {
+        attributes: JSON.stringify({ title: "Renamed" }),
+        ttlSeconds: "604800",
+      },
+    );
+    const metadataOnly = (await metadataOnlyResponse.json()) as {
+      expiresAt: string | null;
+      revision: number;
+      version: number;
+    };
+    const stored = await readMetadataFixture(env, published.id);
+
+    expect(metadataOnlyResponse.status).toBe(200);
+    expect(metadataOnly.revision).toBe(2);
+    expect(metadataOnly.version).toBe(1);
+    expect(metadataOnly.expiresAt).not.toBeNull();
+    expect(stored.versions).toHaveLength(1);
+    expect(stored.attributes).toEqual({ title: "Renamed" });
+    expect(env.ARTIFACTS.objects.size).toBe(objectCount);
+  });
+
+  test("reconciles stale version history before deduplicating an update", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const metadataKey = `artifacts/${published.id}/metadata.json`;
+    const metadataObject = await env.ARTIFACTS.get(metadataKey);
+
+    if (!metadataObject) {
+      throw new Error("Missing published metadata.");
+    }
+
+    const staleMetadata = JSON.parse(await metadataObject.text()) as Record<string, unknown>;
+    const currentContents = "<!doctype html><h1>out-of-band content</h1>";
+    const currentContentKey = `artifacts/${published.id}/content/2-old-worker.html`;
+    const currentContentSha256 = await sha256ForTest(currentContents);
+    const updatedAt = new Date(Date.now() + 1000).toISOString();
+
+    await env.ARTIFACTS.put(currentContentKey, currentContents);
+    await env.ARTIFACTS.put(
+      metadataKey,
+      JSON.stringify({
+        ...staleMetadata,
+        contentKey: currentContentKey,
+        contentSha256: currentContentSha256,
+        size: new TextEncoder().encode(currentContents).byteLength,
+        revision: 2,
+        updatedAt,
+      }),
+    );
+
+    const token = new URL(published.url).pathname.split("/").at(-1) ?? "";
+    const versionsResponse = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/versions/${token}`),
+      env as never,
+    );
+    const versionsPayload = (await versionsResponse.json()) as {
+      version: number;
+      versions: Array<{ version: number; contentSha256: string | null; current: boolean }>;
+    };
+
+    expect(versionsResponse.status).toBe(200);
+    expect(versionsPayload.version).toBe(2);
+    expect(versionsPayload.versions).toEqual([
+      expect.objectContaining({ version: 1, current: false }),
+      expect.objectContaining({
+        version: 2,
+        contentSha256: currentContentSha256,
+        current: true,
+      }),
+    ]);
+
+    const updateResponse = await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><script>globalThis.ok = true</script>",
+      filename: "plan.html",
+    });
+    const updatePayload = (await updateResponse.json()) as {
+      contentSha256: string;
+      revision: number;
+      version: number;
+    };
+    const reconciled = await readMetadataFixture(env, published.id);
+
+    expect(updateResponse.status).toBe(200);
+    expect(updatePayload).toMatchObject({
+      contentSha256: await sha256ForTest("<!doctype html><script>globalThis.ok = true</script>"),
+      revision: 3,
+      version: 3,
+    });
+    expect(reconciled.versions.map((entry) => entry.version)).toEqual([1, 2, 3]);
+    expect(reconciled.versions[1]).toMatchObject({
+      version: 2,
+      contentKey: currentContentKey,
+      contentSha256: currentContentSha256,
+      createdAt: updatedAt,
+    });
+    expect(reconciled.versions.at(-1)).toMatchObject({
+      version: 3,
+      contentKey: reconciled.contentKey,
+      contentSha256: reconciled.contentSha256,
+      size: reconciled.size,
+    });
+  });
+
+  test("caps retained history while keeping content version numbers monotonic", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    for (let version = 2; version <= 12; version += 1) {
+      const response = await updateFixtureResponse(env, published.id, {
+        contents: `<!doctype html><h1>version ${version}</h1>`,
+        filename: "plan.html",
+      });
+      expect(response.status).toBe(200);
+    }
+
+    const metadata = await readMetadataFixture(env, published.id);
+
+    expect(metadata.versions).toHaveLength(10);
+    expect(metadata.versions.map((entry) => entry.version)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(metadata.versions.at(-1)).toMatchObject({
+      version: 12,
+      contentKey: metadata.contentKey,
+      contentSha256: metadata.contentSha256,
+      size: metadata.size,
+    });
+  });
+
+  test("rolls retained content back as a new head version", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>second</h1>",
+      filename: "second.html",
+    });
+    const before = await readMetadataFixture(env, published.id);
+    const originalKey = before.versions[0]?.contentKey;
+    const response = await rollbackFixtureResponse(env, published.id, 1);
+    const payload = (await response.json()) as { revision: number; version: number };
+    const after = await readMetadataFixture(env, published.id);
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({ revision: 3, version: 3 });
+    expect(after.contentKey).toBe(originalKey);
+    expect(after.versions.at(-1)).toMatchObject({ version: 3, contentKey: originalKey });
+    expect(await (await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never)).text()).toContain("globalThis.ok");
+
+    expect((await rollbackFixtureResponse(env, published.id, 99)).status).toBe(400);
+    expect((await rollbackFixtureResponse(env, published.id, 3)).status).toBe(400);
+    expect(
+      (
+        await worker.fetch(
+          new Request(`https://pagebin.test/api/artifacts/${published.id}/rollback`, {
+            method: "POST",
+            headers: { Authorization: "Bearer wrong", "Content-Type": "application/json" },
+            body: JSON.stringify({ version: 1 }),
+          }),
+          env as never,
+        )
+      ).status,
+    ).toBe(401);
+  });
+
+  test("treats a retried rollback to the current content as a no-op", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>second</h1>",
+      filename: "second.html",
+    });
+    const firstRollback = await rollbackFixtureResponse(env, published.id, 1);
+    const firstPayload = (await firstRollback.json()) as { revision: number; version: number };
+    const metadataKey = `artifacts/${published.id}/metadata.json`;
+    const beforeRetry = await readMetadataFixture(env, published.id);
+    const etagBeforeRetry = env.ARTIFACTS.objects.get(metadataKey)?.etag;
+
+    expect(firstPayload).toMatchObject({ revision: 3, version: 3 });
+
+    for (let retry = 0; retry < 3; retry += 1) {
+      const retryResponse = await rollbackFixtureResponse(env, published.id, 1);
+      const retryPayload = (await retryResponse.json()) as { revision: number; version: number };
+
+      expect(retryResponse.status).toBe(200);
+      expect(retryPayload).toMatchObject({ revision: 3, version: 3 });
+    }
+
+    const afterRetries = await readMetadataFixture(env, published.id);
+
+    expect(afterRetries).toEqual(beforeRetry);
+    expect(afterRetries.versions.map((entry) => entry.version)).toEqual([1, 2, 3]);
+    expect(env.ARTIFACTS.objects.get(metadataKey)?.etag).toBe(etagBeforeRetry);
+  });
+
+  test("serves pinned raw content and a non-polling pinned viewer", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>second</h1>",
+      filename: "second.html",
+    });
+    const pinnedRaw = await worker.fetch(new Request(`${published.url.replace("/p/", "/raw/")}/v/1`), env as never);
+    const pinnedViewer = await worker.fetch(new Request(`${published.url}/v/1`), env as never);
+    const viewerHtml = await pinnedViewer.text();
+
+    expect(pinnedRaw.status).toBe(200);
+    expect(await pinnedRaw.text()).toContain("globalThis.ok");
+    expect(pinnedViewer.status).toBe(200);
+    expect(viewerHtml).toContain("Version 1 of 2");
+    expect(viewerHtml).toContain(`href="/p/${published.id}/`);
+    expect(viewerHtml).toContain("View latest");
+    expect(viewerHtml).not.toContain("pagebinPoll");
+    expect(viewerHtml).not.toContain("/api/artifacts/");
+    expect((await worker.fetch(new Request(`${published.url}/v/0`), env as never)).status).toBe(404);
+    expect((await worker.fetch(new Request(`${published.url}/v/99`), env as never)).status).toBe(404);
+
+    const wrongTokenUrl = `${published.url.slice(0, published.url.lastIndexOf("/") + 1)}wrong/v/1`;
+    expect((await worker.fetch(new Request(wrongTokenUrl), env as never)).status).toBe(404);
+
+    const expiring = await publishFixture(env, { ttlSeconds: "1" });
+    const originalDateNow = Date.now;
+
+    try {
+      Date.now = () => originalDateNow() + 2000;
+      expect((await worker.fetch(new Request(`${expiring.url}/v/1`), env as never)).status).toBe(404);
+      expect((await worker.fetch(new Request(`${expiring.url.replace("/p/", "/raw/")}/v/1`), env as never)).status).toBe(404);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("lists token-authorized versions on the public origin without exposing content keys", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>second</h1>",
+      filename: "second.html",
+    });
+    const token = new URL(published.url).pathname.split("/").at(-1) ?? "";
+    const response = await worker.fetch(
+      new Request(`https://page-bin.com/api/artifacts/${published.id}/versions/${token}`),
+      env as never,
+    );
+    const responseBody = await response.text();
+    const payload = JSON.parse(responseBody) as {
+      id: string;
+      version: number;
+      versions: Array<{ version: number; current: boolean }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({ id: published.id, version: 2 });
+    expect(payload.versions).toEqual([
+      expect.objectContaining({ version: 1, current: false }),
+      expect.objectContaining({ version: 2, current: true }),
+    ]);
+    expect(responseBody).not.toContain("contentKey");
+    expect(
+      (
+        await worker.fetch(
+          new Request(`https://page-bin.com/api/artifacts/${published.id}/versions/wrong`),
+          env as never,
+        )
+      ).status,
+    ).toBe(404);
+
+    const detail = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+    const detailBody = await detail.text();
+
+    expect(detailBody).not.toContain("contentKey");
+    expect(JSON.parse(detailBody)).toMatchObject({ version: 2 });
   });
 
   test("changes or removes TTL without uploading content", async () => {
@@ -1136,17 +1470,40 @@ describe("worker", () => {
     const viewerUrl = `https://pagebin.test/p/${id}/${token}`;
     expect((await worker.fetch(new Request(viewerUrl), env as never)).status).toBe(200);
     expect(await (await worker.fetch(new Request(viewerUrl.replace("/p/", "/raw/")), env as never)).text()).toContain("legacy");
+    const legacyVersions = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${id}/versions/${token}`),
+      env as never,
+    );
+    expect(await legacyVersions.json()).toMatchObject({
+      version: 1,
+      versions: [{ version: 1, contentSha256: null, current: true }],
+    });
 
     const updateResponse = await updateFixtureResponse(env, id, {
       contents: "<!doctype html><h1>modernized</h1>",
       filename: "modernized.html",
     });
-    const updatePayload = (await updateResponse.json()) as { revision: number; contentSha256: string };
+    const updatePayload = (await updateResponse.json()) as { revision: number; version: number; contentSha256: string };
 
     expect(updateResponse.status).toBe(200);
     expect(updatePayload.revision).toBe(2);
+    expect(updatePayload.version).toBe(2);
     expect(updatePayload.contentSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(await (await worker.fetch(new Request(viewerUrl.replace("/p/", "/raw/")), env as never)).text()).toContain("modernized");
+    expect((await readMetadataFixture(env, id)).versions.map((entry) => entry.version)).toEqual([1, 2]);
+    const detailResponse = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${id}`, {
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+    expect(await detailResponse.json()).toMatchObject({
+      version: 2,
+      versions: [
+        { version: 1, current: false },
+        { version: 2, current: true },
+      ],
+    });
 
     const deleteResponse = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${id}`, {
@@ -1160,7 +1517,7 @@ describe("worker", () => {
     expect([...env.ARTIFACTS.objects.keys()].filter((key) => key.startsWith(`artifacts/${id}/`))).toHaveLength(0);
   });
 
-  test("scheduled cleanup removes superseded content after the grace period", async () => {
+  test("scheduled cleanup retains every referenced content object past the grace period", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
 
@@ -1179,8 +1536,66 @@ describe("worker", () => {
 
     await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
 
-    expect(await env.ARTIFACTS.get(legacyKey)).toBeNull();
+    expect(await env.ARTIFACTS.get(legacyKey)).not.toBeNull();
     expect(await (await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never)).text()).toContain("current");
+  });
+
+  test("scheduled cleanup observes the grace period for pruned content", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    for (let version = 2; version <= 11; version += 1) {
+      await updateFixtureResponse(env, published.id, {
+        contents: `<!doctype html><h1>version ${version}</h1>`,
+        filename: "plan.html",
+      });
+    }
+
+    const prunedKey = `artifacts/${published.id}/index.html`;
+    expect((await readMetadataFixture(env, published.id)).versions.map((entry) => entry.version)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+
+    await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    expect(await env.ARTIFACTS.get(prunedKey)).not.toBeNull();
+
+    const prunedObject = env.ARTIFACTS.objects.get(prunedKey);
+
+    if (prunedObject) {
+      prunedObject.uploaded = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    }
+
+    await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    expect(await env.ARTIFACTS.get(prunedKey)).toBeNull();
+  });
+
+  test("scheduled cleanup preserves a shared rollback content key after its older entry is pruned", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>second</h1>",
+      filename: "plan.html",
+    });
+    await rollbackFixtureResponse(env, published.id, 1);
+
+    for (let version = 4; version <= 11; version += 1) {
+      await updateFixtureResponse(env, published.id, {
+        contents: `<!doctype html><h1>version ${version}</h1>`,
+        filename: "plan.html",
+      });
+    }
+
+    const sharedKey = `artifacts/${published.id}/index.html`;
+    const metadata = await readMetadataFixture(env, published.id);
+    expect(metadata.versions.map((entry) => entry.version)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(metadata.versions.find((entry) => entry.version === 3)?.contentKey).toBe(sharedKey);
+    const sharedObject = env.ARTIFACTS.objects.get(sharedKey);
+
+    if (sharedObject) {
+      sharedObject.uploaded = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    }
+
+    await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    expect(await env.ARTIFACTS.get(sharedKey)).not.toBeNull();
   });
 
   test("revokes metadata before deleting HTML", async () => {
@@ -1218,6 +1633,7 @@ interface PublishFixtureOptions {
 interface PublishedArtifact {
   id: string;
   url: string;
+  version: number;
 }
 
 function createEnv(overrides: Partial<TestEnv> = {}): TestEnv {
@@ -1286,6 +1702,44 @@ async function updateFixtureResponse(
     }),
     env as never,
   );
+}
+
+async function rollbackFixtureResponse(env: TestEnv, id: string, version: number): Promise<Response> {
+  return worker.fetch(
+    new Request(`https://pagebin.test/api/artifacts/${id}/rollback`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer publish-secret",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ version }),
+    }),
+    env as never,
+  );
+}
+
+async function readMetadataFixture(env: TestEnv, id: string): Promise<{
+  attributes: Record<string, string>;
+  contentKey: string;
+  contentSha256: string | null;
+  revision: number;
+  size: number;
+  updatedAt: string;
+  versions: Array<{
+    version: number;
+    contentKey: string;
+    contentSha256: string | null;
+    size: number;
+    createdAt: string;
+  }>;
+}> {
+  const object = await env.ARTIFACTS.get(`artifacts/${id}/metadata.json`);
+
+  if (!object) {
+    throw new Error(`Missing metadata for ${id}.`);
+  }
+
+  return JSON.parse(await object.text());
 }
 
 function createMultipartBody(input: {

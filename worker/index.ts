@@ -1213,19 +1213,49 @@ body{padding-top:33px;box-sizing:border-box}
 .pb-step{display:inline-flex;align-items:center;justify-content:center;width:22px;height:20px;border:1px solid var(--pb-line);border-radius:6px;background:var(--pb-panel);color:var(--pb-text);text-decoration:none;font-size:13px}
 .pb-step:hover{border-color:var(--pb-accent);color:var(--pb-accent)}
 .pb-step.off{opacity:.35}
+.pb-label{font-size:11.5px;color:var(--pb-text);white-space:nowrap;display:inline-flex;align-items:center}
+.pb-dim{color:var(--pb-muted);margin-left:4px}
+.pb-live{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--pb-green);margin-left:7px;animation:pbpulse 2.4s ease-in-out infinite}
+@keyframes pbpulse{0%,100%{opacity:1}50%{opacity:.25}}
 .pb-rail{flex:1;display:flex;align-items:center;height:100%;position:relative;min-width:60px}
 .pb-track{position:absolute;left:4px;right:4px;top:50%;border-top:1px solid var(--pb-line)}
 .pb-tick{position:relative;flex:1;display:flex;justify-content:center;align-items:center;height:100%;z-index:1;text-decoration:none}
 .pb-tick i{width:7px;height:7px;border-radius:50%;background:var(--pb-faint);border:2px solid var(--pb-chip)}
 .pb-tick:hover i{background:var(--pb-accent)}
 .pb-tick.sel i{width:11px;height:11px;background:var(--pb-accent);border-color:var(--pb-chip)}
-.pb-count{display:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--pb-text)}
-.pb-state{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;border-radius:999px;padding:3px 9px;white-space:nowrap}
-.pb-state.live{color:var(--pb-green);border:1px solid var(--pb-green)}
-.pb-state.pinned{color:var(--pb-accent);border:1px solid var(--pb-accent)}
 .pb-latest{color:var(--pb-accent);text-decoration:underline dotted;text-underline-offset:3px;white-space:nowrap}
-@media(max-width:560px){.pb-rail{display:none}.pb-count{display:inline}.pagebin-bar{gap:8px}}
+.pb-copy{border:none;background:none;color:var(--pb-muted);cursor:pointer;padding:4px;border-radius:6px;display:flex;align-items:center}
+.pb-copy:hover{color:var(--pb-accent);background:var(--pb-panel)}
+.pb-copy.ok{color:var(--pb-green)}
+.pb-copy svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.pb-mobsteps{display:none;position:fixed;right:14px;bottom:18px;flex-direction:column;gap:8px;z-index:3}
+.pb-mobsteps a,.pb-mobsteps span{display:flex;align-items:center;justify-content:center;width:40px;height:40px;border:1px solid var(--pb-line);border-radius:50%;background:var(--pb-panel);color:var(--pb-text);text-decoration:none;font-size:17px;box-shadow:0 4px 16px rgba(0,0,0,.16)}
+.pb-mobsteps .off{opacity:.35}
+@media(max-width:560px){.pagebin-bar{gap:8px}.pagebin-bar .pb-step{display:none}.pb-mobsteps{display:flex}}
 `;
+
+const VIEWER_COPY_ICON = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`;
+
+interface ScrubberNav {
+  previousPath: string | null;
+  previousTitle: string;
+  nextPath: string | null;
+  nextTitle: string;
+}
+
+function scrubberNav(metadata: ArtifactMetadata, current: number, pinnedPath: (version: number) => string): ScrubberNav {
+  const versions = metadata.versions;
+  const index = versions.findIndex((entry) => entry.version === current);
+  const previous = index > 0 ? versions[index - 1] : undefined;
+  const next = index >= 0 && index < versions.length - 1 ? versions[index + 1] : undefined;
+
+  return {
+    previousPath: previous ? pinnedPath(previous.version) : null,
+    previousTitle: previous ? `v${previous.version}` : "",
+    nextPath: next ? pinnedPath(next.version) : null,
+    nextTitle: next ? `v${next.version}` : "",
+  };
+}
 
 function scrubberBarHtml(id: string, token: string, metadata: ArtifactMetadata, pinnedVersion: number | null): string {
   const versions = metadata.versions;
@@ -1233,13 +1263,15 @@ function scrubberBarHtml(id: string, token: string, metadata: ArtifactMetadata, 
   const current = pinnedVersion ?? head.version;
   const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
   const pinnedPath = (version: number): string => `${basePath}/v/${version}`;
-  const index = versions.findIndex((entry) => entry.version === current);
-  const previous = index > 0 ? versions[index - 1] : undefined;
-  const next = index >= 0 && index < versions.length - 1 ? versions[index + 1] : undefined;
+  const nav = scrubberNav(metadata, current, pinnedPath);
   const step = (label: string, target: string | null, title: string): string =>
     target
       ? `<a class="pb-step" href="${escapeHtml(target)}" title="${escapeHtml(title)}">${label}</a>`
       : `<span class="pb-step off">${label}</span>`;
+  const mobStep = (label: string, target: string | null, title: string): string =>
+    target
+      ? `<a href="${escapeHtml(target)}" title="${escapeHtml(title)}">${label}</a>`
+      : `<span class="off">${label}</span>`;
   const ticks = versions
     .map((entry) => {
       const title = `v${entry.version} · ${entry.createdAt.slice(0, 10)}`;
@@ -1248,19 +1280,39 @@ function scrubberBarHtml(id: string, token: string, metadata: ArtifactMetadata, 
         return `<span class="pb-tick sel" title="${escapeHtml(title)}"><i></i></span>`;
       }
 
-      const href = entry.version === head.version ? basePath : pinnedPath(entry.version);
-
-      return `<a class="pb-tick" href="${escapeHtml(href)}" title="${escapeHtml(title)}"><i></i></a>`;
+      return `<a class="pb-tick" href="${escapeHtml(pinnedPath(entry.version))}" title="${escapeHtml(title)}"><i></i></a>`;
     })
     .join("");
-  const nextTarget = next ? (next.version === head.version ? basePath : pinnedPath(next.version)) : null;
-  const state =
-    pinnedVersion === null
-      ? `<span class="pb-state live" id="pagebin-state">Live · v${head.version}</span>`
-      : `<span class="pb-state pinned">Pinned · v${current} of ${head.version}</span>`;
+  const latestSuffix = current === head.version ? `<span class="pb-dim">(latest)</span>` : "";
+  const liveDot = pinnedVersion === null ? `<i class="pb-live" title="Follows updates automatically"></i>` : "";
+  const label = `<span class="pb-label">v<span id="pagebin-vnum">${current}</span>&nbsp;${latestSuffix}${liveDot}</span>`;
   const latest = pinnedVersion === null ? "" : `<a class="pb-latest" href="${escapeHtml(basePath)}">View latest</a>`;
+  const copy = `<button class="pb-copy" id="pagebin-copy" type="button" title="Copy link to this version">${VIEWER_COPY_ICON}</button>`;
+  const bar = `<div class="pagebin-bar">${step("‹", nav.previousPath, nav.previousTitle)}${step("›", nav.nextPath, nav.nextTitle)}${label}${latest}<nav class="pb-rail"><span class="pb-track"></span>${ticks}</nav>${copy}</div>`;
+  const mobSteps = `<div class="pb-mobsteps">${mobStep("‹", nav.previousPath, nav.previousTitle)}${mobStep("›", nav.nextPath, nav.nextTitle)}</div>`;
 
-  return `<div class="pagebin-bar">${step("‹", previous ? pinnedPath(previous.version) : null, previous ? `v${previous.version}` : "")}${step("›", nextTarget, next ? `v${next.version}` : "")}<nav class="pb-rail"><span class="pb-track"></span>${ticks}</nav><span class="pb-count">v${current} / ${head.version}</span>${state}${latest}</div>`;
+  return bar + mobSteps;
+}
+
+function scrubberCopyScript(id: string, token: string, currentVersion: number): string {
+  const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+
+  return `
+let pagebinCopyPath = ${JSON.stringify(`${basePath}/v/${currentVersion}`)};
+const pagebinCopyButton = document.getElementById("pagebin-copy");
+if (pagebinCopyButton) {
+  pagebinCopyButton.addEventListener("click", async () => {
+    const url = location.origin + pagebinCopyPath;
+    try {
+      await navigator.clipboard.writeText(url);
+      pagebinCopyButton.classList.add("ok");
+      setTimeout(() => pagebinCopyButton.classList.remove("ok"), 1200);
+    } catch {
+      prompt("Copy this link:", url);
+    }
+  });
+}
+`;
 }
 
 async function serveViewer(env: Env, requestUrl: string, id: string, token: string): Promise<Response> {
@@ -1292,7 +1344,8 @@ ${hasBar ? VIEWER_BAR_CSS : ""}</style>
 ${hasBar ? scrubberBarHtml(id, token, metadata, null) : ""}<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 <script>
 const pagebinFrame = document.getElementById("pagebin-frame");
-const pagebinState = document.getElementById("pagebin-state");
+const pagebinVersionNumber = document.getElementById("pagebin-vnum");
+${hasBar ? scrubberCopyScript(id, token, artifactHead(metadata).version) : ""}
 const pagebinMinDelayMs = 2000;
 const pagebinMaxDelayMs = 60000;
 let pagebinVersion = ${JSON.stringify(version)};
@@ -1315,8 +1368,9 @@ async function pagebinPoll() {
         pagebinFrame.src = ${JSON.stringify(rawPath)} + "?v=" + encodeURIComponent(pagebinVersion);
         changed = true;
       }
-      if (pagebinState && payload.version) {
-        pagebinState.textContent = "Live · v" + payload.version;
+      if (payload.version && pagebinVersionNumber) {
+        pagebinVersionNumber.textContent = String(payload.version);
+        pagebinCopyPath = ${JSON.stringify(`/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/`)} + payload.version;
       }
     }
   } catch {}
@@ -1374,6 +1428,7 @@ ${VIEWER_BAR_CSS}</style>
 </head>
 <body>
 ${scrubberBarHtml(id, token, metadata, entry.version)}<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+<script>${scrubberCopyScript(id, token, entry.version)}</script>
 </body>
 </html>`;
 

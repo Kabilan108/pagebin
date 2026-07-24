@@ -68,6 +68,20 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 .mi.agent.brand-claude svg{fill:#d97757}.mi.agent.brand-codex svg{fill:#c9c3b4}.mi.agent.brand-opencode svg{fill:#c9c3b4}.mi.agent.brand-amp svg{fill:#e56a50}
 .t-plan{color:#d4b45f}.t-report{color:#63b0a1}.t-review{color:#c98299}.t-explainer{color:#7da2c4}.t-implementation-log{color:#93b06e}}
 .line1 .when{align-self:center}
+.vchip{font-family:ui-sans-serif,system-ui,sans-serif;font-size:10.5px;border:1px solid var(--line);border-radius:999px;background:none;color:var(--muted);padding:1px 9px;cursor:pointer;align-self:center;white-space:nowrap;flex-shrink:0}
+.vchip:hover{border-color:var(--accent);color:var(--text)}
+.vchip.on{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.vfold{margin:7px 0 3px 18px;border-left:2px solid var(--line);padding-left:14px}
+.vrow{display:flex;align-items:baseline;gap:9px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;color:var(--muted);padding:4px 0;border-bottom:1px dotted var(--line)}
+.vrow:last-child{border-bottom:none}
+.vnum{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--text);min-width:2.4em}
+.vrow.cur .vnum{color:var(--accent);font-weight:700}
+.vbadge{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);border:1px solid var(--accent);border-radius:999px;padding:0 6px}
+.vsha{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--faint)}
+.vspacer{flex:1}
+.vact{background:none;border:none;font-family:ui-sans-serif,system-ui,sans-serif;font-size:11.5px;color:var(--accent);cursor:pointer;padding:0;text-decoration:underline dotted;text-underline-offset:3px}
+.vact.danger{color:var(--danger)}
+@media(max-width:640px){.vfold{margin-left:6px;padding-left:10px}.vsha{display:none}}
 .more{font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;color:var(--accent);background:none;border:none;cursor:pointer;padding:10px 0 2px;text-decoration:underline dotted;text-underline-offset:3px}
 .empty{padding:60px 0;text-align:center;color:var(--muted);font-style:italic}
 .fab{position:fixed;bottom:22px;right:22px;width:46px;height:46px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.16);font-size:17px;z-index:40}
@@ -91,7 +105,7 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 
 const SCRIPT = `
 const settings={groupBy:'repo',cap:5,filterStyle:'chips',metaFont:'sans',fields:{type:true,branch:true,host:true,agent:true,expiry:true}};
-const state={artifacts:[],query:'',host:'',expanded:new Set()};
+const state={artifacts:[],query:'',host:'',expanded:new Set(),openVersions:new Set()};
 const $=id=>document.getElementById(id);
 const el=(tag,cls,txt)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(txt!=null)n.textContent=txt;return n};
 
@@ -123,6 +137,20 @@ async function copyText(value){try{await navigator.clipboard.writeText(value)}ca
 async function copyLink(id){const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/link');const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to recover link');await copyText(p.url)}
 async function reissue(id){if(!confirm('Reissue this link? The previous URL stops working.'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/reissue',{method:'POST',headers:{'X-PageBin-Dashboard':'1'}});const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to reissue');await load();await copyText(p.url)}
 async function removeArtifact(id){if(!confirm('Delete this artifact permanently?'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id),{method:'DELETE',headers:{'X-PageBin-Dashboard':'1'}});if(!r.ok)throw new Error('Unable to delete');await load()}
+function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB'}
+async function copyPinned(id,version){const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/link');const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to recover link');await copyText(p.url+'/v/'+version)}
+async function rollbackVersion(id,version){if(!confirm('Restore v'+version+' as the current version? Open viewers will reload onto it.'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/rollback',{method:'POST',headers:{'X-PageBin-Dashboard':'1','Content-Type':'application/json'},body:JSON.stringify({version})});const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to roll back');await load()}
+function versionFold(a){const box=el('div','vfold');
+for(const v of[...a.versions].reverse()){const row=el('div','vrow'+(v.current?' cur':''));
+row.append(el('span','vnum','v'+v.version));
+if(v.current)row.append(el('span','vbadge','current'));
+row.append(el('span',null,relTime(v.createdAt)),el('span',null,formatBytes(v.size)));
+if(v.contentSha256)row.append(el('span','vsha',v.contentSha256.slice(0,6)));
+row.append(el('span','vspacer'));
+const cp=el('button','vact','copy pinned');cp.type='button';cp.addEventListener('click',()=>copyPinned(a.id,v.version).catch(alert));row.append(cp);
+if(!v.current){const rb=el('button','vact danger','roll back');rb.type='button';rb.addEventListener('click',()=>rollbackVersion(a.id,v.version).catch(alert));row.append(rb)}
+box.append(row)}
+return box}
 
 function chipGroup(label,values,key){const g=el('span','chipgroup');g.append(el('span','glabel',label));for(const v of values){const c=el('button','chip'+(state[key]===v?' on':''),v);c.type='button';c.addEventListener('click',()=>{state[key]=state[key]===v?'':v;renderFilters();render()});g.append(c)}return g}
 function dropdown(label,values,key){const wrap=el('span','dd');const trigger=el('button','trigger',state[key]||label);trigger.type='button';
@@ -150,8 +178,12 @@ parts.forEach((p,i)=>{if(i)line.append(el('span','sep','\\u00b7'));line.append(p
 function row(a){const item=el('div','item');const line1=el('div','line1');
 const name=el('span','name',a.attributes.title||a.filename);name.addEventListener('click',()=>openArtifact(a.id));
 const acts=el('span','acts');acts.append(iconBtn('link','Copy link',()=>copyLink(a.id).catch(alert)),iconBtn('reissue','Reissue link',()=>reissue(a.id).catch(alert)),iconBtn('trash','Delete',()=>removeArtifact(a.id).catch(alert),'danger'));
-line1.append(name,el('span','spacer'),el('span','when',relTime(a.updatedAt)),acts);item.append(line1);
+line1.append(name,el('span','spacer'));
+if(a.version>1){const open=state.openVersions.has(a.id);const chip=el('button','vchip'+(open?' on':''),'v'+a.version);chip.type='button';chip.title='Version history';
+chip.addEventListener('click',e=>{e.stopPropagation();open?state.openVersions.delete(a.id):state.openVersions.add(a.id);render()});line1.append(chip)}
+line1.append(el('span','when',relTime(a.updatedAt)),acts);item.append(line1);
 for(const parts of metaRows(a))if(parts.length)item.append(metaLineEl(parts));
+if(state.openVersions.has(a.id)&&a.versions)item.append(versionFold(a));
 return item}
 
 function render(){const root=$('sections');root.replaceChildren();const items=state.artifacts.filter(matches);

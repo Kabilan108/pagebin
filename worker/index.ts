@@ -313,6 +313,25 @@ async function routeDashboard(request: Request, env: Env, url: URL, hostname: st
     return dashboardManagementRequest(request, env, reissueMatch[1], "reissue");
   }
 
+  const rollbackMatch = url.pathname.match(/^\/api\/dashboard\/artifacts\/([^/]+)\/rollback$/);
+
+  if (request.method === "POST" && rollbackMatch?.[1]) {
+    if (!hasDashboardMutationHeader(request)) {
+      return json({ error: "Missing dashboard mutation header." }, 403);
+    }
+
+    const internalRequest = new Request(`${new URL(request.url).origin}/api/artifacts/${encodeURIComponent(rollbackMatch[1])}/rollback`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.PAGEBIN_PUBLISH_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: await request.text(),
+    });
+
+    return rollbackArtifact(internalRequest, env, rollbackMatch[1]);
+  }
+
   const artifactMatch = url.pathname.match(/^\/api\/dashboard\/artifacts\/([^/]+)$/);
 
   if (request.method === "DELETE" && artifactMatch?.[1]) {
@@ -381,6 +400,8 @@ async function dashboardArtifacts(env: Env, url: URL): Promise<Response> {
     contentSha256: artifact.contentSha256,
     attributes: artifact.attributes,
     linkRecoverable: Boolean(artifact.encryptedToken),
+    version: artifactHead(artifact).version,
+    versions: artifactVersionSummaries(artifact),
   }));
   const nextCursor = null;
 
@@ -1184,6 +1205,64 @@ function serveFavicon(): Response {
   });
 }
 
+const VIEWER_BAR_CSS = `
+:root{color-scheme:light dark;--pb-panel:#fffdf6;--pb-chip:#efeadd;--pb-text:#241f18;--pb-muted:#877e6f;--pb-faint:#a89f8e;--pb-line:#ddd6c6;--pb-accent:#8a5426;--pb-green:#6f9556}
+@media(prefers-color-scheme:dark){:root{--pb-panel:#211e19;--pb-chip:#26221c;--pb-text:#ece7dc;--pb-muted:#a29a8a;--pb-faint:#7a7365;--pb-line:#37322a;--pb-accent:#d39a62;--pb-green:#93b06e}}
+body{padding-top:33px;box-sizing:border-box}
+.pagebin-bar{position:fixed;inset:0 0 auto;height:33px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--pb-line);background:var(--pb-chip);font:12px/1 ui-sans-serif,system-ui,sans-serif;color:var(--pb-muted);z-index:2}
+.pb-step{display:inline-flex;align-items:center;justify-content:center;width:22px;height:20px;border:1px solid var(--pb-line);border-radius:6px;background:var(--pb-panel);color:var(--pb-text);text-decoration:none;font-size:13px}
+.pb-step:hover{border-color:var(--pb-accent);color:var(--pb-accent)}
+.pb-step.off{opacity:.35}
+.pb-rail{flex:1;display:flex;align-items:center;height:100%;position:relative;min-width:60px}
+.pb-track{position:absolute;left:4px;right:4px;top:50%;border-top:1px solid var(--pb-line)}
+.pb-tick{position:relative;flex:1;display:flex;justify-content:center;align-items:center;height:100%;z-index:1;text-decoration:none}
+.pb-tick i{width:7px;height:7px;border-radius:50%;background:var(--pb-faint);border:2px solid var(--pb-chip)}
+.pb-tick:hover i{background:var(--pb-accent)}
+.pb-tick.sel i{width:11px;height:11px;background:var(--pb-accent);border-color:var(--pb-chip)}
+.pb-count{display:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--pb-text)}
+.pb-state{font-size:9.5px;text-transform:uppercase;letter-spacing:.12em;border-radius:999px;padding:3px 9px;white-space:nowrap}
+.pb-state.live{color:var(--pb-green);border:1px solid var(--pb-green)}
+.pb-state.pinned{color:var(--pb-accent);border:1px solid var(--pb-accent)}
+.pb-latest{color:var(--pb-accent);text-decoration:underline dotted;text-underline-offset:3px;white-space:nowrap}
+@media(max-width:560px){.pb-rail{display:none}.pb-count{display:inline}.pagebin-bar{gap:8px}}
+`;
+
+function scrubberBarHtml(id: string, token: string, metadata: ArtifactMetadata, pinnedVersion: number | null): string {
+  const versions = metadata.versions;
+  const head = artifactHead(metadata);
+  const current = pinnedVersion ?? head.version;
+  const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+  const pinnedPath = (version: number): string => `${basePath}/v/${version}`;
+  const index = versions.findIndex((entry) => entry.version === current);
+  const previous = index > 0 ? versions[index - 1] : undefined;
+  const next = index >= 0 && index < versions.length - 1 ? versions[index + 1] : undefined;
+  const step = (label: string, target: string | null, title: string): string =>
+    target
+      ? `<a class="pb-step" href="${escapeHtml(target)}" title="${escapeHtml(title)}">${label}</a>`
+      : `<span class="pb-step off">${label}</span>`;
+  const ticks = versions
+    .map((entry) => {
+      const title = `v${entry.version} · ${entry.createdAt.slice(0, 10)}`;
+
+      if (entry.version === current) {
+        return `<span class="pb-tick sel" title="${escapeHtml(title)}"><i></i></span>`;
+      }
+
+      const href = entry.version === head.version ? basePath : pinnedPath(entry.version);
+
+      return `<a class="pb-tick" href="${escapeHtml(href)}" title="${escapeHtml(title)}"><i></i></a>`;
+    })
+    .join("");
+  const nextTarget = next ? (next.version === head.version ? basePath : pinnedPath(next.version)) : null;
+  const state =
+    pinnedVersion === null
+      ? `<span class="pb-state live" id="pagebin-state">Live · v${head.version}</span>`
+      : `<span class="pb-state pinned">Pinned · v${current} of ${head.version}</span>`;
+  const latest = pinnedVersion === null ? "" : `<a class="pb-latest" href="${escapeHtml(basePath)}">View latest</a>`;
+
+  return `<div class="pagebin-bar">${step("‹", previous ? pinnedPath(previous.version) : null, previous ? `v${previous.version}` : "")}${step("›", nextTarget, next ? `v${next.version}` : "")}<nav class="pb-rail"><span class="pb-track"></span>${ticks}</nav><span class="pb-count">v${current} / ${head.version}</span>${state}${latest}</div>`;
+}
+
 async function serveViewer(env: Env, requestUrl: string, id: string, token: string): Promise<Response> {
   const metadata = await readAuthorizedMetadata(env, id, token);
 
@@ -1196,6 +1275,7 @@ async function serveViewer(env: Env, requestUrl: string, id: string, token: stri
   const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
   const sandbox = iframeSandboxAttribute(metadata.sandbox);
   const version = metadata.revision;
+  const hasBar = metadata.versions.length > 1;
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1206,12 +1286,13 @@ async function serveViewer(env: Env, requestUrl: string, id: string, token: stri
 <style>
 html,body{height:100%;margin:0;background:#fff}
 iframe{display:block;width:100%;height:100%;border:0}
-</style>
+${hasBar ? VIEWER_BAR_CSS : ""}</style>
 </head>
 <body>
-<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+${hasBar ? scrubberBarHtml(id, token, metadata, null) : ""}<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 <script>
 const pagebinFrame = document.getElementById("pagebin-frame");
+const pagebinState = document.getElementById("pagebin-state");
 const pagebinMinDelayMs = 2000;
 const pagebinMaxDelayMs = 60000;
 let pagebinVersion = ${JSON.stringify(version)};
@@ -1233,6 +1314,9 @@ async function pagebinPoll() {
         pagebinVersion = payload.revision;
         pagebinFrame.src = ${JSON.stringify(rawPath)} + "?v=" + encodeURIComponent(pagebinVersion);
         changed = true;
+      }
+      if (pagebinState && payload.version) {
+        pagebinState.textContent = "Live · v" + payload.version;
       }
     }
   } catch {}
@@ -1275,9 +1359,7 @@ async function servePinnedViewer(
 
   const url = new URL(requestUrl);
   const rawPath = `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}`;
-  const latestPath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
   const sandbox = iframeSandboxAttribute(metadata.sandbox);
-  const head = artifactHead(metadata);
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1287,15 +1369,11 @@ async function servePinnedViewer(
 <title>${escapeHtml(metadata.filename)} · Version ${entry.version}</title>
 <style>
 html,body{height:100%;margin:0;background:#fff}
-body{padding-top:32px;box-sizing:border-box}
-.pagebin-version{position:fixed;inset:0 0 auto;height:32px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:.4rem;border-bottom:1px solid #ddd;background:#f7f7f7;color:#333;font:12px/1.2 system-ui,sans-serif;z-index:1}
-.pagebin-version a{color:#155eef}
 iframe{display:block;width:100%;height:100%;border:0}
-</style>
+${VIEWER_BAR_CSS}</style>
 </head>
 <body>
-<div class="pagebin-version">Version ${entry.version} of ${head.version} · <a href="${escapeHtml(latestPath)}">View latest</a></div>
-<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+${scrubberBarHtml(id, token, metadata, entry.version)}<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 </body>
 </html>`;
 

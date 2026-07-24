@@ -492,7 +492,7 @@ describe("worker", () => {
     expect(pinnedRaw.status).toBe(200);
     expect(await pinnedRaw.text()).toContain("globalThis.ok");
     expect(pinnedViewer.status).toBe(200);
-    expect(viewerHtml).toContain("Version 1 of 2");
+    expect(viewerHtml).toContain("Pinned · v1 of 2");
     expect(viewerHtml).toContain(`href="/p/${published.id}/`);
     expect(viewerHtml).toContain("View latest");
     expect(viewerHtml).not.toContain("pagebinPoll");

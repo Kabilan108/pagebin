@@ -1969,7 +1969,13 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
 }
 
 function artifactHead(metadata: ArtifactMetadata): ArtifactVersion {
-  return metadata.versions[metadata.versions.length - 1] as ArtifactVersion;
+  const head = metadata.versions[metadata.versions.length - 1];
+
+  if (!head) {
+    throw new Error(`Artifact ${metadata.id} has no version history.`);
+  }
+
+  return head;
 }
 
 function appendArtifactVersion(versions: ArtifactVersion[], version: ArtifactVersion): ArtifactVersion[] {

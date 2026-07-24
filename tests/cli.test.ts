@@ -363,8 +363,74 @@ describe("parseArgs", () => {
     });
   });
 
+  test("parses versions and rollback targets", () => {
+    expect(parseArgs(["versions", "abc1234567890123", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+      command: "versions",
+      options: {
+        endpoint: "https://example.com",
+        filePath: null,
+        id: "abc1234567890123",
+        json: true,
+        receiptLookup: false,
+        url: null,
+      },
+    });
+    expect(parseArgs(["versions", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+      command: "versions",
+      options: {
+        endpoint: "https://example.com",
+        filePath: "plan.html",
+        receiptLookup: true,
+      },
+    });
+    expect(parseArgs(["rollback", "https://page-bin.com/p/abc1234567890123/view-token", "2"], {})).toEqual({
+      command: "rollback",
+      options: {
+        endpoint: "https://api.page-bin.com",
+        filePath: null,
+        id: "abc1234567890123",
+        json: false,
+        receiptLookup: false,
+        url: "https://page-bin.com/p/abc1234567890123/view-token",
+        version: 2,
+      },
+    });
+    expect(
+      parseArgs(["versions", "https://page-bin.com/p/abc1234567890123/view-token/v/3"], {
+        PAGEBIN_ENDPOINT: "https://api-override.example",
+      }),
+    ).toEqual({
+      command: "versions",
+      options: {
+        endpoint: "https://api-override.example",
+        filePath: null,
+        id: "abc1234567890123",
+        json: false,
+        receiptLookup: false,
+        url: "https://page-bin.com/p/abc1234567890123/view-token",
+      },
+    });
+    expect(
+      parseArgs(["rollback", "https://page-bin.com/raw/abc1234567890123/view-token/v/3", "1"], {}),
+    ).toEqual({
+      command: "rollback",
+      options: {
+        endpoint: "https://api.page-bin.com",
+        filePath: null,
+        id: "abc1234567890123",
+        json: false,
+        receiptLookup: false,
+        url: "https://page-bin.com/raw/abc1234567890123/view-token",
+        version: 1,
+      },
+    });
+    expect(() => parseArgs(["rollback", "abc1234567890123", "0"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
+      "positive integer",
+    );
+  });
+
   test("parses subcommand help without endpoint configuration", () => {
-    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "receipts", "show", "delete", "skill", "version"] as const;
+    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "versions", "rollback", "receipts", "show", "delete", "skill", "version"] as const;
 
     for (const command of commands) {
       expect(parseArgs([command, "--help"], {})).toEqual({ command: "help", options: { topic: command } });
@@ -386,7 +452,7 @@ describe("normalizeEndpoint", () => {
 
 describe("help command", () => {
   test("prints subcommand help without endpoint configuration", async () => {
-    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "receipts", "show", "delete", "skill", "version"];
+    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "versions", "rollback", "receipts", "show", "delete", "skill", "version"];
 
     for (const command of commands) {
       const result = await runPagebin([command, "--help"], {});
@@ -394,6 +460,15 @@ describe("help command", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
       expect(result.stdout).toContain(`pagebin ${command}`);
+    }
+  });
+
+  test("documents version command endpoint precedence", async () => {
+    for (const command of ["versions", "rollback"]) {
+      const result = await runPagebin(["help", command], {});
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Uses --endpoint, then PAGEBIN_ENDPOINT, then viewer_url.");
     }
   });
 });
@@ -407,6 +482,8 @@ describe("skill command", () => {
     expect(result.stdout).toContain("name: pagebin");
     expect(result.stdout).toContain(`# PageBin CLI ${packageJson.version}`);
     expect(result.stdout).toContain("pagebin publish /absolute/path/artifact.html --verify --json");
+    expect(result.stdout).toContain("pagebin versions /absolute/path/artifact.html");
+    expect(result.stdout).toContain("pagebin rollback /absolute/path/artifact.html <version>");
     expect(result.stdout).not.toContain("highlight.js");
   });
 
@@ -1091,6 +1168,180 @@ describe("reissue command", () => {
         expiresAt: "2026-06-07T00:00:00.000Z",
         sandbox: "strict",
       });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("version history commands", () => {
+  test("renders versions newest first with pinned viewer URLs and structured JSON", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.method).toBe("GET");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234");
+        expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+
+        return Response.json({
+          id: "artifact-id-1234",
+          version: 2,
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-20T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: false,
+            },
+            {
+              version: 2,
+              size: 2048,
+              createdAt: "2026-07-21T00:00:00.000Z",
+              contentSha256: "b".repeat(64),
+              current: true,
+            },
+          ],
+        });
+      },
+    });
+    const viewerUrl = `${server.url.origin}/p/artifact-id-1234/view-token`;
+
+    try {
+      const textResult = await runPagebin(["versions", viewerUrl, "--endpoint", server.url.origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+
+      expect(textResult.exitCode).toBe(0);
+      expect(textResult.stderr).toBe("");
+      const lines = textResult.stdout.trim().split("\n");
+      expect(lines[0]).toContain("v2 (current)");
+      expect(lines[0]).toContain("2.0 KB");
+      expect(lines[0]).toContain("bbbbbbbbbbbb");
+      expect(lines[0]).toContain(`${viewerUrl}/v/2`);
+      expect(lines[1]).toContain("v1");
+      expect(lines[1]).toContain(`${viewerUrl}/v/1`);
+
+      const jsonResult = await runPagebin(["versions", viewerUrl, "--json", "--endpoint", server.url.origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      });
+      expect(jsonResult.exitCode).toBe(0);
+      expect(JSON.parse(jsonResult.stdout)).toEqual({
+        schemaVersion: 1,
+        id: "artifact-id-1234",
+        version: 2,
+        versions: [
+          {
+            version: 1,
+            size: 31,
+            createdAt: "2026-07-20T00:00:00.000Z",
+            contentSha256: "a".repeat(64),
+            current: false,
+          },
+          {
+            version: 2,
+            size: 2048,
+            createdAt: "2026-07-21T00:00:00.000Z",
+            contentSha256: "b".repeat(64),
+            current: true,
+          },
+        ],
+        url: viewerUrl,
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rolls back by file receipt, updates the receipt revision, and prints its viewer URL", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-rollback-test-"));
+    const statePath = join(directory, "artifacts.json");
+    const filePath = join(directory, "plan.html");
+    await writeFile(filePath, "<!doctype html><h1>plan</h1>");
+    let origin = "";
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("POST");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/rollback");
+        expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+        expect(await request.json()).toEqual({ version: 1 });
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "plan.html",
+          updatedAt: "2026-07-22T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: 31,
+          revision: 7,
+          version: 6,
+          contentSha256: "c".repeat(64),
+          attributes: {},
+        });
+      },
+    });
+    origin = server.url.origin;
+    const viewerUrl = `${origin}/p/artifact-id-1234/view-token`;
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        artifacts: [
+          {
+            endpoint: origin,
+            id: "artifact-id-1234",
+            url: viewerUrl,
+            rawUrl: `${origin}/raw/artifact-id-1234/view-token`,
+            filePath: resolve(filePath),
+            createdAt: "2026-07-20T00:00:00.000Z",
+            updatedAt: "2026-07-21T00:00:00.000Z",
+            revision: 5,
+            contentSha256: "b".repeat(64),
+            attributes: {},
+          },
+        ],
+      }),
+    );
+
+    try {
+      const result = await runPagebin(["rollback", filePath, "1", "--endpoint", origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        PAGEBIN_STATE_PATH: statePath,
+      });
+      const store = JSON.parse(await readFile(statePath, "utf8")) as {
+        artifacts: Array<{ revision: number; updatedAt: string; contentSha256: string }>;
+      };
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain("new head is version 6");
+      expect(result.stdout).toContain(viewerUrl);
+      expect(store.artifacts[0]?.revision).toBe(7);
+      expect(store.artifacts[0]?.updatedAt).not.toBe("2026-07-21T00:00:00.000Z");
+      expect(store.artifacts[0]?.contentSha256).toBe("c".repeat(64));
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("surfaces unknown rollback versions cleanly", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ error: "Version 99 is not available for this artifact." }, { status: 400 });
+      },
+    });
+
+    try {
+      const result = await runPagebin(
+        ["rollback", "artifact-id-1234", "99", "--endpoint", server.url.origin],
+        { PAGEBIN_PUBLISH_TOKEN: "publish-token" },
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Server returned 400");
+      expect(result.stderr).toContain("Version 99 is not available");
     } finally {
       server.stop(true);
     }

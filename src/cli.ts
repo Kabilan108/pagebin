@@ -24,6 +24,7 @@ interface PublishResponse {
   expiresAt: string | null;
   sandbox: SandboxMode;
   revision: number;
+  version: number;
   contentSha256: string;
   attributes: ArtifactAttributes;
 }
@@ -44,6 +45,7 @@ interface UpdateResponse {
   sandbox: SandboxMode;
   size: number;
   revision: number;
+  version: number;
   contentSha256: string | null;
   attributes: ArtifactAttributes;
 }
@@ -83,6 +85,16 @@ interface ArtifactAttributes {
 
 interface ArtifactDetailResponse extends ListedArtifact {
   updatedAt: string;
+  version: number;
+  versions: ArtifactVersionSummary[];
+}
+
+interface ArtifactVersionSummary {
+  version: number;
+  size: number;
+  createdAt: string;
+  contentSha256: string | null;
+  current: boolean;
 }
 
 interface VerificationResult {
@@ -181,6 +193,19 @@ interface VerifyOptions {
   url: string | null;
 }
 
+interface VersionHistoryOptions {
+  endpoint: string;
+  filePath: string | null;
+  id: string;
+  json: boolean;
+  receiptLookup: boolean;
+  url: string | null;
+}
+
+interface RollbackOptions extends VersionHistoryOptions {
+  version: number;
+}
+
 interface HelpOptions {
   topic: HelpTopic | null;
 }
@@ -201,8 +226,8 @@ interface ArtifactTarget {
 }
 
 interface ParsedCommand {
-  command: "publish" | "delete" | "reissue" | "update" | "watch" | "list" | "verify" | "receipts" | "show" | "skill" | "help" | "version";
-  options?: PublishOptions | DeleteOptions | ReissueOptions | UpdateOptions | WatchOptions | ListOptions | VerifyOptions | ReceiptListOptions | ShowOptions | HelpOptions;
+  command: "publish" | "delete" | "reissue" | "update" | "watch" | "list" | "verify" | "versions" | "rollback" | "receipts" | "show" | "skill" | "help" | "version";
+  options?: PublishOptions | DeleteOptions | ReissueOptions | UpdateOptions | WatchOptions | ListOptions | VerifyOptions | VersionHistoryOptions | RollbackOptions | ReceiptListOptions | ShowOptions | HelpOptions;
 }
 
 type SandboxMode = "standard" | "strict";
@@ -368,6 +393,20 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     };
   }
 
+  if (command === "versions") {
+    return {
+      command,
+      options: parseVersionHistoryOptions(rest, env),
+    };
+  }
+
+  if (command === "rollback") {
+    return {
+      command,
+      options: parseRollbackOptions(rest, env),
+    };
+  }
+
 
   if (command === "receipts") {
     return { command, options: parseReceiptListOptions(rest) };
@@ -405,6 +444,12 @@ async function main(): Promise<void> {
         return;
       case "verify":
         await verifyArtifact(parsed.options as VerifyOptions);
+        return;
+      case "versions":
+        await listArtifactVersions(parsed.options as VersionHistoryOptions);
+        return;
+      case "rollback":
+        await rollbackArtifact(parsed.options as RollbackOptions);
         return;
       case "receipts":
         await listReceipts(parsed.options as ReceiptListOptions);
@@ -923,6 +968,112 @@ function parseVerifyOptions(args: string[], env: NodeJS.ProcessEnv): VerifyOptio
   };
 }
 
+function parseVersionHistoryOptions(args: string[], env: NodeJS.ProcessEnv): VersionHistoryOptions {
+  const values: string[] = [];
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--endpoint") {
+      index += 1;
+      requireValue(args[index], "--endpoint");
+      continue;
+    }
+
+    if (arg?.startsWith("-") && !isArtifactId(arg)) {
+      throw new CliError(`Unknown option for versions: ${arg}`);
+    }
+
+    values.push(arg ?? "");
+  }
+
+  if (values.length !== 1 || !values[0]) {
+    throw new CliError("versions requires one artifact ID, viewer URL, or local file path.");
+  }
+
+  return parseVersionHistoryTarget(values[0], args, env, json);
+}
+
+function parseRollbackOptions(args: string[], env: NodeJS.ProcessEnv): RollbackOptions {
+  const values: string[] = [];
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--endpoint") {
+      index += 1;
+      requireValue(args[index], "--endpoint");
+      continue;
+    }
+
+    if (arg?.startsWith("-") && !isArtifactId(arg) && values.length === 0) {
+      throw new CliError(`Unknown option for rollback: ${arg}`);
+    }
+
+    values.push(arg ?? "");
+  }
+
+  if (values.length !== 2 || !values[0] || !values[1]) {
+    throw new CliError("rollback requires one artifact target and one version.");
+  }
+
+  if (!/^[1-9]\d*$/.test(values[1])) {
+    throw new CliError("rollback version must be a positive integer.");
+  }
+
+  const version = Number(values[1]);
+
+  if (!Number.isSafeInteger(version)) {
+    throw new CliError("rollback version must be a positive integer.");
+  }
+
+  return {
+    ...parseVersionHistoryTarget(values[0], args, env, json),
+    version,
+  };
+}
+
+function parseVersionHistoryTarget(
+  value: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  json: boolean,
+): VersionHistoryOptions {
+  if (!isArtifactTargetLike(value)) {
+    return {
+      endpoint: normalizeEndpoint(readEndpoint(args, env)),
+      filePath: value,
+      id: "",
+      json,
+      receiptLookup: true,
+      url: null,
+    };
+  }
+
+  const target = parseArtifactTarget(value);
+
+  return {
+    endpoint: normalizeEndpoint(readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? ""),
+    filePath: null,
+    id: target.id,
+    json,
+    receiptLookup: false,
+    url: target.url,
+  };
+}
+
 function parseReceiptListOptions(args: string[]): ReceiptListOptions {
   if (args.length === 0) {
     return { json: false };
@@ -992,11 +1143,17 @@ function parseArtifactTarget(value: string): ArtifactTarget {
     throw new CliError("Artifact viewer URL must use https unless it points at localhost.");
   }
 
-  const match = url.pathname.match(/^\/(?:p|raw)\/([^/]+)\/([^/]+)$/);
+  const match = url.pathname.match(/^\/(?:p|raw)\/([^/]+)\/([^/]+)(?:\/v\/([1-9]\d*))?$/);
 
-  if (!match?.[1] || !isArtifactId(match[1])) {
+  if (
+    !match?.[1] ||
+    !isArtifactId(match[1]) ||
+    (match[3] !== undefined && !Number.isSafeInteger(Number(match[3])))
+  ) {
     throw new CliError("Artifact viewer URL must look like /p/<artifact_id>/<token>.");
   }
+
+  url.pathname = url.pathname.replace(/\/v\/[1-9]\d*$/, "");
 
   return {
     id: match[1],
@@ -1211,6 +1368,15 @@ function toRawUrl(value: string): string {
 
   url.pathname = url.pathname.replace(/^\/p\//, "/raw/");
   return url.toString();
+}
+
+function toViewerUrl(value: string): string {
+  const url = new URL(value);
+
+  url.pathname = url.pathname.replace(/^\/raw\//, "/p/").replace(/\/+$/, "");
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/$/, "");
 }
 
 async function sha256Bytes(bytes: Uint8Array): Promise<string> {
@@ -1757,6 +1923,57 @@ async function listArtifacts(options: ListOptions): Promise<void> {
   console.log(formatArtifactList(payload.artifacts));
 }
 
+async function listArtifactVersions(options: VersionHistoryOptions): Promise<void> {
+  const resolved = await resolveVersionHistoryTarget(options);
+  const token = readPublishToken();
+  const artifact = await fetchArtifactDetail(resolved.endpoint, resolved.id, token);
+  const url = resolved.url ? toViewerUrl(resolved.url) : null;
+
+  if (options.json) {
+    console.log(JSON.stringify(withSchema({
+      id: artifact.id,
+      version: artifact.version,
+      versions: artifact.versions,
+      url,
+    }), null, 2));
+    return;
+  }
+
+  for (const version of [...artifact.versions].reverse()) {
+    const sha = version.contentSha256?.slice(0, 12) ?? "-";
+    const pinnedUrl = url ? `\t${url}/v/${version.version}` : "";
+    console.log(
+      `v${version.version}${version.current ? " (current)" : ""}\t${formatDate(version.createdAt)}\t${formatBytes(version.size)}\t${sha}${pinnedUrl}`,
+    );
+  }
+}
+
+async function rollbackArtifact(options: RollbackOptions): Promise<void> {
+  const resolved = await resolveVersionHistoryTarget(options);
+  const token = readPublishToken();
+  const response = await fetch(`${resolved.endpoint}/api/artifacts/${encodeURIComponent(resolved.id)}/rollback`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ version: options.version }),
+  });
+  const payload = await readJsonResponse<UpdateResponse>(response);
+
+  await updateReceiptAfterRollback(resolved.endpoint, resolved.id, payload);
+
+  if (options.json) {
+    console.log(JSON.stringify(withSchema(payload), null, 2));
+    return;
+  }
+
+  const url = resolved.url ? toViewerUrl(resolved.url) : null;
+  console.log(
+    `Rolled back ${resolved.id} to version ${options.version}; new head is version ${payload.version}${url ? ` · ${url}` : ""}`,
+  );
+}
+
 async function listReceipts(options: ReceiptListOptions): Promise<void> {
   const store = await readReceiptStore();
 
@@ -1802,6 +2019,41 @@ async function findReceiptByFile(endpoint: string, filePath: string): Promise<Ar
   return store.artifacts
     .filter((receipt) => receipt.endpoint === endpoint && receipt.filePath === filePath)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+}
+
+async function resolveVersionHistoryTarget(options: VersionHistoryOptions): Promise<VersionHistoryOptions> {
+  if (options.receiptLookup) {
+    if (!options.filePath) {
+      throw new CliError("Receipt-based version commands require a file path.");
+    }
+
+    const receipt = await findReceiptByFile(options.endpoint, resolve(options.filePath));
+
+    if (!receipt) {
+      throw new CliError(`No local PageBin receipt exists for ${options.filePath}. Publish it first or provide an artifact ID or viewer URL.`);
+    }
+
+    return {
+      ...options,
+      id: receipt.id,
+      receiptLookup: false,
+      url: receipt.url,
+    };
+  }
+
+  if (options.url) {
+    return options;
+  }
+
+  const store = await readReceiptStore();
+  const receipt = store.artifacts
+    .filter((candidate) => candidate.endpoint === options.endpoint && candidate.id === options.id)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+
+  return {
+    ...options,
+    url: receipt?.url ?? null,
+  };
 }
 
 async function resolveUpdateReceipt(options: UpdateOptions): Promise<UpdateOptions> {
@@ -1876,6 +2128,18 @@ async function updateReceiptUrl(endpoint: string, id: string, url: string, revis
       receipt.rawUrl = toRawUrl(url);
       receipt.updatedAt = new Date().toISOString();
       receipt.revision = revision ?? receipt.revision;
+    }
+  });
+}
+
+async function updateReceiptAfterRollback(endpoint: string, id: string, payload: UpdateResponse): Promise<void> {
+  await mutateReceiptStore((store) => {
+    const receipt = store.artifacts.find((candidate) => candidate.endpoint === endpoint && candidate.id === id);
+
+    if (receipt) {
+      receipt.updatedAt = new Date().toISOString();
+      receipt.revision = payload.revision;
+      receipt.contentSha256 = payload.contentSha256;
     }
   });
 }
@@ -2161,7 +2425,7 @@ function isHelpFlag(value: string | undefined): boolean {
 }
 
 function isHelpTopic(value: string): value is HelpTopic {
-  return value === "publish" || value === "list" || value === "reissue" || value === "update" || value === "watch" || value === "verify" || value === "receipts" || value === "show" || value === "delete" || value === "skill" || value === "version";
+  return value === "publish" || value === "list" || value === "reissue" || value === "update" || value === "watch" || value === "verify" || value === "versions" || value === "rollback" || value === "receipts" || value === "show" || value === "delete" || value === "skill" || value === "version";
 }
 
 function helpText(topic: HelpTopic | null = null): string {
@@ -2257,6 +2521,32 @@ Options:
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
   -h, --help           Show this help.
 `;
+    case "versions":
+      return `pagebin versions
+
+Lists the retained content versions for an artifact, newest first.
+
+Usage:
+  pagebin versions <artifact_id|viewer_url|file> [--json] [--endpoint URL]
+
+Options:
+  --json               Prints the version history and known viewer URL as JSON.
+  --endpoint URL       Worker endpoint. Uses --endpoint, then PAGEBIN_ENDPOINT, then viewer_url.
+  -h, --help           Show this help.
+`;
+    case "rollback":
+      return `pagebin rollback
+
+Restores retained content as a new head version while preserving the viewer URL.
+
+Usage:
+  pagebin rollback <artifact_id|viewer_url|file> <version> [--json] [--endpoint URL]
+
+Options:
+  --json               Prints the updated artifact metadata as JSON.
+  --endpoint URL       Worker endpoint. Uses --endpoint, then PAGEBIN_ENDPOINT, then viewer_url.
+  -h, --help           Show this help.
+`;
     case "receipts":
       return `pagebin receipts
 
@@ -2321,6 +2611,8 @@ Usage:
   pagebin watch <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
   pagebin watch <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--endpoint URL]
   pagebin verify <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin versions <artifact_id|viewer_url|file> [--json] [--endpoint URL]
+  pagebin rollback <artifact_id|viewer_url|file> <version> [--json] [--endpoint URL]
   pagebin receipts [--json]
   pagebin show <artifact_id|viewer_url|file> [--json]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
@@ -2339,6 +2631,8 @@ Behavior:
   update               Replaces content, changes expiration, or does both atomically.
   watch                Publishes a file, then updates that artifact whenever the file changes.
   verify               Compares the local rendered bytes with raw content or the stored hash.
+  versions             Lists retained content versions and pinned viewer URLs when known.
+  rollback             Restores retained content as a new head version.
   receipts             Lists protected local publication receipts.
   show                 Recovers a viewer URL from a local receipt.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
@@ -2353,7 +2647,7 @@ Environment:
 function skillText(): string {
   return `---
 name: pagebin
-description: Publish, update, verify, recover, list, reissue, and delete protected PageBin artifacts from the command line.
+description: Publish, update, version, roll back, verify, recover, list, reissue, and delete protected PageBin artifacts from the command line.
 ---
 
 # PageBin CLI ${VERSION}
@@ -2367,6 +2661,8 @@ Publish once, capture the JSON result, and preserve the artifact identity:
 \`\`\`sh
 pagebin publish /absolute/path/artifact.html --verify --json
 pagebin update /absolute/path/artifact.html --json
+pagebin versions /absolute/path/artifact.html
+pagebin rollback /absolute/path/artifact.html <version>
 pagebin verify <viewer-url-or-id> /absolute/path/artifact.html --json
 \`\`\`
 
@@ -2379,6 +2675,8 @@ Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally te
 - \`publish <file>\`: create an artifact. Use \`--force-new\` only when a second artifact for the same source file is intentional.
 - \`update <file>\`: update by protected local receipt. An artifact ID or viewer URL may be supplied explicitly.
 - \`watch <file>\`: publish or update continuously. Prefer explicit checkpoint updates unless continuous watch is useful.
+- \`versions <target>\`: list the retained content history; known viewer URLs include pinned links.
+- \`rollback <target> <version>\`: restore retained content as a new head version.
 - \`verify <id-or-url> <file>\`: confirm the published content matches the local file.
 - \`receipts\` and \`show <target>\`: recover locally stored viewer URLs without reissuing them.
 - \`list\`: list server-side artifact metadata; viewer tokens are intentionally absent.

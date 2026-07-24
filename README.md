@@ -24,6 +24,8 @@ pagebin update <artifact_id_or_viewer_url> ./plan.html
 pagebin update <artifact_id_or_viewer_url> --ttl never
 pagebin update <artifact_id_or_viewer_url> ./plan.html --ttl 7d
 pagebin verify <artifact_id_or_viewer_url> ./plan.html --json
+pagebin versions <artifact_id_or_viewer_url_or_file>
+pagebin rollback <artifact_id_or_viewer_url_or_file> <version>
 pagebin watch ./implementation-log.html --json
 pagebin list
 pagebin receipts
@@ -36,6 +38,10 @@ pagebin skill
 Artifacts do not expire unless `--ttl` is provided. Markdown is rendered to static HTML in the CLI before upload, including GFM tables, highlighted code, frontmatter properties, and document outlines. Only documents containing Mermaid diagrams load the pinned Mermaid browser runtime.
 
 `pagebin skill` prints concise, version-matched instructions for agents and does not require endpoint credentials.
+
+### Version history
+
+PageBin automatically retains the last 10 content versions of each artifact. Identical-content updates are deduplicated, while `pagebin versions` lists retained versions and `pagebin rollback` restores one as a new head version. Pinned viewers use `/p/<id>/<token>/v/<n>` and never auto-reload. Reissuing an artifact rotates the capability token for the current content and all retained history; deletion or expiry removes every version.
 
 ### Metadata inference
 
@@ -83,7 +89,7 @@ Legacy artifacts remain viewable but cannot be opened from the dashboard until r
 - Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers.
 - Markdown permits raw HTML without sanitization, matching direct HTML uploads. Treat published source as trusted; use the strict sandbox for static Markdown when scripts and other interactive permissions are unnecessary. Mermaid requires the standard sandbox.
 - Metadata mutation uses R2 ETag preconditions, monotonic revisions, tombstones, and versioned content objects to prevent lost updates and token resurrection.
-- Superseded/orphan content is removed after a grace period; expired and deleted artifacts are tombstoned before content removal.
+- Unreferenced or pruned content is removed after a grace period; expired and deleted artifacts are tombstoned before content removal.
 
 Anyone with an artifact URL can view it. Do not publish credentials, cookies, tokens, or secret-bearing logs.
 

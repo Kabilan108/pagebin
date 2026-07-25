@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.0 - 2026-07-25
+
+- Added bounded automatic version history: every artifact retains its last 10 content versions as immutable R2 objects tracked in metadata under the existing ETag compare-and-swap, with identical-content updates deduplicated and the orphan sweep made reference-based so retained versions survive cleanup.
+- Added capability-scoped access to old versions: pinned viewer and raw URLs at `/p|/raw/<id>/<token>/v/<n>` plus a token-authenticated version list. Reissuing an artifact rotates the token for all retained history at once; deletion and expiry remove every version.
+- Added rollback as a `currentVersion` pointer move — no duplicate entries, naturally idempotent on retry, with new uploads resuming from the highest version number — exposed via the publisher API, a dashboard restore action, and `pagebin rollback`.
+- Added `pagebin versions`, pinned-URL round-tripping as CLI targets, and additive `version`/`versions` fields on publish, update, poll, and detail payloads (`schemaVersion` stays 1).
+- Added the version history UI: dashboard rows fold out an inline ledger (age, size, hash, current marker) with copy-pinned-link and restore icon actions, and viewers gain a slim bar with the filename, a live-update indicator, a version dropdown, and a silent copy-link button.
+- Upgraded js-yaml from 4.1.0 to 4.3.0, resolving three merge-key advisories against frontmatter parsing (prototype pollution and two quadratic-complexity DoS issues, including CVE-2026-59869), and refreshed the flake's pinned dependency hash.
+- Operational note: downgrading the Worker below 0.12.0 for more than an hour garbage-collects retained version history, permanently breaking pinned URLs after re-upgrade.
+
 ## 0.11.0 - 2026-07-16
 
 - Added `pagebin skill`, a credential-free command that prints concise, version-matched instructions for agents using the CLI.

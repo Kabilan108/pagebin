@@ -41,7 +41,7 @@ Artifacts do not expire unless `--ttl` is provided. Markdown is rendered to stat
 
 ### Version history
 
-PageBin automatically retains the last 10 content versions of each artifact. Identical-content updates are deduplicated, while `pagebin versions` lists retained versions and `pagebin rollback` restores one as a new head version. Pinned viewers use `/p/<id>/<token>/v/<n>` and never auto-reload. Reissuing an artifact rotates the capability token for the current content and all retained history; deletion or expiry removes every version.
+PageBin automatically retains the last 10 content versions of each artifact. Identical-content updates are deduplicated, while `pagebin versions` lists retained versions and `pagebin rollback` marks an older version as current again (publishing new content resumes from the highest version number). Pinned viewers use `/p/<id>/<token>/v/<n>` and never auto-reload. Reissuing an artifact rotates the capability token for the current content and all retained history; deletion or expiry removes every version.
 
 ### Metadata inference
 

@@ -26,6 +26,7 @@ interface ArtifactMetadata {
   contentKey: string;
   contentSha256: string | null;
   versions: ArtifactVersion[];
+  currentVersion: number;
   deletedAt?: string;
   attributes: ArtifactAttributes;
   encryptedToken?: EncryptedViewerToken;
@@ -683,6 +684,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
         createdAt: nowIso,
       },
     ],
+    currentVersion: 1,
     attributes: parsedOptions.attributes,
     ...(encryptedToken ? { encryptedToken } : {}),
   };
@@ -762,7 +764,6 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     ...metadata.attributes,
     ...attributes,
   };
-  const head = artifactHead(metadata);
 
   if (metadata.contentSha256 !== null && contentSha256 === metadata.contentSha256) {
     const isNoOp =
@@ -795,7 +796,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   const revision = metadata.revision + 1;
   const nextContentKey = versionedHtmlKey(id, revision);
   const nextVersion: ArtifactVersion = {
-    version: head.version + 1,
+    version: (metadata.versions[metadata.versions.length - 1] as ArtifactVersion).version + 1,
     contentKey: nextContentKey,
     contentSha256,
     size: upload.file.size,
@@ -810,6 +811,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     contentKey: nextContentKey,
     contentSha256,
     versions: appendArtifactVersion(metadata.versions, nextVersion),
+    currentVersion: nextVersion.version,
     attributes: mergedAttributes,
     expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
   };
@@ -1003,35 +1005,17 @@ async function rollbackArtifact(request: Request, env: Env, id: string): Promise
     return json({ error: "Rollback version must be a positive integer." }, 400);
   }
 
-  const head = artifactHead(metadata);
   const target = metadata.versions.find((entry) => entry.version === body.version);
 
   if (!target) {
     return json({ error: `Version ${body.version} is not available for this artifact.` }, 400);
   }
 
-  if (target.version === head.version) {
-    return json({ error: `Version ${body.version} is already the current version.` }, 400);
-  }
-
-  const targetIsCurrentContent =
-    target.contentKey === metadata.contentKey ||
-    (target.contentSha256 !== null &&
-      metadata.contentSha256 !== null &&
-      target.contentSha256 === metadata.contentSha256);
-
-  if (targetIsCurrentContent) {
+  if (target.version === metadata.currentVersion) {
     return json(updatePayload(metadata));
   }
 
   const updatedAt = new Date().toISOString();
-  const nextVersion: ArtifactVersion = {
-    version: head.version + 1,
-    contentKey: target.contentKey,
-    contentSha256: target.contentSha256,
-    size: target.size,
-    createdAt: updatedAt,
-  };
   const nextMetadata: ArtifactMetadata = {
     ...metadata,
     updatedAt,
@@ -1039,7 +1023,7 @@ async function rollbackArtifact(request: Request, env: Env, id: string): Promise
     revision: metadata.revision + 1,
     contentKey: target.contentKey,
     contentSha256: target.contentSha256,
-    versions: appendArtifactVersion(metadata.versions, nextVersion),
+    currentVersion: target.version,
   };
 
   if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
@@ -1208,109 +1192,99 @@ function serveFavicon(): Response {
 const VIEWER_BAR_CSS = `
 :root{color-scheme:light dark;--pb-panel:#fffdf6;--pb-chip:#efeadd;--pb-text:#241f18;--pb-muted:#877e6f;--pb-faint:#a89f8e;--pb-line:#ddd6c6;--pb-accent:#8a5426;--pb-green:#6f9556}
 @media(prefers-color-scheme:dark){:root{--pb-panel:#211e19;--pb-chip:#26221c;--pb-text:#ece7dc;--pb-muted:#a29a8a;--pb-faint:#7a7365;--pb-line:#37322a;--pb-accent:#d39a62;--pb-green:#93b06e}}
-body{padding-top:33px;box-sizing:border-box}
-.pagebin-bar{position:fixed;inset:0 0 auto;height:33px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--pb-line);background:var(--pb-chip);font:12px/1 ui-sans-serif,system-ui,sans-serif;color:var(--pb-muted);z-index:2}
-.pb-step{display:inline-flex;align-items:center;justify-content:center;width:22px;height:20px;border:1px solid var(--pb-line);border-radius:6px;background:var(--pb-panel);color:var(--pb-text);text-decoration:none;font-size:13px}
-.pb-step:hover{border-color:var(--pb-accent);color:var(--pb-accent)}
-.pb-step.off{opacity:.35}
-.pb-label{font-size:11.5px;color:var(--pb-text);white-space:nowrap;display:inline-flex;align-items:center}
-.pb-dim{color:var(--pb-muted);margin-left:4px}
-.pb-live{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--pb-green);margin-left:7px;animation:pbpulse 2.4s ease-in-out infinite}
+body{padding-top:34px;box-sizing:border-box}
+.pagebin-bar{position:fixed;inset:0 0 auto;height:34px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px 0 14px;border-bottom:1px solid var(--pb-line);background:var(--pb-chip);font:12px/1 ui-sans-serif,system-ui,sans-serif;color:var(--pb-muted);z-index:2}
+.pb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;color:var(--pb-muted)}
+.pb-live{width:6px;height:6px;border-radius:50%;background:var(--pb-green);flex-shrink:0;animation:pbpulse 2.4s ease-in-out infinite}
 @keyframes pbpulse{0%,100%{opacity:1}50%{opacity:.25}}
-.pb-rail{flex:1;display:flex;align-items:center;height:100%;position:relative;min-width:60px}
-.pb-track{position:absolute;left:4px;right:4px;top:50%;border-top:1px solid var(--pb-line)}
-.pb-tick{position:relative;flex:1;display:flex;justify-content:center;align-items:center;height:100%;z-index:1;text-decoration:none}
-.pb-tick i{width:7px;height:7px;border-radius:50%;background:var(--pb-faint);border:2px solid var(--pb-chip)}
-.pb-tick:hover i{background:var(--pb-accent)}
-.pb-tick.sel i{width:11px;height:11px;background:var(--pb-accent);border-color:var(--pb-chip)}
-.pb-latest{color:var(--pb-accent);text-decoration:underline dotted;text-underline-offset:3px;white-space:nowrap}
-.pb-copy{border:none;background:none;color:var(--pb-muted);cursor:pointer;padding:4px;border-radius:6px;display:flex;align-items:center}
+.pb-dd{position:relative;display:inline-flex;flex-shrink:0}
+.pb-dd .trigger{font:inherit;font-size:11.5px;border:1px solid var(--pb-line);border-radius:6px;background:var(--pb-panel);color:var(--pb-text);padding:4px 24px 4px 10px;cursor:pointer;position:relative}
+.pb-dd .trigger::after{content:'';position:absolute;right:9px;top:50%;width:6px;height:6px;border-right:1.5px solid var(--pb-muted);border-bottom:1.5px solid var(--pb-muted);transform:translateY(-70%) rotate(45deg)}
+.pb-dd .trigger:hover{border-color:var(--pb-accent)}
+.pb-dd .menu{position:absolute;z-index:30;top:calc(100% + 4px);right:0;min-width:100%;background:var(--pb-panel);border:1px solid var(--pb-line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:4px;display:none;max-height:60vh;overflow-y:auto}
+.pb-dd.open .menu{display:block}
+.pb-dd .menu a{display:block;font-size:11.5px;color:var(--pb-text);text-decoration:none;padding:6px 12px;border-radius:5px;white-space:nowrap}
+.pb-dd .menu a:hover{background:var(--pb-chip)}
+.pb-dd .menu a.sel{color:var(--pb-accent);font-weight:600}
+.pb-dd select{display:none;font:inherit;font-size:13px;border:1px solid var(--pb-line);border-radius:6px;background:var(--pb-panel);color:var(--pb-text);padding:4px 8px}
+@media(pointer:coarse){.pb-dd .trigger,.pb-dd .menu{display:none!important}.pb-dd select{display:block}}
+.pb-copy{border:none;background:none;color:var(--pb-muted);cursor:pointer;padding:5px;border-radius:6px;display:flex;align-items:center;flex-shrink:0}
 .pb-copy:hover{color:var(--pb-accent);background:var(--pb-panel)}
 .pb-copy.ok{color:var(--pb-green)}
-.pb-copy svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-.pb-mobsteps{display:none;position:fixed;right:14px;bottom:18px;flex-direction:column;gap:8px;z-index:3}
-.pb-mobsteps a,.pb-mobsteps span{display:flex;align-items:center;justify-content:center;width:40px;height:40px;border:1px solid var(--pb-line);border-radius:50%;background:var(--pb-panel);color:var(--pb-text);text-decoration:none;font-size:17px;box-shadow:0 4px 16px rgba(0,0,0,.16)}
-.pb-mobsteps .off{opacity:.35}
-@media(max-width:560px){.pagebin-bar{gap:8px}.pagebin-bar .pb-step{display:none}.pb-mobsteps{display:flex}}
+.pb-copy svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 `;
 
 const VIEWER_COPY_ICON = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`;
 
-interface ScrubberNav {
-  previousPath: string | null;
-  previousTitle: string;
-  nextPath: string | null;
-  nextTitle: string;
-}
-
-function scrubberNav(metadata: ArtifactMetadata, current: number, pinnedPath: (version: number) => string): ScrubberNav {
-  const versions = metadata.versions;
-  const index = versions.findIndex((entry) => entry.version === current);
-  const previous = index > 0 ? versions[index - 1] : undefined;
-  const next = index >= 0 && index < versions.length - 1 ? versions[index + 1] : undefined;
-
-  return {
-    previousPath: previous ? pinnedPath(previous.version) : null,
-    previousTitle: previous ? `v${previous.version}` : "",
-    nextPath: next ? pinnedPath(next.version) : null,
-    nextTitle: next ? `v${next.version}` : "",
-  };
-}
-
 function scrubberBarHtml(id: string, token: string, metadata: ArtifactMetadata, pinnedVersion: number | null): string {
-  const versions = metadata.versions;
-  const head = artifactHead(metadata);
-  const current = pinnedVersion ?? head.version;
+  const current = artifactHead(metadata).version;
+  const viewed = pinnedVersion ?? current;
   const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
-  const pinnedPath = (version: number): string => `${basePath}/v/${version}`;
-  const nav = scrubberNav(metadata, current, pinnedPath);
-  const step = (label: string, target: string | null, title: string): string =>
-    target
-      ? `<a class="pb-step" href="${escapeHtml(target)}" title="${escapeHtml(title)}">${label}</a>`
-      : `<span class="pb-step off">${label}</span>`;
-  const mobStep = (label: string, target: string | null, title: string): string =>
-    target
-      ? `<a href="${escapeHtml(target)}" title="${escapeHtml(title)}">${label}</a>`
-      : `<span class="off">${label}</span>`;
-  const ticks = versions
-    .map((entry) => {
-      const title = `v${entry.version} · ${entry.createdAt.slice(0, 10)}`;
-
-      if (entry.version === current) {
-        return `<span class="pb-tick sel" title="${escapeHtml(title)}"><i></i></span>`;
-      }
-
-      return `<a class="pb-tick" href="${escapeHtml(pinnedPath(entry.version))}" title="${escapeHtml(title)}"><i></i></a>`;
-    })
+  const versionHref = (version: number): string => (version === current ? basePath : `${basePath}/v/${version}`);
+  const newestFirst = [...metadata.versions].reverse();
+  const menuItems = newestFirst
+    .map(
+      (entry) =>
+        `<a${entry.version === viewed ? ' class="sel"' : ""} href="${escapeHtml(versionHref(entry.version))}">v${entry.version} · ${escapeHtml(entry.createdAt.slice(0, 10))}</a>`,
+    )
     .join("");
-  const latestSuffix = current === head.version ? `<span class="pb-dim">(latest)</span>` : "";
+  const options = newestFirst
+    .map(
+      (entry) =>
+        `<option value="${escapeHtml(versionHref(entry.version))}"${entry.version === viewed ? " selected" : ""}>v${entry.version}</option>`,
+    )
+    .join("");
   const liveDot = pinnedVersion === null ? `<i class="pb-live" title="Follows updates automatically"></i>` : "";
-  const label = `<span class="pb-label">v<span id="pagebin-vnum">${current}</span>&nbsp;${latestSuffix}${liveDot}</span>`;
-  const latest = pinnedVersion === null ? "" : `<a class="pb-latest" href="${escapeHtml(basePath)}">View latest</a>`;
+  const dropdown = `<span class="pb-dd" id="pagebin-dd"><button class="trigger" type="button">v<span id="pagebin-vnum">${viewed}</span></button><div class="menu">${menuItems}</div><select aria-label="Version">${options}</select></span>`;
   const copy = `<button class="pb-copy" id="pagebin-copy" type="button" title="Copy link to this version">${VIEWER_COPY_ICON}</button>`;
-  const bar = `<div class="pagebin-bar">${step("‹", nav.previousPath, nav.previousTitle)}${step("›", nav.nextPath, nav.nextTitle)}${label}${latest}<nav class="pb-rail"><span class="pb-track"></span>${ticks}</nav>${copy}</div>`;
-  const mobSteps = `<div class="pb-mobsteps">${mobStep("‹", nav.previousPath, nav.previousTitle)}${mobStep("›", nav.nextPath, nav.nextTitle)}</div>`;
 
-  return bar + mobSteps;
+  return `<div class="pagebin-bar"><span class="pb-name">${escapeHtml(metadata.filename)}</span>${liveDot}${dropdown}${copy}</div>`;
 }
 
-function scrubberCopyScript(id: string, token: string, currentVersion: number): string {
+function scrubberBarScript(id: string, token: string, viewedVersion: number): string {
   const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
 
   return `
-let pagebinCopyPath = ${JSON.stringify(`${basePath}/v/${currentVersion}`)};
+let pagebinCopyPath = ${JSON.stringify(`${basePath}/v/${viewedVersion}`)};
 const pagebinCopyButton = document.getElementById("pagebin-copy");
 if (pagebinCopyButton) {
   pagebinCopyButton.addEventListener("click", async () => {
     const url = location.origin + pagebinCopyPath;
     try {
       await navigator.clipboard.writeText(url);
-      pagebinCopyButton.classList.add("ok");
-      setTimeout(() => pagebinCopyButton.classList.remove("ok"), 1200);
     } catch {
-      prompt("Copy this link:", url);
+      const area = document.createElement("textarea");
+      area.value = url;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand("copy"); } catch {}
+      area.remove();
     }
+    pagebinCopyButton.classList.add("ok");
+    setTimeout(() => pagebinCopyButton.classList.remove("ok"), 1200);
   });
+}
+const pagebinDd = document.getElementById("pagebin-dd");
+if (pagebinDd) {
+  const trigger = pagebinDd.querySelector(".trigger");
+  const select = pagebinDd.querySelector("select");
+  if (trigger) {
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      pagebinDd.classList.toggle("open");
+    });
+    document.addEventListener("click", () => pagebinDd.classList.remove("open"));
+  }
+  if (select) {
+    select.addEventListener("input", () => {
+      if (select.value) {
+        location.href = select.value;
+      }
+    });
+  }
 }
 `;
 }
@@ -1345,7 +1319,7 @@ ${hasBar ? scrubberBarHtml(id, token, metadata, null) : ""}<iframe id="pagebin-f
 <script>
 const pagebinFrame = document.getElementById("pagebin-frame");
 const pagebinVersionNumber = document.getElementById("pagebin-vnum");
-${hasBar ? scrubberCopyScript(id, token, artifactHead(metadata).version) : ""}
+${hasBar ? scrubberBarScript(id, token, artifactHead(metadata).version) : ""}
 const pagebinMinDelayMs = 2000;
 const pagebinMaxDelayMs = 60000;
 let pagebinVersion = ${JSON.stringify(version)};
@@ -1428,7 +1402,7 @@ ${VIEWER_BAR_CSS}</style>
 </head>
 <body>
 ${scrubberBarHtml(id, token, metadata, entry.version)}<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
-<script>${scrubberCopyScript(id, token, entry.version)}</script>
+<script>${scrubberBarScript(id, token, entry.version)}</script>
 </body>
 </html>`;
 
@@ -2078,17 +2052,23 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
             createdAt: updatedAt,
           },
         ];
-  const lastVersion = versions[versions.length - 1] as ArtifactVersion;
-
-  if (lastVersion.contentKey !== contentKey) {
+  if (!versions.some((entry) => entry.contentKey === contentKey)) {
     versions = appendArtifactVersion(versions, {
-      version: lastVersion.version + 1,
+      version: (versions[versions.length - 1] as ArtifactVersion).version + 1,
       contentKey,
       contentSha256,
       size: metadata.size,
       createdAt: updatedAt,
     });
   }
+
+  const storedCurrent = versions.find((entry) => entry.version === metadata.currentVersion);
+  const currentEntry =
+    storedCurrent && storedCurrent.contentKey === contentKey
+      ? storedCurrent
+      : ([...versions].reverse().find((entry) => entry.contentKey === contentKey) ??
+        (versions[versions.length - 1] as ArtifactVersion));
+  const currentVersion = currentEntry.version;
 
   return {
     ...metadata,
@@ -2097,12 +2077,15 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
     contentKey,
     contentSha256,
     versions,
+    currentVersion,
     attributes,
   };
 }
 
 function artifactHead(metadata: ArtifactMetadata): ArtifactVersion {
-  const head = metadata.versions[metadata.versions.length - 1];
+  const head =
+    metadata.versions.find((entry) => entry.version === metadata.currentVersion) ??
+    metadata.versions[metadata.versions.length - 1];
 
   if (!head) {
     throw new Error(`Artifact ${metadata.id} has no version history.`);

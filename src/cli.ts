@@ -1970,7 +1970,7 @@ async function rollbackArtifact(options: RollbackOptions): Promise<void> {
 
   const url = resolved.url ? toViewerUrl(resolved.url) : null;
   console.log(
-    `Rolled back ${resolved.id} to version ${options.version}; new head is version ${payload.version}${url ? ` · ${url}` : ""}`,
+    `Marked v${payload.version} as current for ${resolved.id}${url ? ` · ${url}` : ""}`,
   );
 }
 
@@ -2537,7 +2537,7 @@ Options:
     case "rollback":
       return `pagebin rollback
 
-Restores retained content as a new head version while preserving the viewer URL.
+Marks a retained version as current while preserving the viewer URL.
 
 Usage:
   pagebin rollback <artifact_id|viewer_url|file> <version> [--json] [--endpoint URL]
@@ -2632,7 +2632,7 @@ Behavior:
   watch                Publishes a file, then updates that artifact whenever the file changes.
   verify               Compares the local rendered bytes with raw content or the stored hash.
   versions             Lists retained content versions and pinned viewer URLs when known.
-  rollback             Restores retained content as a new head version.
+  rollback             Marks a retained version as current.
   receipts             Lists protected local publication receipts.
   show                 Recovers a viewer URL from a local receipt.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
@@ -2676,7 +2676,7 @@ Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally te
 - \`update <file>\`: update by protected local receipt. An artifact ID or viewer URL may be supplied explicitly.
 - \`watch <file>\`: publish or update continuously. Prefer explicit checkpoint updates unless continuous watch is useful.
 - \`versions <target>\`: list the retained content history; known viewer URLs include pinned links.
-- \`rollback <target> <version>\`: restore retained content as a new head version.
+- \`rollback <target> <version>\`: mark a retained version as current.
 - \`verify <id-or-url> <file>\`: confirm the published content matches the local file.
 - \`receipts\` and \`show <target>\`: recover locally stored viewer URLs without reissuing them.
 - \`list\`: list server-side artifact metadata; viewer tokens are intentionally absent.

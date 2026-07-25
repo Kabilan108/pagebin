@@ -57,10 +57,32 @@ agent-browser --cdp "$port" eval "(() => {
 ```
 
 Expected polling behavior: 2s initial delay, ×1.5 backoff per unchanged poll
-up to 60s; reset to 2s on detected update or tab becoming visible; zero polls
-while `document.hidden`. Background the tab with `tab new about:blank`,
-foreground with the tracked tab ID. After a PUT, the iframe src gains
-`?v=<updatedAt>`.
+up to 60s; reset to 2s on tab becoming visible; zero polls while
+`document.hidden`. Background the tab with `tab new about:blank`, foreground
+with the tracked tab ID. After a PUT, the poll detects the revision change and
+reloads the whole viewer shell (not just the iframe), which restarts polling
+at the 2s delay.
+
+## Handing a dev server to the user (tailnet review)
+
+Bind wrangler to all interfaces and share the machine's Tailscale IP
+(`tailscale ip -4`), never the MagicDNS name — `.ts.net` is HSTS-preloaded, so
+browsers force HTTPS and plain-HTTP wrangler fails with "Secure Connection
+Failed". Pass the IP origin as `PAGEBIN_PUBLIC_ORIGIN` so minted viewer URLs
+are directly clickable, and include the IP in `PAGEBIN_DEV_ADMIN_HOSTNAMES` or
+the dashboard route falls through to the artifact 404:
+
+```sh
+bunx wrangler dev --config wrangler.dev.toml --port 8790 --ip 0.0.0.0 \
+  --var PAGEBIN_PUBLISH_TOKEN:test-publish-token \
+  --var "PAGEBIN_PUBLIC_ORIGIN:http://<tailscale-ip>:8790" \
+  --var "PAGEBIN_DEV_ADMIN_HOSTNAMES:<tailscale-ip>"
+```
+
+Seed demo artifacts with realistic multi-version history (publish, then
+several updates with changed content) before handing over URLs, run the
+server in a named tmux session, and tell the user the exact
+`tmux kill-session -t <name>` command.
 
 ## Gotchas
 

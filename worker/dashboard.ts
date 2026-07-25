@@ -67,15 +67,14 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 @media(prefers-color-scheme:dark){.mi.branch svg{stroke:#93b06e}.mi.host svg{stroke:#7da2c4}.mi.agent svg{stroke:#bd93d6}
 .mi.agent.brand-claude svg{fill:#d97757}.mi.agent.brand-codex svg{fill:#c9c3b4}.mi.agent.brand-opencode svg{fill:#c9c3b4}.mi.agent.brand-amp svg{fill:#e56a50}
 .t-plan{color:#d4b45f}.t-report{color:#63b0a1}.t-review{color:#c98299}.t-explainer{color:#7da2c4}.t-implementation-log{color:#93b06e}}
-.vchip{font-family:ui-sans-serif,system-ui,sans-serif;font-size:10.5px;border:1px solid var(--line);border-radius:999px;background:none;color:var(--muted);padding:1px 9px;cursor:pointer;align-self:center;white-space:nowrap;flex-shrink:0}
-.vchip:hover{border-color:var(--accent);color:var(--text)}
-.vchip.on{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.vchip{font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;border:none;background:none;color:var(--accent);padding:0;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;white-space:nowrap;flex-shrink:0}
+.vchip:hover,.vchip.on{text-decoration-style:solid}
 .vfold{margin:7px 0 3px 18px;border-left:2px solid var(--line);padding-left:14px}
 .vrow{display:flex;align-items:center;gap:9px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;color:var(--muted);padding:3px 0;border-bottom:1px dotted var(--line)}
 .vrow:last-child{border-bottom:none}
 .vnum{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--text);min-width:2.4em}
 .vrow.cur .vnum{color:var(--accent);font-weight:700}
-.vbadge{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);border:1px solid var(--accent);border-radius:999px;padding:0 6px}
+.vcur{font-family:ui-serif,Georgia,serif;font-style:italic;font-size:11.5px;color:var(--accent)}
 .vsha{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--faint)}
 .vspacer{flex:1}
 .vrow button{border:none;background:none;color:var(--faint);cursor:pointer;padding:4px;border-radius:5px;display:flex;align-items:center}
@@ -146,8 +145,8 @@ async function rollbackVersion(id,version){if(!confirm('Restore v'+version+' as 
 function versionFold(a){const box=el('div','vfold');
 for(const v of[...a.versions].reverse()){const row=el('div','vrow'+(v.current?' cur':''));
 row.append(el('span','vnum','v'+v.version));
-if(v.current)row.append(el('span','vbadge','current'));
 row.append(el('span',null,relTime(v.createdAt)),el('span',null,formatBytes(v.size)));
+if(v.current)row.append(el('span','vcur','current'));
 if(v.contentSha256)row.append(el('span','vsha',v.contentSha256.slice(0,6)));
 row.append(el('span','vspacer'));
 row.append(iconBtn('copy','Copy link to this version',()=>copyPinned(a.id,v.version).catch(alert)));

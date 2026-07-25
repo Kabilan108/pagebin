@@ -413,7 +413,7 @@ describe("worker", () => {
     });
   });
 
-  test("rolls retained content back as a new head version", async () => {
+  test("marks a retained version as current without appending on rollback", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
     await updateFixtureResponse(env, published.id, {
@@ -427,13 +427,24 @@ describe("worker", () => {
     const after = await readMetadataFixture(env, published.id);
 
     expect(response.status).toBe(200);
-    expect(payload).toMatchObject({ revision: 3, version: 3 });
+    expect(payload).toMatchObject({ revision: 3, version: 1 });
     expect(after.contentKey).toBe(originalKey);
-    expect(after.versions.at(-1)).toMatchObject({ version: 3, contentKey: originalKey });
+    expect(after.currentVersion).toBe(1);
+    expect(after.versions.map((entry) => entry.version)).toEqual([1, 2]);
     expect(await (await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never)).text()).toContain("globalThis.ok");
 
+    const updateAfterRollback = await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>third</h1>",
+      filename: "third.html",
+    });
+    const updatePayload = (await updateAfterRollback.json()) as { version: number };
+    const resumed = await readMetadataFixture(env, published.id);
+
+    expect(updatePayload.version).toBe(3);
+    expect(resumed.currentVersion).toBe(3);
+    expect(resumed.versions.map((entry) => entry.version)).toEqual([1, 2, 3]);
+
     expect((await rollbackFixtureResponse(env, published.id, 99)).status).toBe(400);
-    expect((await rollbackFixtureResponse(env, published.id, 3)).status).toBe(400);
     expect(
       (
         await worker.fetch(
@@ -461,20 +472,20 @@ describe("worker", () => {
     const beforeRetry = await readMetadataFixture(env, published.id);
     const etagBeforeRetry = env.ARTIFACTS.objects.get(metadataKey)?.etag;
 
-    expect(firstPayload).toMatchObject({ revision: 3, version: 3 });
+    expect(firstPayload).toMatchObject({ revision: 3, version: 1 });
 
     for (let retry = 0; retry < 3; retry += 1) {
       const retryResponse = await rollbackFixtureResponse(env, published.id, 1);
       const retryPayload = (await retryResponse.json()) as { revision: number; version: number };
 
       expect(retryResponse.status).toBe(200);
-      expect(retryPayload).toMatchObject({ revision: 3, version: 3 });
+      expect(retryPayload).toMatchObject({ revision: 3, version: 1 });
     }
 
     const afterRetries = await readMetadataFixture(env, published.id);
 
     expect(afterRetries).toEqual(beforeRetry);
-    expect(afterRetries.versions.map((entry) => entry.version)).toEqual([1, 2, 3]);
+    expect(afterRetries.versions.map((entry) => entry.version)).toEqual([1, 2]);
     expect(env.ARTIFACTS.objects.get(metadataKey)?.etag).toBe(etagBeforeRetry);
   });
 
@@ -492,9 +503,9 @@ describe("worker", () => {
     expect(pinnedRaw.status).toBe(200);
     expect(await pinnedRaw.text()).toContain("globalThis.ok");
     expect(pinnedViewer.status).toBe(200);
-    expect(viewerHtml).toContain("Version 1 of 2");
+    expect(viewerHtml).toContain('id="pagebin-vnum">1<');
     expect(viewerHtml).toContain(`href="/p/${published.id}/`);
-    expect(viewerHtml).toContain("View latest");
+    expect(viewerHtml).toContain('id="pagebin-dd"');
     expect(viewerHtml).not.toContain("pagebinPoll");
     expect(viewerHtml).not.toContain("/api/artifacts/");
     expect((await worker.fetch(new Request(`${published.url}/v/0`), env as never)).status).toBe(404);
@@ -1567,35 +1578,51 @@ describe("worker", () => {
     expect(await env.ARTIFACTS.get(prunedKey)).toBeNull();
   });
 
-  test("scheduled cleanup preserves a shared rollback content key after its older entry is pruned", async () => {
+  test("scheduled cleanup preserves the rolled-back current entry at the cap and collects it after pruning", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
 
-    await updateFixtureResponse(env, published.id, {
-      contents: "<!doctype html><h1>second</h1>",
-      filename: "plan.html",
-    });
-    await rollbackFixtureResponse(env, published.id, 1);
-
-    for (let version = 4; version <= 11; version += 1) {
+    for (let version = 2; version <= 10; version += 1) {
       await updateFixtureResponse(env, published.id, {
         contents: `<!doctype html><h1>version ${version}</h1>`,
         filename: "plan.html",
       });
     }
 
-    const sharedKey = `artifacts/${published.id}/index.html`;
-    const metadata = await readMetadataFixture(env, published.id);
-    expect(metadata.versions.map((entry) => entry.version)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
-    expect(metadata.versions.find((entry) => entry.version === 3)?.contentKey).toBe(sharedKey);
-    const sharedObject = env.ARTIFACTS.objects.get(sharedKey);
+    await rollbackFixtureResponse(env, published.id, 1);
 
-    if (sharedObject) {
-      sharedObject.uploaded = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    }
+    const oldestKey = `artifacts/${published.id}/index.html`;
+    const rolledBack = await readMetadataFixture(env, published.id);
 
+    expect(rolledBack.versions.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(rolledBack.currentVersion).toBe(1);
+    expect(rolledBack.contentKey).toBe(oldestKey);
+
+    const ageObject = (key: string): void => {
+      const object = env.ARTIFACTS.objects.get(key);
+
+      if (object) {
+        object.uploaded = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      }
+    };
+
+    ageObject(oldestKey);
     await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
-    expect(await env.ARTIFACTS.get(sharedKey)).not.toBeNull();
+    expect(await env.ARTIFACTS.get(oldestKey)).not.toBeNull();
+
+    await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><h1>version 11</h1>",
+      filename: "plan.html",
+    });
+
+    const resumed = await readMetadataFixture(env, published.id);
+
+    expect(resumed.versions.map((entry) => entry.version)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(resumed.currentVersion).toBe(11);
+
+    ageObject(oldestKey);
+    await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    expect(await env.ARTIFACTS.get(oldestKey)).toBeNull();
   });
 
   test("revokes metadata before deleting HTML", async () => {
@@ -1722,6 +1749,7 @@ async function readMetadataFixture(env: TestEnv, id: string): Promise<{
   attributes: Record<string, string>;
   contentKey: string;
   contentSha256: string | null;
+  currentVersion: number;
   revision: number;
   size: number;
   updatedAt: string;

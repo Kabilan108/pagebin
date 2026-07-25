@@ -1275,7 +1275,7 @@ describe("version history commands", () => {
           sandbox: "standard",
           size: 31,
           revision: 7,
-          version: 6,
+          version: 1,
           contentSha256: "c".repeat(64),
           attributes: {},
         });
@@ -1315,7 +1315,7 @@ describe("version history commands", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
-      expect(result.stdout).toContain("new head is version 6");
+      expect(result.stdout).toContain("Marked v1 as current");
       expect(result.stdout).toContain(viewerUrl);
       expect(store.artifacts[0]?.revision).toBe(7);
       expect(store.artifacts[0]?.updatedAt).not.toBe("2026-07-21T00:00:00.000Z");

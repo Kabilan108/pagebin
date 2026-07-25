@@ -41,7 +41,7 @@ h1{font-size:clamp(2.2rem,6vw,3.4rem);margin:0;line-height:1;letter-spacing:-.02
 h2{font-size:13px;font-family:ui-sans-serif,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);border-bottom:1px solid var(--line);padding-bottom:6px;margin:36px 0 4px;font-weight:600;display:flex;justify-content:space-between;align-items:baseline}
 h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:400}
 .item{padding:11px 0;border-bottom:1px dotted var(--line)}
-.line1{display:flex;align-items:baseline;gap:12px}
+.line1{display:flex;align-items:center;gap:12px}
 .name{font-size:17px;cursor:pointer;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .name:hover{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
 .spacer{flex:1}
@@ -67,7 +67,21 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 @media(prefers-color-scheme:dark){.mi.branch svg{stroke:#93b06e}.mi.host svg{stroke:#7da2c4}.mi.agent svg{stroke:#bd93d6}
 .mi.agent.brand-claude svg{fill:#d97757}.mi.agent.brand-codex svg{fill:#c9c3b4}.mi.agent.brand-opencode svg{fill:#c9c3b4}.mi.agent.brand-amp svg{fill:#e56a50}
 .t-plan{color:#d4b45f}.t-report{color:#63b0a1}.t-review{color:#c98299}.t-explainer{color:#7da2c4}.t-implementation-log{color:#93b06e}}
-.line1 .when{align-self:center}
+.vchip{font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;border:none;background:none;color:var(--accent);padding:0;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px;white-space:nowrap;flex-shrink:0}
+.vchip:hover,.vchip.on{text-decoration-style:solid}
+.vfold{margin:7px 0 3px 18px;border-left:2px solid var(--line);padding-left:14px}
+.vrow{display:flex;align-items:center;gap:9px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;color:var(--muted);padding:3px 0;border-bottom:1px dotted var(--line)}
+.vrow:last-child{border-bottom:none}
+.vnum{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--text);min-width:2.4em}
+.vrow.cur .vnum{color:var(--accent);font-weight:700}
+.vcur{font-family:ui-serif,Georgia,serif;font-style:italic;font-size:11.5px;color:var(--accent)}
+.vsha{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--faint)}
+.vspacer{flex:1}
+.vrow button{border:none;background:none;color:var(--faint);cursor:pointer;padding:4px;border-radius:5px;display:flex;align-items:center}
+.vrow button:hover{color:var(--accent);background:var(--chip)}
+.vrow button.danger:hover{color:var(--danger)}
+.vrow svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+@media(max-width:640px){.vfold{margin-left:6px;padding-left:10px}.vsha{display:none}}
 .more{font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;color:var(--accent);background:none;border:none;cursor:pointer;padding:10px 0 2px;text-decoration:underline dotted;text-underline-offset:3px}
 .empty{padding:60px 0;text-align:center;color:var(--muted);font-style:italic}
 .fab{position:fixed;bottom:22px;right:22px;width:46px;height:46px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.16);font-size:17px;z-index:40}
@@ -86,12 +100,12 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 #deskOutline .label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #deskOutline .count{color:var(--faint);font-size:11.5px}
 }
-@media(max-width:640px){main{padding:28px 16px 140px}.name{white-space:normal}.line1 .when,.line1 .acts{align-self:flex-start;margin-top:2px}}
+@media(max-width:640px){main{padding:28px 16px 140px}.name{white-space:normal}}
 `;
 
 const SCRIPT = `
 const settings={groupBy:'repo',cap:5,filterStyle:'chips',metaFont:'sans',fields:{type:true,branch:true,host:true,agent:true,expiry:true}};
-const state={artifacts:[],query:'',host:'',expanded:new Set()};
+const state={artifacts:[],query:'',host:'',expanded:new Set(),openVersions:new Set()};
 const $=id=>document.getElementById(id);
 const el=(tag,cls,txt)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(txt!=null)n.textContent=txt;return n};
 
@@ -99,6 +113,8 @@ const ICONS={
 link:'<svg viewBox="0 0 24 24"><path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5"/></svg>',
 reissue:'<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>',
 trash:'<svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>',
+copy:'<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
+restore:'<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 3v6h6"/></svg>',
 branch:'<svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.4"/><circle cx="6" cy="19" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.4v9.2"/><path d="M18 9.4c0 4-4.5 4.6-7 5-2 .3-3.5 1-4 2.2"/></svg>',
 host:'<svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></svg>',
 agent:'<svg viewBox="0 0 24 24"><path d="M12 3l1.7 4.6L18 9l-4.3 1.4L12 15l-1.7-4.6L6 9l4.3-1.4z"/><path d="M18.5 14.5l.9 2.3 2.3.9-2.3.9-.9 2.3-.9-2.3-2.3-.9 2.3-.9z"/></svg>'};
@@ -119,10 +135,24 @@ function matches(a){const q=state.query.trim().toLowerCase();const hay=[a.attrib
 function relTime(iso){const s=(Date.now()-Date.parse(iso))/1000;if(s<60)return'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';if(s<86400*14)return Math.floor(s/86400)+'d ago';if(s<86400*60)return Math.floor(s/86400/7)+'w ago';return new Date(iso).toLocaleDateString()}
 function hosts(){return[...new Set(state.artifacts.map(a=>a.attributes.sourceHost).filter(Boolean))].sort()}
 function openArtifact(id){window.open('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/open','_blank')}
-async function copyText(value){try{await navigator.clipboard.writeText(value)}catch{prompt('Copy this link:',value)}}
+async function copyText(value){let copied=false;try{await navigator.clipboard.writeText(value);copied=true}catch{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.opacity='0';document.body.append(area);area.select();try{copied=document.execCommand('copy')}catch{}area.remove()}if(!copied)prompt('Copy this link:',value)}
 async function copyLink(id){const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/link');const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to recover link');await copyText(p.url)}
 async function reissue(id){if(!confirm('Reissue this link? The previous URL stops working.'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/reissue',{method:'POST',headers:{'X-PageBin-Dashboard':'1'}});const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to reissue');await load();await copyText(p.url)}
 async function removeArtifact(id){if(!confirm('Delete this artifact permanently?'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id),{method:'DELETE',headers:{'X-PageBin-Dashboard':'1'}});if(!r.ok)throw new Error('Unable to delete');await load()}
+function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB'}
+async function copyPinned(id,version){const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/link');const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to recover link');await copyText(p.url+'/v/'+version)}
+async function rollbackVersion(id,version){if(!confirm('Restore v'+version+' as the current version? Open viewers will reload onto it.'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/rollback',{method:'POST',headers:{'X-PageBin-Dashboard':'1','Content-Type':'application/json'},body:JSON.stringify({version})});const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to roll back');await load()}
+function versionFold(a){const box=el('div','vfold');
+for(const v of[...a.versions].reverse()){const row=el('div','vrow'+(v.current?' cur':''));
+row.append(el('span','vnum','v'+v.version));
+row.append(el('span',null,relTime(v.createdAt)),el('span',null,formatBytes(v.size)));
+if(v.current)row.append(el('span','vcur','current'));
+if(v.contentSha256)row.append(el('span','vsha',v.contentSha256.slice(0,6)));
+row.append(el('span','vspacer'));
+row.append(iconBtn('copy','Copy link to this version',()=>copyPinned(a.id,v.version).catch(alert)));
+if(!v.current)row.append(iconBtn('restore','Restore this version',()=>rollbackVersion(a.id,v.version).catch(alert),'danger'));
+box.append(row)}
+return box}
 
 function chipGroup(label,values,key){const g=el('span','chipgroup');g.append(el('span','glabel',label));for(const v of values){const c=el('button','chip'+(state[key]===v?' on':''),v);c.type='button';c.addEventListener('click',()=>{state[key]=state[key]===v?'':v;renderFilters();render()});g.append(c)}return g}
 function dropdown(label,values,key){const wrap=el('span','dd');const trigger=el('button','trigger',state[key]||label);trigger.type='button';
@@ -150,8 +180,12 @@ parts.forEach((p,i)=>{if(i)line.append(el('span','sep','\\u00b7'));line.append(p
 function row(a){const item=el('div','item');const line1=el('div','line1');
 const name=el('span','name',a.attributes.title||a.filename);name.addEventListener('click',()=>openArtifact(a.id));
 const acts=el('span','acts');acts.append(iconBtn('link','Copy link',()=>copyLink(a.id).catch(alert)),iconBtn('reissue','Reissue link',()=>reissue(a.id).catch(alert)),iconBtn('trash','Delete',()=>removeArtifact(a.id).catch(alert),'danger'));
-line1.append(name,el('span','spacer'),el('span','when',relTime(a.updatedAt)),acts);item.append(line1);
+line1.append(name,el('span','spacer'));
+if(a.versions&&a.versions.length>1){const open=state.openVersions.has(a.id);const chip=el('button','vchip'+(open?' on':''),'v'+a.version);chip.type='button';chip.title='Version history';
+chip.addEventListener('click',e=>{e.stopPropagation();open?state.openVersions.delete(a.id):state.openVersions.add(a.id);render()});line1.append(chip)}
+line1.append(el('span','when',relTime(a.updatedAt)),acts);item.append(line1);
 for(const parts of metaRows(a))if(parts.length)item.append(metaLineEl(parts));
+if(state.openVersions.has(a.id)&&a.versions)item.append(versionFold(a));
 return item}
 
 function render(){const root=$('sections');root.replaceChildren();const items=state.artifacts.filter(matches);

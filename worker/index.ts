@@ -26,6 +26,7 @@ interface ArtifactMetadata {
   contentKey: string;
   contentSha256: string | null;
   versions: ArtifactVersion[];
+  currentVersion: number;
   deletedAt?: string;
   attributes: ArtifactAttributes;
   encryptedToken?: EncryptedViewerToken;
@@ -313,6 +314,25 @@ async function routeDashboard(request: Request, env: Env, url: URL, hostname: st
     return dashboardManagementRequest(request, env, reissueMatch[1], "reissue");
   }
 
+  const rollbackMatch = url.pathname.match(/^\/api\/dashboard\/artifacts\/([^/]+)\/rollback$/);
+
+  if (request.method === "POST" && rollbackMatch?.[1]) {
+    if (!hasDashboardMutationHeader(request)) {
+      return json({ error: "Missing dashboard mutation header." }, 403);
+    }
+
+    const internalRequest = new Request(`${new URL(request.url).origin}/api/artifacts/${encodeURIComponent(rollbackMatch[1])}/rollback`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.PAGEBIN_PUBLISH_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: await request.text(),
+    });
+
+    return rollbackArtifact(internalRequest, env, rollbackMatch[1]);
+  }
+
   const artifactMatch = url.pathname.match(/^\/api\/dashboard\/artifacts\/([^/]+)$/);
 
   if (request.method === "DELETE" && artifactMatch?.[1]) {
@@ -381,6 +401,8 @@ async function dashboardArtifacts(env: Env, url: URL): Promise<Response> {
     contentSha256: artifact.contentSha256,
     attributes: artifact.attributes,
     linkRecoverable: Boolean(artifact.encryptedToken),
+    version: artifactHead(artifact).version,
+    versions: artifactVersionSummaries(artifact),
   }));
   const nextCursor = null;
 
@@ -662,6 +684,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
         createdAt: nowIso,
       },
     ],
+    currentVersion: 1,
     attributes: parsedOptions.attributes,
     ...(encryptedToken ? { encryptedToken } : {}),
   };
@@ -741,7 +764,6 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     ...metadata.attributes,
     ...attributes,
   };
-  const head = artifactHead(metadata);
 
   if (metadata.contentSha256 !== null && contentSha256 === metadata.contentSha256) {
     const isNoOp =
@@ -774,7 +796,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   const revision = metadata.revision + 1;
   const nextContentKey = versionedHtmlKey(id, revision);
   const nextVersion: ArtifactVersion = {
-    version: head.version + 1,
+    version: (metadata.versions[metadata.versions.length - 1] as ArtifactVersion).version + 1,
     contentKey: nextContentKey,
     contentSha256,
     size: upload.file.size,
@@ -789,6 +811,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     contentKey: nextContentKey,
     contentSha256,
     versions: appendArtifactVersion(metadata.versions, nextVersion),
+    currentVersion: nextVersion.version,
     attributes: mergedAttributes,
     expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
   };
@@ -982,35 +1005,17 @@ async function rollbackArtifact(request: Request, env: Env, id: string): Promise
     return json({ error: "Rollback version must be a positive integer." }, 400);
   }
 
-  const head = artifactHead(metadata);
   const target = metadata.versions.find((entry) => entry.version === body.version);
 
   if (!target) {
     return json({ error: `Version ${body.version} is not available for this artifact.` }, 400);
   }
 
-  if (target.version === head.version) {
-    return json({ error: `Version ${body.version} is already the current version.` }, 400);
-  }
-
-  const targetIsCurrentContent =
-    target.contentKey === metadata.contentKey ||
-    (target.contentSha256 !== null &&
-      metadata.contentSha256 !== null &&
-      target.contentSha256 === metadata.contentSha256);
-
-  if (targetIsCurrentContent) {
+  if (target.version === metadata.currentVersion) {
     return json(updatePayload(metadata));
   }
 
   const updatedAt = new Date().toISOString();
-  const nextVersion: ArtifactVersion = {
-    version: head.version + 1,
-    contentKey: target.contentKey,
-    contentSha256: target.contentSha256,
-    size: target.size,
-    createdAt: updatedAt,
-  };
   const nextMetadata: ArtifactMetadata = {
     ...metadata,
     updatedAt,
@@ -1018,7 +1023,7 @@ async function rollbackArtifact(request: Request, env: Env, id: string): Promise
     revision: metadata.revision + 1,
     contentKey: target.contentKey,
     contentSha256: target.contentSha256,
-    versions: appendArtifactVersion(metadata.versions, nextVersion),
+    currentVersion: target.version,
   };
 
   if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
@@ -1184,6 +1189,112 @@ function serveFavicon(): Response {
   });
 }
 
+const VIEWER_BAR_CSS = `
+:root{color-scheme:light dark;--pb-panel:#fffdf6;--pb-chip:#efeadd;--pb-text:#241f18;--pb-muted:#877e6f;--pb-faint:#a89f8e;--pb-line:#ddd6c6;--pb-accent:#8a5426;--pb-green:#6f9556}
+@media(prefers-color-scheme:dark){:root{--pb-panel:#211e19;--pb-chip:#26221c;--pb-text:#ece7dc;--pb-muted:#a29a8a;--pb-faint:#7a7365;--pb-line:#37322a;--pb-accent:#d39a62;--pb-green:#93b06e}}
+body{padding-top:34px;box-sizing:border-box}
+.pagebin-bar{position:fixed;inset:0 0 auto;height:34px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px 0 14px;border-bottom:1px solid var(--pb-line);background:var(--pb-chip);font:12px/1 ui-sans-serif,system-ui,sans-serif;color:var(--pb-muted);z-index:2}
+.pb-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;color:var(--pb-muted)}
+.pb-live{width:6px;height:6px;border-radius:50%;background:var(--pb-green);flex-shrink:0;animation:pbpulse 2.4s ease-in-out infinite}
+@keyframes pbpulse{0%,100%{opacity:1}50%{opacity:.25}}
+.pb-dd{position:relative;display:inline-flex;flex-shrink:0}
+.pb-dd .trigger{font:inherit;font-size:11.5px;border:1px solid var(--pb-line);border-radius:6px;background:var(--pb-panel);color:var(--pb-text);padding:4px 24px 4px 10px;cursor:pointer;position:relative}
+.pb-dd .trigger::after{content:'';position:absolute;right:9px;top:50%;width:6px;height:6px;border-right:1.5px solid var(--pb-muted);border-bottom:1.5px solid var(--pb-muted);transform:translateY(-70%) rotate(45deg)}
+.pb-dd .trigger:hover{border-color:var(--pb-accent)}
+.pb-dd .menu{position:absolute;z-index:30;top:calc(100% + 4px);right:0;min-width:100%;background:var(--pb-panel);border:1px solid var(--pb-line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:4px;display:none;max-height:60vh;overflow-y:auto}
+.pb-dd.open .menu{display:block}
+.pb-dd .menu a{display:block;font-size:11.5px;color:var(--pb-text);text-decoration:none;padding:6px 12px;border-radius:5px;white-space:nowrap}
+.pb-dd .menu a:hover{background:var(--pb-chip)}
+.pb-dd .menu a.sel{color:var(--pb-accent);font-weight:600}
+.pb-dd select{display:none;font:inherit;font-size:13px;border:1px solid var(--pb-line);border-radius:6px;background:var(--pb-panel);color:var(--pb-text);padding:4px 8px}
+@media(pointer:coarse){.pb-dd .trigger,.pb-dd .menu{display:none!important}.pb-dd select{display:block}}
+.pb-copy{border:none;background:none;color:var(--pb-muted);cursor:pointer;padding:5px;border-radius:6px;display:flex;align-items:center;flex-shrink:0}
+.pb-copy:hover{color:var(--pb-accent);background:var(--pb-panel)}
+.pb-copy.ok{color:var(--pb-green)}
+.pb-copy svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+`;
+
+const VIEWER_COPY_ICON = `<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`;
+
+function scrubberBarHtml(id: string, token: string, metadata: ArtifactMetadata, pinnedVersion: number | null): string {
+  const current = artifactHead(metadata).version;
+  const viewed = pinnedVersion ?? current;
+  const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+  const versionHref = (version: number): string => (version === current ? basePath : `${basePath}/v/${version}`);
+  const newestFirst = [...metadata.versions].reverse();
+  const menuItems = newestFirst
+    .map(
+      (entry) =>
+        `<a${entry.version === viewed ? ' class="sel"' : ""} href="${escapeHtml(versionHref(entry.version))}">v${entry.version} · ${escapeHtml(entry.createdAt.slice(0, 10))}</a>`,
+    )
+    .join("");
+  const options = newestFirst
+    .map(
+      (entry) =>
+        `<option value="${escapeHtml(versionHref(entry.version))}"${entry.version === viewed ? " selected" : ""}>v${entry.version}</option>`,
+    )
+    .join("");
+  const liveDot = pinnedVersion === null ? `<i class="pb-live" title="Follows updates automatically"></i>` : "";
+  const dropdown = `<span class="pb-dd" id="pagebin-dd"><button class="trigger" type="button">v<span id="pagebin-vnum">${viewed}</span></button><div class="menu">${menuItems}</div><select aria-label="Version">${options}</select></span>`;
+  const copy = `<button class="pb-copy" id="pagebin-copy" type="button" title="Copy link to this version">${VIEWER_COPY_ICON}</button>`;
+
+  return `<div class="pagebin-bar"><span class="pb-name">${escapeHtml(metadata.filename)}</span>${liveDot}${dropdown}${copy}</div>`;
+}
+
+function scrubberBarScript(id: string, token: string, viewedVersion: number): string {
+  const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+
+  return `
+const pagebinCopyPath = ${JSON.stringify(`${basePath}/v/${viewedVersion}`)};
+const pagebinCopyButton = document.getElementById("pagebin-copy");
+if (pagebinCopyButton) {
+  pagebinCopyButton.addEventListener("click", async () => {
+    const url = location.origin + pagebinCopyPath;
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = url;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      try { copied = document.execCommand("copy"); } catch {}
+      area.remove();
+    }
+    if (!copied) {
+      prompt("Copy this link:", url);
+      return;
+    }
+    pagebinCopyButton.classList.add("ok");
+    setTimeout(() => pagebinCopyButton.classList.remove("ok"), 1200);
+  });
+}
+const pagebinDd = document.getElementById("pagebin-dd");
+if (pagebinDd) {
+  const trigger = pagebinDd.querySelector(".trigger");
+  const select = pagebinDd.querySelector("select");
+  if (trigger) {
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      pagebinDd.classList.toggle("open");
+    });
+    document.addEventListener("click", () => pagebinDd.classList.remove("open"));
+  }
+  if (select) {
+    select.addEventListener("input", () => {
+      if (select.value) {
+        location.href = select.value;
+      }
+    });
+  }
+}
+`;
+}
+
 async function serveViewer(env: Env, requestUrl: string, id: string, token: string): Promise<Response> {
   const metadata = await readAuthorizedMetadata(env, id, token);
 
@@ -1196,6 +1307,7 @@ async function serveViewer(env: Env, requestUrl: string, id: string, token: stri
   const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
   const sandbox = iframeSandboxAttribute(metadata.sandbox);
   const version = metadata.revision;
+  const hasBar = metadata.versions.length > 1;
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1206,12 +1318,12 @@ async function serveViewer(env: Env, requestUrl: string, id: string, token: stri
 <style>
 html,body{height:100%;margin:0;background:#fff}
 iframe{display:block;width:100%;height:100%;border:0}
-</style>
+${hasBar ? VIEWER_BAR_CSS : ""}</style>
 </head>
 <body>
-<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+${hasBar ? scrubberBarHtml(id, token, metadata, null) : ""}<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 <script>
-const pagebinFrame = document.getElementById("pagebin-frame");
+${hasBar ? scrubberBarScript(id, token, artifactHead(metadata).version) : ""}
 const pagebinMinDelayMs = 2000;
 const pagebinMaxDelayMs = 60000;
 let pagebinVersion = ${JSON.stringify(version)};
@@ -1224,19 +1336,17 @@ function pagebinSchedule() {
   }
 }
 async function pagebinPoll() {
-  let changed = false;
   try {
     const response = await fetch(${JSON.stringify(versionPath)}, { cache: "no-store" });
     if (response.ok) {
       const payload = await response.json();
       if (payload.revision && payload.revision !== pagebinVersion) {
-        pagebinVersion = payload.revision;
-        pagebinFrame.src = ${JSON.stringify(rawPath)} + "?v=" + encodeURIComponent(pagebinVersion);
-        changed = true;
+        location.reload();
+        return;
       }
     }
   } catch {}
-  pagebinDelayMs = changed ? pagebinMinDelayMs : Math.min(pagebinDelayMs * 1.5, pagebinMaxDelayMs);
+  pagebinDelayMs = Math.min(pagebinDelayMs * 1.5, pagebinMaxDelayMs);
   pagebinSchedule();
 }
 document.addEventListener("visibilitychange", () => {
@@ -1275,9 +1385,7 @@ async function servePinnedViewer(
 
   const url = new URL(requestUrl);
   const rawPath = `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}`;
-  const latestPath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
   const sandbox = iframeSandboxAttribute(metadata.sandbox);
-  const head = artifactHead(metadata);
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1287,15 +1395,12 @@ async function servePinnedViewer(
 <title>${escapeHtml(metadata.filename)} · Version ${entry.version}</title>
 <style>
 html,body{height:100%;margin:0;background:#fff}
-body{padding-top:32px;box-sizing:border-box}
-.pagebin-version{position:fixed;inset:0 0 auto;height:32px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:.4rem;border-bottom:1px solid #ddd;background:#f7f7f7;color:#333;font:12px/1.2 system-ui,sans-serif;z-index:1}
-.pagebin-version a{color:#155eef}
 iframe{display:block;width:100%;height:100%;border:0}
-</style>
+${VIEWER_BAR_CSS}</style>
 </head>
 <body>
-<div class="pagebin-version">Version ${entry.version} of ${head.version} · <a href="${escapeHtml(latestPath)}">View latest</a></div>
-<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+${scrubberBarHtml(id, token, metadata, entry.version)}<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+<script>${scrubberBarScript(id, token, entry.version)}</script>
 </body>
 </html>`;
 
@@ -1945,17 +2050,23 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
             createdAt: updatedAt,
           },
         ];
-  const lastVersion = versions[versions.length - 1] as ArtifactVersion;
-
-  if (lastVersion.contentKey !== contentKey) {
+  if (!versions.some((entry) => entry.contentKey === contentKey)) {
     versions = appendArtifactVersion(versions, {
-      version: lastVersion.version + 1,
+      version: (versions[versions.length - 1] as ArtifactVersion).version + 1,
       contentKey,
       contentSha256,
       size: metadata.size,
       createdAt: updatedAt,
     });
   }
+
+  const storedCurrent = versions.find((entry) => entry.version === metadata.currentVersion);
+  const currentEntry =
+    storedCurrent && storedCurrent.contentKey === contentKey
+      ? storedCurrent
+      : ([...versions].reverse().find((entry) => entry.contentKey === contentKey) ??
+        (versions[versions.length - 1] as ArtifactVersion));
+  const currentVersion = currentEntry.version;
 
   return {
     ...metadata,
@@ -1964,12 +2075,15 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
     contentKey,
     contentSha256,
     versions,
+    currentVersion,
     attributes,
   };
 }
 
 function artifactHead(metadata: ArtifactMetadata): ArtifactVersion {
-  const head = metadata.versions[metadata.versions.length - 1];
+  const head =
+    metadata.versions.find((entry) => entry.version === metadata.currentVersion) ??
+    metadata.versions[metadata.versions.length - 1];
 
   if (!head) {
     throw new Error(`Artifact ${metadata.id} has no version history.`);

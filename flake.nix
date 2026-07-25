@@ -29,7 +29,7 @@
             };
             jsYaml = pkgs.fetchzip {
               url = "https://registry.npmjs.org/js-yaml/-/js-yaml-${packageJson.dependencies."js-yaml"}.tgz";
-              sha256 = "1pzkq1qivm58hv0ij1vhsrjrmahqb36f6yzbspi3ppwwik66ksm6";
+              sha256 = "0ydq2c65w8d6pjj447dkqvf5vnxbs7asiw8kjlspkrjv5nk4xrp1";
             };
             marked = pkgs.fetchzip {
               url = "https://registry.npmjs.org/marked/-/marked-${packageJson.dependencies.marked}.tgz";

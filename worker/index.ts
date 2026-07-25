@@ -1245,13 +1245,15 @@ function scrubberBarScript(id: string, token: string, viewedVersion: number): st
   const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
 
   return `
-let pagebinCopyPath = ${JSON.stringify(`${basePath}/v/${viewedVersion}`)};
+const pagebinCopyPath = ${JSON.stringify(`${basePath}/v/${viewedVersion}`)};
 const pagebinCopyButton = document.getElementById("pagebin-copy");
 if (pagebinCopyButton) {
   pagebinCopyButton.addEventListener("click", async () => {
     const url = location.origin + pagebinCopyPath;
+    let copied = false;
     try {
       await navigator.clipboard.writeText(url);
+      copied = true;
     } catch {
       const area = document.createElement("textarea");
       area.value = url;
@@ -1260,8 +1262,12 @@ if (pagebinCopyButton) {
       area.style.opacity = "0";
       document.body.appendChild(area);
       area.select();
-      try { document.execCommand("copy"); } catch {}
+      try { copied = document.execCommand("copy"); } catch {}
       area.remove();
+    }
+    if (!copied) {
+      prompt("Copy this link:", url);
+      return;
     }
     pagebinCopyButton.classList.add("ok");
     setTimeout(() => pagebinCopyButton.classList.remove("ok"), 1200);
@@ -1317,8 +1323,6 @@ ${hasBar ? VIEWER_BAR_CSS : ""}</style>
 <body>
 ${hasBar ? scrubberBarHtml(id, token, metadata, null) : ""}<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 <script>
-const pagebinFrame = document.getElementById("pagebin-frame");
-const pagebinVersionNumber = document.getElementById("pagebin-vnum");
 ${hasBar ? scrubberBarScript(id, token, artifactHead(metadata).version) : ""}
 const pagebinMinDelayMs = 2000;
 const pagebinMaxDelayMs = 60000;
@@ -1332,23 +1336,17 @@ function pagebinSchedule() {
   }
 }
 async function pagebinPoll() {
-  let changed = false;
   try {
     const response = await fetch(${JSON.stringify(versionPath)}, { cache: "no-store" });
     if (response.ok) {
       const payload = await response.json();
       if (payload.revision && payload.revision !== pagebinVersion) {
-        pagebinVersion = payload.revision;
-        pagebinFrame.src = ${JSON.stringify(rawPath)} + "?v=" + encodeURIComponent(pagebinVersion);
-        changed = true;
-      }
-      if (payload.version && pagebinVersionNumber) {
-        pagebinVersionNumber.textContent = String(payload.version);
-        pagebinCopyPath = ${JSON.stringify(`/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/`)} + payload.version;
+        location.reload();
+        return;
       }
     }
   } catch {}
-  pagebinDelayMs = changed ? pagebinMinDelayMs : Math.min(pagebinDelayMs * 1.5, pagebinMaxDelayMs);
+  pagebinDelayMs = Math.min(pagebinDelayMs * 1.5, pagebinMaxDelayMs);
   pagebinSchedule();
 }
 document.addEventListener("visibilitychange", () => {

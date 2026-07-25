@@ -135,7 +135,7 @@ function matches(a){const q=state.query.trim().toLowerCase();const hay=[a.attrib
 function relTime(iso){const s=(Date.now()-Date.parse(iso))/1000;if(s<60)return'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';if(s<86400*14)return Math.floor(s/86400)+'d ago';if(s<86400*60)return Math.floor(s/86400/7)+'w ago';return new Date(iso).toLocaleDateString()}
 function hosts(){return[...new Set(state.artifacts.map(a=>a.attributes.sourceHost).filter(Boolean))].sort()}
 function openArtifact(id){window.open('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/open','_blank')}
-async function copyText(value){try{await navigator.clipboard.writeText(value)}catch{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.opacity='0';document.body.append(area);area.select();try{document.execCommand('copy')}catch{}area.remove()}}
+async function copyText(value){let copied=false;try{await navigator.clipboard.writeText(value);copied=true}catch{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.opacity='0';document.body.append(area);area.select();try{copied=document.execCommand('copy')}catch{}area.remove()}if(!copied)prompt('Copy this link:',value)}
 async function copyLink(id){const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/link');const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to recover link');await copyText(p.url)}
 async function reissue(id){if(!confirm('Reissue this link? The previous URL stops working.'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/reissue',{method:'POST',headers:{'X-PageBin-Dashboard':'1'}});const p=await r.json();if(!r.ok)throw new Error(p.error||'Unable to reissue');await load();await copyText(p.url)}
 async function removeArtifact(id){if(!confirm('Delete this artifact permanently?'))return;const r=await fetch('/api/dashboard/artifacts/'+encodeURIComponent(id),{method:'DELETE',headers:{'X-PageBin-Dashboard':'1'}});if(!r.ok)throw new Error('Unable to delete');await load()}
@@ -181,7 +181,7 @@ function row(a){const item=el('div','item');const line1=el('div','line1');
 const name=el('span','name',a.attributes.title||a.filename);name.addEventListener('click',()=>openArtifact(a.id));
 const acts=el('span','acts');acts.append(iconBtn('link','Copy link',()=>copyLink(a.id).catch(alert)),iconBtn('reissue','Reissue link',()=>reissue(a.id).catch(alert)),iconBtn('trash','Delete',()=>removeArtifact(a.id).catch(alert),'danger'));
 line1.append(name,el('span','spacer'));
-if(a.version>1){const open=state.openVersions.has(a.id);const chip=el('button','vchip'+(open?' on':''),'v'+a.version);chip.type='button';chip.title='Version history';
+if(a.versions&&a.versions.length>1){const open=state.openVersions.has(a.id);const chip=el('button','vchip'+(open?' on':''),'v'+a.version);chip.type='button';chip.title='Version history';
 chip.addEventListener('click',e=>{e.stopPropagation();open?state.openVersions.delete(a.id):state.openVersions.add(a.id);render()});line1.append(chip)}
 line1.append(el('span','when',relTime(a.updatedAt)),acts);item.append(line1);
 for(const parts of metaRows(a))if(parts.length)item.append(metaLineEl(parts));

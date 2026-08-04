@@ -151,6 +151,10 @@ describe("worker", () => {
 
     expect(viewerResponse.status).toBe(200);
     expect(viewerHtml).toContain('sandbox="allow-scripts allow-forms allow-popups allow-downloads"');
+    expect(viewerHtml).toContain('class="pagebin-bar"');
+    expect(viewerHtml).toContain('id="pagebin-vnum">1<');
+    expect(viewerHtml).not.toContain('class="pb-agent ');
+    expect(viewerHtml).not.toContain('class="pb-agent-name"');
     expect(viewerHtml).toContain("/version/");
     expect(viewerHtml).not.toContain("setInterval(");
     expect(viewerHtml).toContain("setTimeout(pagebinPoll, pagebinDelayMs)");
@@ -179,6 +183,32 @@ describe("worker", () => {
 
     expect(deleteResponse.status).toBe(200);
     expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(404);
+  });
+
+  test("shows known agents as icons and falls back to an escaped name", async () => {
+    const env = createEnv();
+    const knownAgents = [
+      ["amp", "amp"],
+      ["claude-code", "claude"],
+      ["codex", "codex"],
+      ["opencode", "opencode"],
+    ] as const;
+    const customArtifact = await publishFixture(env, { attributes: { agent: "custom <agent>" } });
+
+    for (const [agent, brand] of knownAgents) {
+      const artifact = await publishFixture(env, { attributes: { agent } });
+      const liveHtml = await (await worker.fetch(new Request(artifact.url), env as never)).text();
+      const pinnedHtml = await (await worker.fetch(new Request(`${artifact.url}/v/1`), env as never)).text();
+
+      for (const html of [liveHtml, pinnedHtml]) {
+        expect(html).toContain(`class="pb-agent pb-agent-${brand}"`);
+        expect(html).toContain(`aria-label="Published by ${agent}"`);
+        expect(html).not.toContain(`class="pb-agent-name">${agent}`);
+      }
+    }
+
+    const customHtml = await (await worker.fetch(new Request(customArtifact.url), env as never)).text();
+    expect(customHtml).toContain('<span class="pb-agent-name" title="Publishing agent">custom &lt;agent&gt;</span>');
   });
 
   test("updates artifact content while preserving the existing viewer URL", async () => {
@@ -1655,6 +1685,7 @@ describe("worker", () => {
 interface PublishFixtureOptions {
   sandbox?: "standard" | "strict";
   ttlSeconds?: string;
+  attributes?: Record<string, string>;
 }
 
 interface PublishedArtifact {
@@ -1685,6 +1716,7 @@ async function publishFixtureResponse(env: TestEnv, options: PublishFixtureOptio
     fields: {
       sandbox: options.sandbox ?? "standard",
       ...(options.ttlSeconds ? { ttlSeconds: options.ttlSeconds } : {}),
+      ...(options.attributes ? { attributes: JSON.stringify(options.attributes) } : {}),
     },
     file: {
       contents: "<!doctype html><script>globalThis.ok = true</script>",

@@ -86,7 +86,7 @@ Legacy artifacts remain viewable but cannot be opened from the dashboard until r
 - Viewer tokens use 256 bits of randomness. Only their SHA-256 hashes are used for public request authentication.
 - A second AES-256-GCM encrypted token copy enables single-artifact dashboard recovery. The key is a Worker secret and is never stored in R2.
 - Dashboard endpoints validate the Cloudflare Access JWT signature, issuer, audience, and expiry. The CLI publisher token is never exposed to browser JavaScript.
-- Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers.
+- Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers. The standard sandbox delegates clipboard writes for user-initiated copy controls but keeps artifacts on an opaque origin without browser storage access.
 - Markdown permits raw HTML without sanitization, matching direct HTML uploads. Treat published source as trusted; use the strict sandbox for static Markdown when scripts and other interactive permissions are unnecessary. Mermaid requires the standard sandbox.
 - Metadata mutation uses R2 ETag preconditions, monotonic revisions, tombstones, and versioned content objects to prevent lost updates and token resurrection.
 - Unreferenced or pruned content is removed after a grace period; expired and deleted artifacts are tombstoned before content removal.

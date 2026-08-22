@@ -2440,7 +2440,7 @@ Usage:
 
 Options:
   --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
-  --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
+  --sandbox standard   Default. Allows scripts/forms/popups/downloads and clipboard writes, but not same-origin storage.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   --verify             Fetches the uploaded raw content and verifies its SHA-256 hash.
   --force-new          Intentionally creates another artifact for a file with a local receipt.
@@ -2624,7 +2624,7 @@ Behavior:
   publish              Uploads one .html file, or renders one Markdown file to HTML first.
   --json               Prints id, url, expiresAt, and sandbox as JSON.
   --ttl 7d             Sets expiration; update also accepts never to remove it.
-  --sandbox standard   Default. Allows scripts/forms/popups/downloads, but not same-origin.
+  --sandbox standard   Default. Allows scripts/forms/popups/downloads and clipboard writes, but not same-origin storage.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.

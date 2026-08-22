@@ -146,6 +146,7 @@ const ORPHAN_CONTENT_GRACE_MS = 60 * 60 * 1000;
 const MAX_ARTIFACT_VERSIONS = 10;
 const METADATA_READ_CONCURRENCY = 6;
 const STANDARD_SANDBOX = "allow-scripts allow-forms allow-popups allow-downloads";
+const STANDARD_IFRAME_PERMISSIONS = "clipboard-write";
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
 export default {
@@ -1366,7 +1367,7 @@ iframe{display:block;width:100%;height:100%;border:0}
 ${VIEWER_BAR_CSS}</style>
 </head>
 <body>
-${scrubberBarHtml(id, token, metadata, null)}<iframe id="pagebin-frame"${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+${scrubberBarHtml(id, token, metadata, null)}<iframe id="pagebin-frame"${sandbox}${iframePermissionsAttribute(metadata.sandbox)} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 <script>
 ${scrubberBarScript(id, token, artifactHead(metadata).version)}
 const pagebinMinDelayMs = 2000;
@@ -1444,7 +1445,7 @@ iframe{display:block;width:100%;height:100%;border:0}
 ${VIEWER_BAR_CSS}</style>
 </head>
 <body>
-${scrubberBarHtml(id, token, metadata, entry.version)}<iframe${sandbox} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
+${scrubberBarHtml(id, token, metadata, entry.version)}<iframe${sandbox}${iframePermissionsAttribute(metadata.sandbox)} src="${escapeHtml(rawPath)}" title="${escapeHtml(metadata.filename)}"></iframe>
 <script>${scrubberBarScript(id, token, entry.version)}</script>
 </body>
 </html>`;
@@ -2063,6 +2064,14 @@ function iframeSandboxAttribute(mode: SandboxMode): string {
   }
 
   return ` sandbox="${STANDARD_SANDBOX}"`;
+}
+
+function iframePermissionsAttribute(mode: SandboxMode): string {
+  if (mode === "strict") {
+    return "";
+  }
+
+  return ` allow="${STANDARD_IFRAME_PERMISSIONS}"`;
 }
 
 function rawSandboxCsp(mode: SandboxMode): string {

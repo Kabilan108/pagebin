@@ -151,6 +151,7 @@ describe("worker", () => {
 
     expect(viewerResponse.status).toBe(200);
     expect(viewerHtml).toContain('sandbox="allow-scripts allow-forms allow-popups allow-downloads"');
+    expect(viewerHtml).toContain('allow="clipboard-write"');
     expect(viewerHtml).toContain('class="pagebin-bar"');
     expect(viewerHtml).toContain('id="pagebin-vnum">1<');
     expect(viewerHtml).not.toContain('class="pb-agent ');
@@ -533,6 +534,7 @@ describe("worker", () => {
     expect(pinnedRaw.status).toBe(200);
     expect(await pinnedRaw.text()).toContain("globalThis.ok");
     expect(pinnedViewer.status).toBe(200);
+    expect(viewerHtml).toContain('allow="clipboard-write"');
     expect(viewerHtml).toContain('id="pagebin-vnum">1<');
     expect(viewerHtml).toContain(`href="/p/${published.id}/`);
     expect(viewerHtml).toContain('id="pagebin-dd"');
@@ -1026,6 +1028,7 @@ describe("worker", () => {
 
     expect(viewerHtml).toContain(" sandbox ");
     expect(viewerHtml).not.toContain("allow-scripts");
+    expect(viewerHtml).not.toContain("clipboard-write");
     expect(rawResponse.headers.get("Content-Security-Policy")).toBe("sandbox");
   });
 

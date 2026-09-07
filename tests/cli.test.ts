@@ -338,7 +338,7 @@ describe("parseArgs", () => {
 
   test("reports watch errors for missing file path after artifact target", () => {
     expect(() => parseArgs(["watch", "abc1234567890123"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
-      "watch with an artifact target also requires a .html, .md, or .markdown file path.",
+      "watch with an artifact target also requires a file path.",
     );
   });
 
@@ -840,23 +840,41 @@ flowchart LR
   });
 
   test("rejects oversized markdown before sending a request", async () => {
-    const filePath = await writeTempFile("huge-report.md", "x".repeat(10 * 1024 * 1024 + 1));
+    const filePath = await writeTempFile("huge-report.md", "x".repeat(50 * 1024 * 1024 + 1));
     const result = await runPagebin(["publish", filePath, "--endpoint", "http://localhost:8787"], {
       PAGEBIN_PUBLISH_TOKEN: "publish-token",
     });
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("File is larger than the 10 MB upload limit.");
+    expect(result.stderr).toContain("File is larger than the 50 MiB upload limit.");
   });
 
-  test("rejects unsupported file types before sending a request", async () => {
-    const filePath = await writeTempFile("cli-plan.txt", "not html");
-    const result = await runPagebin(["publish", filePath, "--endpoint", "http://localhost:8787"], {
-      PAGEBIN_PUBLISH_TOKEN: "publish-token",
-    });
-
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("pagebin only accepts .html, .md, or .markdown files.");
+  test("uploads arbitrary bytes through staged requests and prints media links", async () => {
+    const bytes = new Uint8Array([0, 128, 255, 13, 10]);
+    const filePath = await writeTempFile("cli-binary.zip", "");
+    await writeFile(filePath, bytes);
+    let uploaded = false;
+    const server = Bun.serve({ port: 0, async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === '/api/uploads') {
+        const body = await request.json() as {files: {path: string; sha256: string}[]};
+        expect(body.files[0]?.sha256).toBe(createHash('sha256').update(bytes).digest('hex'));
+        return Response.json({id: 'abcdefghijklmnop', sessionId: 'session', missing: ['cli-binary.zip']});
+      }
+      if (url.pathname.endsWith('/file')) {
+        expect(new Uint8Array(await request.arrayBuffer())).toEqual(bytes);
+        uploaded = true;
+        return Response.json({uploaded: true});
+      }
+      expect(uploaded).toBe(true);
+      return Response.json({id: 'abcdefghijklmnop', url: url.origin + '/p/abcdefghijklmnop/token', rawUrl: url.origin + '/raw/abcdefghijklmnop/token/v/1/cli-binary.zip', downloadUrl: url.origin + '/download/abcdefghijklmnop/token/v/1/cli-binary.zip', revision: 1});
+    }});
+    try {
+      const result = await runPagebin(['publish', filePath, '--no-infer', '--json', '--endpoint', server.url.toString()], {PAGEBIN_PUBLISH_TOKEN: 'publish-token'});
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout).downloadUrl).toContain('/download/');
+      expect(uploaded).toBe(true);
+    } finally { server.stop(true); }
   });
 });
 

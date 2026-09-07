@@ -1,6 +1,6 @@
 # pagebin
 
-`pagebin` publishes agent-generated HTML and Markdown artifacts to a private Cloudflare R2 bucket. Each artifact is served at a long-lived, unlisted capability URL. A Cloudflare Access-protected dashboard catalogs artifacts by project and source host.
+`pagebin` publishes agent-generated documents, media, and downloadable files to a private Cloudflare R2 bucket. Each artifact is served at a long-lived, unlisted capability URL. A Cloudflare Access-protected dashboard catalogs artifacts by project and source host.
 
 ## Origins
 
@@ -38,6 +38,30 @@ pagebin skill
 Artifacts do not expire unless `--ttl` is provided. Markdown is rendered to static HTML in the CLI before upload, including GFM tables, highlighted code, frontmatter properties, and document outlines. Only documents containing Mermaid diagrams load the pinned Mermaid browser runtime.
 
 `pagebin skill` prints concise, version-matched instructions for agents and does not require endpoint credentials.
+
+### Files and attachments
+
+```bash
+pagebin publish ./demo.webm --verify --json
+pagebin publish ./screenshot.png --verify --json
+pagebin publish ./trace.zip --json
+pagebin publish ./report/index.html --assets ./report/pictures --verify --json
+pagebin update ./report/index.html --json
+```
+
+Image viewers fit the original to the window. Video and audio viewers use native browser controls, with a download fallback for unsupported codecs. PageBin stores the original without transcoding. Other files have a download page. The dashboard opens on Documents; Media, Files, and All filters keep recordings and downloads separate from plans. An HTML bundle is one document entry with an attachment count.
+
+`--assets DIR` explicitly includes every regular file in that directory, recursively, under its basename. Repeat the flag for more directories. There is no default asset directory or gallery template, and PageBin does not crawl HTML for files. For example, `--assets ./report/pictures` makes `pictures/variant.png` available to relative `<img>` and `<video>` references. Symlinks, duplicate paths, and traversal paths are rejected. File paths may contain spaces and Unicode; control characters, backslashes, percent signs, query markers, and fragment markers are rejected.
+
+Receipts remember the asset directories for update, watch, and verify. Supply them again on another machine. An explicit list replaces the remembered list. Watch observes the entry file and included directories. Files removed from a selected directory disappear from the next version, while retained versions keep their files.
+
+New file uploads return `url`, `rawUrl`, and `downloadUrl` in JSON. `url` opens the viewer; the other two pin the published version. Use `rawUrl` as an image or video source in HTML, and `downloadUrl` to force a download. PRs can link to the viewer or use a linked image preview; inline playback of an external video URL depends on the PR host. Embedding shares the capability URL with that host, which may cache a copy.
+
+Each bundle version has a manifest of paths, types, sizes, and SHA-256 checksums. Unchanged files reuse objects within that artifact. Files upload individually before an atomic metadata commit; failed or conflicting uploads leave the previous version visible. `contentSha256` for these artifacts identifies the canonical manifest, and `files[].sha256` identifies each file's bytes. URL-based verification downloads and hashes every file; ID-based verification checks the stored manifest. Public manifest responses omit storage keys.
+
+Limits are 50 MiB per file, 250 MiB per bundle, and 200 files including the entrypoint. Small standalone HTML/Markdown remains compatible with the existing document upload API; larger documents use streamed uploads. The Worker can lower the file limit with `PAGEBIN_MAX_FILE_BYTES`. Upload sessions expire after 30 minutes; abandoned objects are collected after the existing one-hour grace period. Larger resumable uploads are not implemented.
+
+Active documents remain sandboxed, including direct SVG navigation. Every viewer, file, manifest, and download request checks the artifact capability and expiry; reissue revokes all previous routes. Unknown file formats download as `application/octet-stream` with `nosniff`.
 
 ### Version history
 
@@ -89,6 +113,7 @@ Legacy artifacts remain viewable but cannot be opened from the dashboard until r
 - Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers. The standard sandbox delegates clipboard writes for user-initiated copy controls but keeps artifacts on an opaque origin without browser storage access.
 - Markdown permits raw HTML without sanitization, matching direct HTML uploads. Treat published source as trusted; use the strict sandbox for static Markdown when scripts and other interactive permissions are unnecessary. Mermaid requires the standard sandbox.
 - Metadata mutation uses R2 ETag preconditions, monotonic revisions, tombstones, and versioned content objects to prevent lost updates and token resurrection.
+- Bundle cleanup retains every attachment referenced by every retained version. Do not downgrade to a Worker without manifest-aware cleanup after publishing bundles; an older Worker could delete their attachments.
 - Unreferenced or pruned content is removed after a grace period; expired and deleted artifacts are tombstoned before content removal.
 
 Anyone with an artifact URL can view it. Do not publish credentials, cookies, tokens, or secret-bearing logs.

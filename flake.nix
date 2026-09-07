@@ -47,6 +47,7 @@
               fileset = lib.fileset.unions [
                 ./package.json
                 ./src
+                ./shared
               ];
             };
 

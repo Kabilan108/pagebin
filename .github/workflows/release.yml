@@ -8,6 +8,7 @@ on:
       - package.json
       - bun.lock
       - src/**
+      - shared/**
       - worker/**
       - tests/**
       - tsconfig*.json

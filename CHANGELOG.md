@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.0 - 2026-09-07
+
+- Added arbitrary file uploads up to 50 MiB, image viewers, native video/audio playback with byte-range seeking, and direct file and download links.
+- Added explicit, repeatable `--assets` directories for HTML and Markdown bundles. Versions pin complete manifests and reuse unchanged attachments; staged uploads commit atomically, and cleanup preserves files referenced by retained versions.
+- Added binary and bundle verification, capability-protected public manifests, remembered attachment directories, and attachment-only watch updates.
+- Added Documents, Media, Files, and All dashboard filters, keeping HTML bundles together as document entries with attachment counts.
+- Updated the built-in agent skill with file, media, and explicit HTML attachment workflows. Asset directory names and gallery layouts remain author-defined.
+- Kept active documents sandboxed and capability checks on every media, download, and manifest route. Reissue, expiration, deletion, and rollback apply to complete bundles.
+- Operational note: deploy the Worker before using the new CLI upload features. After publishing bundles, do not downgrade to a Worker without manifest-aware cleanup; older Workers can garbage-collect retained attachments.
+
 ## 0.12.0 - 2026-07-25
 
 - Added bounded automatic version history: every artifact retains its last 10 content versions as immutable R2 objects tracked in metadata under the existing ETag compare-and-swap, with identical-content updates deduplicated and the orphan sweep made reference-based so retained versions survive cleanup.

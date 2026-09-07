@@ -21,6 +21,7 @@ h1{font-size:clamp(2.2rem,6vw,3.4rem);margin:0;line-height:1;letter-spacing:-.02
 .searchline{display:flex;gap:12px;align-items:center;font-family:ui-sans-serif,system-ui,sans-serif}
 #search{flex:1;font:inherit;font-size:14px;border:none;border-bottom:1px solid var(--line);background:transparent;color:var(--text);padding:7px 2px}
 #search:focus{outline:none;border-bottom-color:var(--accent)}
+.categories{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}.category{font:inherit;padding:7px 12px;border:1px solid transparent;background:none;color:var(--muted);border-radius:5px;cursor:pointer}.category.on{background:var(--chip);border-color:var(--line);color:var(--text)}.category .count{margin-left:8px;font-size:11px;opacity:.65}.category:focus-visible{outline:2px solid var(--text);outline-offset:2px}
 #filters{display:flex;flex-direction:column;gap:8px;align-items:flex-start;margin:14px 0 4px;font-family:ui-sans-serif,system-ui,sans-serif}
 .chipgroup{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .chipgroup .glabel{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--faint);margin-right:2px}
@@ -105,7 +106,7 @@ h2 .count{letter-spacing:0;text-transform:none;color:var(--faint);font-weight:40
 
 const SCRIPT = `
 const settings={groupBy:'repo',cap:5,filterStyle:'chips',metaFont:'sans',fields:{type:true,branch:true,host:true,agent:true,expiry:true}};
-const state={artifacts:[],query:'',host:'',expanded:new Set(),openVersions:new Set()};
+const state={artifacts:[],query:'',host:'',category:'document',expanded:new Set(),openVersions:new Set()};
 const $=id=>document.getElementById(id);
 const el=(tag,cls,txt)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(txt!=null)n.textContent=txt;return n};
 
@@ -131,7 +132,8 @@ function iconed(kind,value,title){const s=el('span','mi '+kind);s.innerHTML=ICON
 async function load(){const r=await fetch('/api/dashboard/artifacts');if(!r.ok)throw new Error('Unable to load artifacts');state.artifacts=(await r.json()).artifacts;if(state.host&&!hosts().includes(state.host))state.host='';renderFilters();render()}
 function repoLabel(repo){try{const u=new URL(repo);const path=u.pathname.replace(/^\\/+|\\.git$|\\/+$/g,'');return path||u.hostname}catch{return repo.replace(/^git@[^:]+:/,'').replace(/\\.git$/,'').replace(/^[\\w.-]+\\.[a-z]{2,}\\//i,'')}}
 function groupKey(a){if(settings.groupBy==='repo'&&a.attributes.repo)return repoLabel(a.attributes.repo);if(a.attributes.project)return a.attributes.project;return 'Uncategorized'}
-function matches(a){const q=state.query.trim().toLowerCase();const hay=[a.attributes.title,a.filename,a.attributes.project,a.attributes.repo,a.attributes.sourceHost,a.attributes.gitBranch].filter(Boolean).join(' ').toLowerCase();return(!q||hay.includes(q))&&(!state.host||a.attributes.sourceHost===state.host)}
+function category(a){const kind=a.kind||'document';return ['image','video','audio'].includes(kind)?'media':kind}
+function matches(a){const q=state.query.trim().toLowerCase();const hay=[a.attributes.title,a.filename,a.attributes.project,a.attributes.repo,a.attributes.sourceHost,a.attributes.gitBranch].filter(Boolean).join(' ').toLowerCase();return(state.category==='all'||category(a)===state.category)&&(!q||hay.includes(q))&&(!state.host||a.attributes.sourceHost===state.host)}
 function relTime(iso){const s=(Date.now()-Date.parse(iso))/1000;if(s<60)return'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';if(s<86400*14)return Math.floor(s/86400)+'d ago';if(s<86400*60)return Math.floor(s/86400/7)+'w ago';return new Date(iso).toLocaleDateString()}
 function hosts(){return[...new Set(state.artifacts.map(a=>a.attributes.sourceHost).filter(Boolean))].sort()}
 function openArtifact(id){window.open('/api/dashboard/artifacts/'+encodeURIComponent(id)+'/open','_blank')}
@@ -165,11 +167,19 @@ wrap.append(trigger,menu,native);return wrap}
 function closeMenus(except){for(const dd of document.querySelectorAll('.dd.open'))if(dd!==except)dd.classList.remove('open')}
 document.addEventListener('click',()=>closeMenus());
 function renderFilters(){const box=$('filters');box.replaceChildren();
+const categories=el('nav','categories');categories.setAttribute('aria-label','Content type');
+for(const [key,label] of [['document','Documents'],['media','Media'],['file','Files'],['all','All']]){
+const count=state.artifacts.filter(a=>key==='all'||category(a)===key).length;
+const button=el('button','category'+(state.category===key?' on':''));button.type='button';button.setAttribute('aria-pressed',String(state.category===key));button.append(document.createTextNode(label+' '),el('span','count',String(count)));
+button.addEventListener('click',()=>{state.category=key;state.expanded.clear();renderFilters();render()});categories.append(button)}box.append(categories);
+
 if(settings.filterStyle==='chips'){box.append(chipGroup('host',hosts(),'host'))}
 else{box.append(dropdown('All hosts',hosts(),'host'))}}
 
 function metaRows(a){const f=settings.fields;const row1=[],row2=[];
-if(f.type&&a.attributes.artifactType)row1.push(el('span','t-'+a.attributes.artifactType,a.attributes.artifactType));
+if(category(a)!=='document'){row1.push(el('span','file-format',(a.contentType||'file').split(';')[0]));row1.push(el('span','faint',formatBytes(a.size)))}
+if(a.fileCount>1)row1.push(el('span','faint',(a.fileCount-1)+' attachments'));
+if(category(a)==='document'&&f.type&&a.attributes.artifactType)row1.push(el('span','t-'+a.attributes.artifactType,a.attributes.artifactType));
 if(f.branch&&a.attributes.gitBranch){const b=iconed('branch',a.attributes.gitBranch,'branch');if(a.attributes.project)b.append(el('span','faint','('+a.attributes.project+')'));row1.push(b)}
 if(f.host&&a.attributes.sourceHost)row2.push(iconed('host',a.attributes.sourceHost,'source host'));
 if(f.agent&&a.attributes.agent)row2.push(agentBadge(a.attributes.agent));

@@ -22,8 +22,8 @@ class MemoryR2Bucket {
 
   async put(
     key: string,
-    value: string | ArrayBuffer | ArrayBufferView,
-    options: { onlyIf?: { etagMatches?: string } } = {},
+    value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
+    options: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string }; sha256?: string } = {},
   ): Promise<{ etag: string } | null> {
     if (this.failMetadataPut && key.endsWith("/metadata.json")) {
       throw new Error("metadata put failed");
@@ -42,6 +42,13 @@ class MemoryR2Bucket {
       return null;
     }
 
+    if (options.onlyIf?.etagDoesNotMatch === '*' && this.objects.has(key)) return null;
+    if (value instanceof ReadableStream) value = await new Response(value).arrayBuffer();
+    if (options.sha256) {
+      const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+      const hash = new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
+      if (hash !== options.sha256) throw new Error('Checksum mismatch');
+    }
     const etag = this.nextEtag();
 
     if (typeof value === "string") {
@@ -58,8 +65,14 @@ class MemoryR2Bucket {
     return { etag };
   }
 
+  async head(key: string) {
+    const object = this.objects.get(key);
+    return object ? { size: object.bytes.byteLength, etag: object.etag, httpEtag: `"${object.etag}"` } : null;
+  }
+
   async get(
     key: string,
+    options?: {range?: {offset: number; length: number}},
   ): Promise<{
     body: ReadableStream<Uint8Array> | null;
     text: () => Promise<string>;
@@ -89,7 +102,7 @@ class MemoryR2Bucket {
 
     return {
       arrayBuffer: async () => object.bytes,
-      body: new Response(object.bytes).body,
+      body: new Response(options?.range ? object.bytes.slice(options.range.offset, options.range.offset + options.range.length) : object.bytes).body,
       etag: object.etag,
       text: async () => new TextDecoder().decode(object.bytes),
     };
@@ -1864,3 +1877,119 @@ async function withSuppressedConsoleError<T>(callback: () => Promise<T>): Promis
     console.error = originalConsoleError;
   }
 }
+
+async function uploadRequest(env: TestEnv, path: string, body?: object, method = 'POST'): Promise<Response> {
+  const serialized = body === undefined ? undefined : JSON.stringify(body);
+  return worker.fetch(new Request(`https://pagebin.test${path}`, { method, headers: { Authorization: 'Bearer publish-secret', ...(serialized ? { 'Content-Type': 'application/json', 'Content-Length': String(new TextEncoder().encode(serialized).length) } : {}) }, ...(serialized ? {body: serialized} : {}) }), env as never);
+}
+async function beginBundle(env: TestEnv, files: Record<string, string | Uint8Array>, id?: string) {
+  const manifest = Object.entries(files).map(([path, data]) => ({ path, size: typeof data === 'string' ? new TextEncoder().encode(data).length : data.length, sha256: new Bun.CryptoHasher('sha256').update(data).digest('hex') }));
+  const response = await uploadRequest(env, '/api/uploads', { ...(id ? {id} : {}), entrypoint: Object.keys(files)[0], filename: Object.keys(files)[0], files: manifest });
+  expect(response.status).toBe(201);
+  const session = await response.json() as { id: string; sessionId: string; missing: string[] };
+  const base = `/api/uploads/${session.id}/${session.sessionId}`;
+  for (const path of session.missing) {
+    const data = files[path]!;
+    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    const result = await worker.fetch(new Request(`https://pagebin.test${base}/file?path=${encodeURIComponent(path)}`, { method: 'PUT', headers: { Authorization: 'Bearer publish-secret', 'Content-Length': String(bytes.length) }, body: bytes }), env as never);
+    expect(result.status).toBe(200);
+  }
+  return { ...session, commit: () => uploadRequest(env, `${base}/commit`) };
+}
+describe('file and bundle artifacts', () => {
+  test('streams binary files with ranges, download headers, and a native player', async () => {
+    const env = createEnv();
+    const bytes = new Uint8Array([0, 255, 128, 4, 5, 6]);
+    const session = await beginBundle(env, {'demo.webm': bytes});
+    const published = await (await session.commit()).json() as {url: string; rawUrl: string; downloadUrl: string};
+    const raw = await worker.fetch(new Request(published.rawUrl), env as never);
+    expect(new Uint8Array(await raw.arrayBuffer())).toEqual(bytes);
+    expect(raw.headers.get('Content-Type')).toBe('video/webm');
+    const range = await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=1-3'}}), env as never);
+    expect(range.status).toBe(206); expect(range.headers.get('Content-Range')).toBe('bytes 1-3/6');
+    expect(new Uint8Array(await range.arrayBuffer())).toEqual(bytes.slice(1,4));
+    const suffix = await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=-2'}}), env as never);
+    expect(new Uint8Array(await suffix.arrayBuffer())).toEqual(bytes.slice(-2));
+    expect((await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=99-'}}), env as never)).status).toBe(416);
+    const head = await worker.fetch(new Request(published.rawUrl, {method: 'HEAD'}), env as never);
+    expect(head.headers.get('Content-Length')).toBe('6'); expect(await head.text()).toBe('');
+    expect((await worker.fetch(new Request(published.downloadUrl), env as never)).headers.get('Content-Disposition')).toStartWith('attachment');
+    expect(await (await worker.fetch(new Request(published.url), env as never)).text()).toContain('<video controls');
+  });
+  test('reuses unchanged attachments, pins versions, rolls back, and revokes all file routes', async () => {
+    const env = createEnv();
+    const files = {'index.html': '<img src="pictures/a.png">', 'pictures/a.png': 'first image'};
+    const first = await beginBundle(env, files);
+    const pub = await (await first.commit()).json() as {url: string; id: string};
+    const second = await beginBundle(env, {...files, 'index.html': '<h1>v2</h1><img src="pictures/a.png">'}, pub.id);
+    expect(second.missing).toEqual(['index.html']);
+    expect((await second.commit()).status).toBe(200);
+    const rawBase = pub.url.replace('/p/', '/raw/');
+    expect(await (await worker.fetch(new Request(`${rawBase}/v/1/index.html`), env as never)).text()).toBe(files['index.html']);
+    expect(await (await worker.fetch(new Request(pub.url), env as never)).text()).toContain('/v/2/index.html');
+    expect((await uploadRequest(env, `/api/artifacts/${pub.id}/rollback`, {version: 1})).status).toBe(200);
+    expect(await (await worker.fetch(new Request(pub.url), env as never)).text()).toContain('/v/1/index.html');
+    const rotated = await (await uploadRequest(env, `/api/artifacts/${pub.id}/reissue`)).json() as {url: string};
+    expect((await worker.fetch(new Request(`${rawBase}/v/1/pictures/a.png`), env as never)).status).toBe(404);
+    const fresh = rotated.url.replace('/p/', '/raw/') + '/v/2/pictures/a.png';
+    expect((await worker.fetch(new Request(fresh), env as never)).status).toBe(200);
+    expect((await uploadRequest(env, `/api/artifacts/${pub.id}`, undefined, 'DELETE')).status).toBe(200);
+    expect((await worker.fetch(new Request(fresh), env as never)).status).toBe(404);
+  });
+  test('does not publish incomplete uploads or overwrite a concurrent update', async () => {
+    const env = createEnv();
+    const first = await beginBundle(env, {'index.html': 'initial'});
+    const pub = await (await first.commit()).json() as {id: string; url: string};
+    const a = await beginBundle(env, {'index.html': 'a'}, pub.id);
+    const b = await beginBundle(env, {'index.html': 'b'}, pub.id);
+    expect((await a.commit()).status).toBe(200);
+    expect((await b.commit()).status).toBe(409);
+    const incomplete = await beginBundle(env, {'index.html': 'missing'}, pub.id);
+    const sessionObject = await env.ARTIFACTS.get(`artifacts/${pub.id}/content/session-${incomplete.sessionId}.json`);
+    const session = JSON.parse(await sessionObject!.text());
+    await env.ARTIFACTS.delete(session.manifest.files[0].objectKey);
+    expect((await incomplete.commit()).status).toBe(409);
+    const raw = await worker.fetch(new Request(pub.url.replace('/p/', '/raw/') + '/v/2/index.html'), env as never);
+    expect(await raw.text()).toBe('a');
+  });
+  test('rejects unsafe paths and duplicates; SVG remains sandboxed', async () => {
+    const env = createEnv();
+    for (const path of ['../secret', '/absolute', 'a/../b', 'a\\b', '%2e%2e/secret']) {
+      const response = await uploadRequest(env, '/api/uploads', { filename: 'a', entrypoint: path, files: [{path, size: 1, sha256: 'a'.repeat(64)}] });
+      expect(response.status).toBe(400);
+    }
+    const session = await beginBundle(env, {'drawing.svg': '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'});
+    const pub = await (await session.commit()).json() as {rawUrl: string};
+    const response = await worker.fetch(new Request(pub.rawUrl), env as never);
+    expect(response.headers.get('Content-Security-Policy')).toStartWith('sandbox;');
+    expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  });
+});
+
+test('bundle cleanup keeps shared objects until every referencing version is pruned', async () => {
+  const env = createEnv();
+  const first = await beginBundle(env, {'index.html': 'v1', 'pictures/old.png': 'old'});
+  const published = await (await first.commit()).json() as {id: string; url: string; revision: number};
+  const noOp = await beginBundle(env, {'index.html': 'v1', 'pictures/old.png': 'old'}, published.id);
+  expect(noOp.missing).toEqual([]);
+  const unchanged = await (await noOp.commit()).json() as {revision: number};
+  expect(unchanged.revision).toBe(published.revision);
+  const stored = JSON.parse(await (await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`))!.text());
+  const oldKey = stored.versions[0].manifest.files[1].objectKey;
+  const second = await beginBundle(env, {'index.html': 'v2', 'pictures/new.png': 'new'}, published.id);
+  await second.commit();
+  for (const object of env.ARTIFACTS.objects.values()) object.uploaded = new Date(0);
+  await worker.scheduled({} as never, env as never);
+  expect(env.ARTIFACTS.objects.has(oldKey)).toBe(true);
+  for (let n = 3; n <= 11; n++) {
+    const next = await beginBundle(env, {'index.html': `v${n}`, 'pictures/new.png': 'new'}, published.id);
+    await next.commit();
+  }
+  await worker.scheduled({} as never, env as never);
+  expect(env.ARTIFACTS.objects.has(oldKey)).toBe(false);
+  const manifest = await worker.fetch(new Request(published.url.replace('/p/', '/api/artifacts/').replace(`/${published.id}/`, `/${published.id}/manifest/`)), env as never);
+  const publicManifest = await manifest.text();
+  expect(manifest.status).toBe(200);
+  expect(publicManifest).not.toContain('objectKey');
+  expect(publicManifest).toContain('pictures/new.png');
+});

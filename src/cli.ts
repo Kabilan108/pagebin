@@ -5,9 +5,12 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, relative, resolve } from "node:path";
 
+import { prepareBundle, sendBundle, verifyBundle, type LocalBundle } from "./file-upload";
+import { FILE_LIMIT, filePathUrl, type ContentManifest } from "../shared/content";
+
 import packageJson from "../package.json" with { type: "json" };
 
-const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = FILE_LIMIT;
 const DEFAULT_SANDBOX = "standard";
 const MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
 const VERSION = packageJson.version;
@@ -19,6 +22,8 @@ const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
 const OUTPUT_SCHEMA_VERSION = 1;
 
 interface PublishResponse {
+  rawUrl?: string;
+  downloadUrl?: string;
   id: string;
   url: string;
   expiresAt: string | null;
@@ -38,6 +43,7 @@ interface ReissueResponse {
 }
 
 interface UpdateResponse {
+  entrypoint?: string;
   id: string;
   filename: string;
   updatedAt: string;
@@ -84,6 +90,7 @@ interface ArtifactAttributes {
 }
 
 interface ArtifactDetailResponse extends ListedArtifact {
+  manifest?: ContentManifest;
   updatedAt: string;
   version: number;
   versions: ArtifactVersionSummary[];
@@ -109,6 +116,8 @@ interface VerificationResult {
 }
 
 interface ArtifactReceipt {
+  assets?: string[];
+  bundle?: boolean;
   endpoint: string;
   id: string;
   url: string | null;
@@ -134,6 +143,8 @@ interface ReceiptStore {
 }
 
 interface PublishOptions {
+  assets?: string[];
+  bundle?: boolean;
   endpoint: string;
   filePath: string;
   json: boolean;
@@ -158,6 +169,8 @@ interface ReissueOptions {
 }
 
 interface UpdateOptions {
+  assets?: string[];
+  bundle?: boolean;
   endpoint: string;
   filePath: string | null;
   id: string;
@@ -186,6 +199,9 @@ interface ListOptions {
 }
 
 interface VerifyOptions {
+  version?: number;
+  assets?: string[];
+  bundle?: boolean;
   endpoint: string;
   filePath: string;
   id: string;
@@ -496,6 +512,7 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
   const endpoint = normalizeEndpoint(readEndpoint(args, env));
   let filePath: string | null = null;
   let json = false;
+  const assets: string[] = [];
   let sandbox: SandboxMode = DEFAULT_SANDBOX;
   let ttlSeconds: number | null = null;
   let verify = false;
@@ -505,6 +522,11 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+
+    if (arg === "--assets") {
+      assets.push(resolve(requireValue(args[++index], "--assets")));
+      continue;
+    }
 
     if (arg === "--json") {
       json = true;
@@ -563,10 +585,11 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
   }
 
   if (!filePath) {
-    throw new CliError("publish requires a .html, .md, or .markdown file path.");
+    throw new CliError("publish requires a file path.");
   }
 
   return {
+    ...(assets.length ? { assets } : {}),
     endpoint,
     filePath,
     json,
@@ -664,6 +687,7 @@ function parseReissueOptions(args: string[], env: NodeJS.ProcessEnv): ReissueOpt
 function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptions {
   let filePath: string | null = null;
   let json = false;
+  const assets: string[] = [];
   let targetValue: string | null = null;
   let inferMetadata = true;
   let ttlSeconds: number | null | undefined;
@@ -671,6 +695,11 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+
+    if (arg === "--assets") {
+      assets.push(resolve(requireValue(args[++index], "--assets")));
+      continue;
+    }
 
     if (arg === "--json") {
       json = true;
@@ -725,6 +754,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
 
   if (!filePath && isSupportedArtifactFile(targetValue)) {
     return {
+      ...(assets.length ? { assets } : {}),
       endpoint: normalizeEndpoint(readEndpoint(args, env)),
       filePath: targetValue,
       id: "",
@@ -741,6 +771,10 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
     throw new CliError("update requires a file path, --ttl, or both.");
   }
 
+  if (!filePath && assets.length > 0) {
+    throw new CliError("Asset options require a file path when updating an artifact.");
+  }
+
   if (!filePath && (!inferMetadata || Object.keys(attributes).length > 0)) {
     throw new CliError("Metadata options require a file path when updating an artifact.");
   }
@@ -749,6 +783,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
   const endpoint = normalizeEndpoint(readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "");
 
   return {
+    ...(assets.length ? { assets } : {}),
     endpoint,
     filePath,
     id: target.id,
@@ -771,9 +806,15 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
   let metadataProvided = false;
   const attributes: ArtifactAttributes = {};
   let json = false;
+  const assets: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+
+    if (arg === "--assets") {
+      assets.push(resolve(requireValue(args[++index], "--assets")));
+      continue;
+    }
 
     if (arg === "--json") {
       json = true;
@@ -826,17 +867,18 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
   }
 
   if (values.length === 0) {
-    throw new CliError("watch requires a .html, .md, or .markdown file path.");
+    throw new CliError("watch requires a file path.");
   }
 
   if (values.length === 1) {
     const filePath = values[0] ?? "";
 
     if (isArtifactTargetLike(filePath)) {
-      throw new CliError("watch with an artifact target also requires a .html, .md, or .markdown file path.");
+      throw new CliError("watch with an artifact target also requires a file path.");
     }
 
     return {
+      ...(assets.length ? { assets } : {}),
       endpoint: normalizeEndpoint(readEndpoint(args, env)),
       filePath,
       json,
@@ -872,6 +914,7 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
   const endpoint = normalizeEndpoint(readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "");
 
   return {
+    ...(assets.length ? { assets } : {}),
     endpoint,
     filePath,
     id: target.id,
@@ -915,10 +958,16 @@ function parseListOptions(args: string[], env: NodeJS.ProcessEnv): ListOptions {
 function parseVerifyOptions(args: string[], env: NodeJS.ProcessEnv): VerifyOptions {
   let filePath: string | null = null;
   let json = false;
+  const assets: string[] = [];
   let targetValue: string | null = null;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+
+    if (arg === "--assets") {
+      assets.push(resolve(requireValue(args[++index], "--assets")));
+      continue;
+    }
 
     if (arg === "--json") {
       json = true;
@@ -953,16 +1002,18 @@ function parseVerifyOptions(args: string[], env: NodeJS.ProcessEnv): VerifyOptio
   }
 
   if (!filePath) {
-    throw new CliError("verify requires a .html, .md, or .markdown file path.");
+    throw new CliError("verify requires a file path.");
   }
 
   const target = parseArtifactTarget(targetValue);
   const endpoint = normalizeEndpoint(readEndpointOption(args) ?? target.urlOrigin ?? env.PAGEBIN_ENDPOINT ?? "");
 
   return {
+    ...(assets.length ? { assets } : {}),
     endpoint,
     filePath,
     id: target.id,
+    ...(targetValue.match(/\/v\/([1-9]\d*)/) ? { version: Number(targetValue.match(/\/v\/([1-9]\d*)/)![1]) } : {}),
     json,
     url: target.url,
   };
@@ -1143,7 +1194,7 @@ function parseArtifactTarget(value: string): ArtifactTarget {
     throw new CliError("Artifact viewer URL must use https unless it points at localhost.");
   }
 
-  const match = url.pathname.match(/^\/(?:p|raw)\/([^/]+)\/([^/]+)(?:\/v\/([1-9]\d*))?$/);
+  const match = url.pathname.match(/^\/(?:p|raw|download)\/([^/]+)\/([^/]+)(?:\/v\/([1-9]\d*)(?:\/.+)?)?$/);
 
   if (
     !match?.[1] ||
@@ -1153,7 +1204,7 @@ function parseArtifactTarget(value: string): ArtifactTarget {
     throw new CliError("Artifact viewer URL must look like /p/<artifact_id>/<token>.");
   }
 
-  url.pathname = url.pathname.replace(/\/v\/[1-9]\d*$/, "");
+  url.pathname = url.pathname.replace(/\/v\/[1-9]\d*(?:\/.*)?$/, "").replace(/^\/download\//, "/raw/");
 
   return {
     id: match[1],
@@ -1217,32 +1268,40 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
     );
   }
 
-  reportStage(options.json, isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
-  const { form, hasMermaid, sourceKind } = await createHtmlUploadForm(options.filePath);
-  assertSandboxSupportsUpload(sourceKind, hasMermaid, options.sandbox);
+  let response: Response;
+  const useBundle = await requiresBundle(options.filePath, options.assets ?? []);
+  if (useBundle) {
+    const bundle = await prepareArtifactBundle(options.filePath, options.assets ?? [], options.sandbox);
+    response = await sendBundle(options.endpoint, token, bundle, { sandbox: options.sandbox, ttlSeconds: options.ttlSeconds, attributes });
+  } else {
+    reportStage(options.json, isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
+    const { form, hasMermaid, sourceKind } = await createHtmlUploadForm(options.filePath);
+    assertSandboxSupportsUpload(sourceKind, hasMermaid, options.sandbox);
 
-  form.set("sandbox", options.sandbox);
-  setArtifactAttributes(form, attributes);
+    form.set("sandbox", options.sandbox);
+    setArtifactAttributes(form, attributes);
 
-  if (options.ttlSeconds !== null) {
-    form.set("ttlSeconds", String(options.ttlSeconds));
+    if (options.ttlSeconds !== null) {
+      form.set("ttlSeconds", String(options.ttlSeconds));
+    }
+
+    reportStage(options.json, "Uploading artifact…");
+    response = await fetch(`${options.endpoint}/api/publish`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: form,
+    });
+
   }
-
-  reportStage(options.json, "Uploading artifact…");
-  const response = await fetch(`${options.endpoint}/api/publish`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    body: form,
-  });
-
   const payload = await readJsonResponse<PublishResponse>(response);
   await upsertReceipt({
     endpoint: options.endpoint,
     id: payload.id,
     url: payload.url,
     rawUrl: toRawUrl(payload.url),
+    ...(useBundle ? { bundle: true, assets: options.assets ?? [] } : {}),
     filePath: absoluteFilePath,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -1261,6 +1320,7 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
         id: payload.id,
         json: options.json,
         url: payload.url,
+        ...(useBundle ? { bundle: true, assets: options.assets ?? [] } : {}),
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -1287,6 +1347,21 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
   return payload;
 }
 
+function isDocumentFile(filePath: string): boolean {
+  return isMarkdownFile(filePath) || [".html", ".htm"].includes(extname(filePath).toLowerCase());
+}
+async function requiresBundle(filePath: string, assets: string[]): Promise<boolean> {
+  if (assets.length || !isDocumentFile(filePath) || (await stat(filePath)).size > 10 * 1024 * 1024) return true;
+  return isMarkdownFile(filePath) && (await readUploadFile(filePath)).bytes.byteLength > 10 * 1024 * 1024;
+}
+async function prepareArtifactBundle(filePath: string, assets: string[], sandbox: SandboxMode = 'standard'): Promise<LocalBundle> {
+  if (isMarkdownFile(filePath)) {
+    const upload = await readUploadFile(filePath);
+    assertSandboxSupportsUpload(upload.sourceKind, upload.hasMermaid, sandbox);
+    return prepareBundle(filePath, assets, { blob: new Blob([new Uint8Array(upload.bytes)]), name: upload.uploadFilename });
+  }
+  return prepareBundle(filePath, assets);
+}
 async function verifyArtifact(options: VerifyOptions): Promise<void> {
   const result = await verifyArtifactContent(options);
 
@@ -1299,12 +1374,31 @@ async function verifyArtifact(options: VerifyOptions): Promise<void> {
 }
 
 async function verifyArtifactContent(options: VerifyOptions): Promise<VerificationResult> {
+  const receipt = await findReceiptForArtifact(options.endpoint, options.id);
+  const assets = options.assets ?? receipt?.assets ?? [];
+  if (options.bundle || receipt?.bundle || await requiresBundle(options.filePath, assets)) {
+    const bundle = await prepareArtifactBundle(options.filePath, assets);
+    let detail: { manifest?: ContentManifest; version: number; revision: number };
+    if (options.url) {
+      const viewer = new URL(options.url);
+      const token = viewer.pathname.split('/')[3];
+      viewer.pathname = `/api/artifacts/${options.id}/manifest/${token}${options.version ? `/v/${options.version}` : ''}`;
+      viewer.search = '';
+      detail = await readJsonResponse(await fetch(viewer));
+    } else {
+      detail = await fetchArtifactDetail(options.endpoint, options.id, readPublishToken());
+    }
+    if (!detail.manifest || detail.manifest.sha256 !== bundle.sha256) throw new CliError("Bundle manifest does not match local files.");
+    const url = options.url;
+    if (url) await verifyBundle(toRawUrl(url), bundle, detail.version);
+    return { verified: true, method: url ? 'raw' : 'metadata', id: options.id, url: url ?? null, localSha256: bundle.sha256, remoteSha256: detail.manifest.sha256, size: bundle.files.reduce((n,f) => n + f.size, 0), revision: detail.revision };
+  }
   reportStage(options.json, isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
   const upload = await readUploadFile(options.filePath);
   const localSha256 = await sha256Bytes(upload.bytes);
 
   if (options.url) {
-    const rawUrl = toRawUrl(options.url);
+    const rawUrl = toRawUrl(options.url) + (options.version ? `/v/${options.version}` : "");
     const response = await fetch(rawUrl, {
       headers: {
         Accept: "text/html",
@@ -1316,7 +1410,7 @@ async function verifyArtifactContent(options: VerifyOptions): Promise<Verificati
       throw new CliError(`Raw verification request failed with ${response.status}.`);
     }
 
-    const remoteBytes = new TextEncoder().encode(await response.text());
+    const remoteBytes = new Uint8Array(await response.arrayBuffer());
     const remoteSha256 = await sha256Bytes(remoteBytes);
 
     assertMatchingContent(localSha256, remoteSha256, options.id);
@@ -1391,9 +1485,18 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
   const attributes = resolvedOptions.filePath
     ? await resolveArtifactAttributes(resolvedOptions.filePath, resolvedOptions.attributes, resolvedOptions.inferMetadata)
     : resolvedOptions.attributes;
+  const existing = await findReceiptForArtifact(resolvedOptions.endpoint, resolvedOptions.id);
+  const assets = resolvedOptions.assets ?? existing?.assets ?? [];
+  if (!resolvedOptions.url && existing?.url) resolvedOptions.url = existing.url;
+  const useBundle = Boolean(resolvedOptions.filePath && (existing?.bundle || await requiresBundle(resolvedOptions.filePath, assets)));
+  if (useBundle) { resolvedOptions.bundle = true; resolvedOptions.assets = assets; }
   let response: Response;
 
-  if (resolvedOptions.filePath) {
+  if (resolvedOptions.filePath && useBundle) {
+    const detail = await fetchArtifactDetail(resolvedOptions.endpoint, resolvedOptions.id, token);
+    const bundle = await prepareArtifactBundle(resolvedOptions.filePath, assets, detail.sandbox);
+    response = await sendBundle(resolvedOptions.endpoint, token, bundle, { id: resolvedOptions.id, attributes, ttlSeconds: resolvedOptions.ttlSeconds });
+  } else if (resolvedOptions.filePath) {
     reportStage(options.json, isMarkdownFile(resolvedOptions.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
     const upload = await createHtmlUploadForm(resolvedOptions.filePath);
 
@@ -1433,7 +1536,7 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
   }
 
   if (options.json) {
-    console.log(JSON.stringify(withSchema({ ...payload, url: resolvedOptions.url }), null, 2));
+    console.log(JSON.stringify(withSchema({ ...payload, url: resolvedOptions.url, ...(payload.entrypoint && resolvedOptions.url ? { rawUrl: `${toRawUrl(resolvedOptions.url)}/v/${payload.version}/${filePathUrl(payload.entrypoint)}`, downloadUrl: `${toRawUrl(resolvedOptions.url).replace("/raw/", "/download/")}/v/${payload.version}/${filePathUrl(payload.entrypoint)}` } : {}) }), null, 2));
     return payload;
   }
 
@@ -1443,6 +1546,8 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
 
 async function watchArtifact(options: WatchOptions): Promise<void> {
   const watchedFile = resolve(options.filePath);
+  const receipt = await findReceiptByFile(options.endpoint, watchedFile);
+  const assets = options.assets ?? receipt?.assets ?? [];
   const watchedDirectory = dirname(watchedFile);
   const watchedBasename = basename(watchedFile);
 
@@ -1486,17 +1591,24 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
       });
   };
 
-  const watcher = watch(watchedDirectory, (eventType, filename) => {
-    if (eventType !== "rename" && filename && filename.toString() !== watchedBasename) {
-      return;
+  const assetWatchers: ReturnType<typeof watch>[] = [];
+  let watcher: ReturnType<typeof watch>;
+  try {
+    for (const asset of assets) {
+      assetWatchers.push(watch(asset, { recursive: true }, () => {
+        if (timeout) clearTimeout(timeout);
+        timeout = setTimeout(runUpdate, 250);
+      }));
     }
-
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-
-    timeout = setTimeout(runUpdate, 250);
-  });
+    watcher = watch(watchedDirectory, (eventType, filename) => {
+      if (eventType !== "rename" && filename && filename.toString() !== watchedBasename) return;
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(runUpdate, 250);
+    });
+  } catch (error) {
+    for (const assetWatcher of assetWatchers) assetWatcher.close();
+    throw error;
+  }
 
   console.error(`Watching ${options.filePath}; press Ctrl-C to stop. Keep this process under tmux or another supervisor for long-running agent jobs.`);
 
@@ -1506,6 +1618,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
 
       if (receipt) {
         updateOptions = {
+          ...(assets.length ? { assets } : {}),
           endpoint: options.endpoint,
           filePath: options.filePath,
           id: receipt.id,
@@ -1525,6 +1638,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
         emitWatchEvent(options.json, "published", payload);
 
         updateOptions = {
+          ...(assets.length ? { assets } : {}),
           endpoint: options.endpoint,
           filePath: options.filePath,
           id: payload.id,
@@ -1538,6 +1652,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
       }
     } else {
       updateOptions = {
+          ...(assets.length ? { assets } : {}),
         endpoint: options.endpoint,
         filePath: options.filePath,
         id: options.id,
@@ -1554,6 +1669,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
     }
   } catch (error) {
     watcher.close();
+    for (const assetWatcher of assetWatchers) assetWatcher.close();
     throw error;
   }
 
@@ -1575,6 +1691,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
   await new Promise<void>((resolve) => {
     const stop = (): void => {
       watcher.close();
+      for (const assetWatcher of assetWatchers) assetWatcher.close();
       resolve();
     };
 
@@ -1687,6 +1804,7 @@ function runGit(directory: string, args: string[]): string | null {
 }
 
 async function inferArtifactTitle(filePath: string): Promise<string | undefined> {
+  if (!isDocumentFile(filePath)) return basename(filePath);
   let source: string;
 
   try {
@@ -1788,23 +1906,23 @@ async function readUploadFile(filePath: string): Promise<HtmlUpload> {
 
   const extension = extname(filePath).toLowerCase();
 
-  if (extension !== HTML_EXTENSION && !MARKDOWN_EXTENSIONS.has(extension)) {
+  if (extension !== HTML_EXTENSION && extension !== ".htm" && !MARKDOWN_EXTENSIONS.has(extension)) {
     throw new CliError("pagebin only accepts .html, .md, or .markdown files.");
   }
 
   if (fileInfo.size > DEFAULT_MAX_BYTES) {
-    throw new CliError("File is larger than the 10 MB upload limit.");
+    throw new CliError("File is larger than the 50 MiB upload limit.");
   }
 
   const bytes = await readFile(filePath);
 
-  if (extension === HTML_EXTENSION) {
+  if (extension === HTML_EXTENSION || extension === ".htm") {
     return {
       bytes,
       displayFilename: basename(filePath),
       hasMermaid: false,
       sourceKind: "html",
-      uploadFilename: basename(filePath),
+      uploadFilename: basename(filePath).replace(/\.htm$/i, ".html"),
     };
   }
 
@@ -1814,7 +1932,7 @@ async function readUploadFile(filePath: string): Promise<HtmlUpload> {
   const htmlBytes = new TextEncoder().encode(html);
 
   if (htmlBytes.byteLength > DEFAULT_MAX_BYTES) {
-    throw new CliError("Rendered Markdown HTML is larger than the 10 MB upload limit.");
+    throw new CliError("Rendered Markdown HTML is larger than the 50 MiB upload limit.");
   }
 
   return {
@@ -1850,8 +1968,7 @@ function isMarkdownFile(filePath: string): boolean {
 }
 
 function isSupportedArtifactFile(filePath: string): boolean {
-  const extension = extname(filePath).toLowerCase();
-  return extension === HTML_EXTENSION || MARKDOWN_EXTENSIONS.has(extension);
+  return !isArtifactTargetLike(filePath);
 }
 
 function decodeUtf8(bytes: Uint8Array, errorMessage: string): string {
@@ -2014,6 +2131,11 @@ async function showReceipt(options: ShowOptions): Promise<void> {
   console.log(receipt.url ?? `Artifact ${receipt.id} has no recoverable local URL.`);
 }
 
+async function findReceiptForArtifact(endpoint: string, id: string): Promise<ArtifactReceipt | null> {
+  const store = await readReceiptStore();
+  return store.artifacts.find(receipt => receipt.id === id && (receipt.endpoint === endpoint || (receipt.url && new URL(receipt.url).origin === new URL(endpoint).origin))) ?? null;
+}
+
 async function findReceiptByFile(endpoint: string, filePath: string): Promise<ArtifactReceipt | null> {
   const store = await readReceiptStore();
   return store.artifacts
@@ -2109,6 +2231,7 @@ async function updateReceiptAfterContent(
       revision: payload.revision ?? existing?.revision ?? 1,
       contentSha256: payload.contentSha256 ?? existing?.contentSha256 ?? null,
       attributes: payload.attributes ?? { ...existing?.attributes, ...attributes },
+      ...(options.bundle || existing?.bundle ? { bundle: true, assets: options.assets ?? existing?.assets ?? [] } : {}),
       ...(existing?.watch ? { watch: existing.watch } : {}),
     };
 
@@ -2414,7 +2537,7 @@ function isArtifactTargetLike(value: string): boolean {
 
   try {
     const url = new URL(value);
-    return url.pathname.startsWith("/p/") || url.pathname.startsWith("/raw/");
+    return url.pathname.startsWith("/p/") || url.pathname.startsWith("/raw/") || url.pathname.startsWith("/download/");
   } catch {
     return false;
   }
@@ -2433,14 +2556,15 @@ function helpText(topic: HelpTopic | null = null): string {
     case "publish":
       return `pagebin publish
 
-Uploads one local .html, .md, or .markdown file and prints a protected viewer URL.
+Uploads a local file, optionally with explicitly included asset directories, and prints a protected viewer URL.
 
 Usage:
-  pagebin publish <file.html|file.md|file.markdown> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--verify] [--json] [--endpoint URL]
+  pagebin publish <file> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--verify] [--assets DIR] [--json] [--endpoint URL]
 
 Options:
   --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
   --sandbox standard   Default. Allows scripts/forms/popups/downloads and clipboard writes, but not same-origin storage.
+  --assets <dir>        Include a directory under its basename; repeat for more directories.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   --verify             Fetches the uploaded raw content and verifies its SHA-256 hash.
   --force-new          Intentionally creates another artifact for a file with a local receipt.
@@ -2482,10 +2606,11 @@ Options:
 Replaces content, changes expiration, or does both atomically while preserving existing viewer URLs.
 
 Usage:
-  pagebin update <artifact_id|viewer_url> [file.html|file.md|file.markdown] [--ttl 7d|never] [--json] [--endpoint URL]
-  pagebin update <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--assets DIR] [--json] [--endpoint URL]
+  pagebin update <file> [--assets DIR] [--json] [--endpoint URL]
 
 Options:
+  --assets <dir>        Include directories explicitly; defaults to the local receipt when present.
   --ttl 7d|never       Sets expiration relative to update time, or removes it.
   --json               Prints id, filename, dates, sandbox, size, and url as JSON.
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
@@ -2497,10 +2622,11 @@ Options:
 Publishes a file and keeps updating it, or watches a file for an existing artifact.
 
 Usage:
-  pagebin watch <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--json] [--endpoint URL]
-  pagebin watch <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--assets DIR] [--json] [--endpoint URL]
+  pagebin watch <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
 
 Options:
+  --assets <dir>        Include directories explicitly; defaults to the local receipt when present.
   --ttl 7d             Sets an expiration for publish-then-watch mode only.
   --sandbox standard   Default for publish-then-watch mode.
   --sandbox strict     Supports HTML and static Markdown; Mermaid requires standard.
@@ -2511,12 +2637,13 @@ Options:
     case "verify":
       return `pagebin verify
 
-Verifies that a local HTML or rendered Markdown file matches a stored artifact.
+Verifies file bytes or every file in an explicitly included bundle. Markdown is rendered before comparison.
 
 Usage:
-  pagebin verify <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin verify <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
 
 Options:
+  --assets <dir>        Include directories explicitly; defaults to the local receipt when present.
   --json               Prints the verification method, hashes, size, and revision as JSON.
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
   -h, --help           Show this help.
@@ -2600,17 +2727,17 @@ Usage:
 
   return `pagebin
 
-Securely publish local .html and Markdown artifacts to a Cloudflare Worker/R2 backend and print a protected, unlisted viewer URL.
+Securely publish documents, images, videos, and arbitrary files to a Cloudflare Worker/R2 backend and print a protected, unlisted viewer URL.
 Use it for durable or temporary agent-generated reports, plans, visual explanations, and previews.
 
 Usage:
-  pagebin publish <file.html|file.md|file.markdown> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--verify] [--json] [--endpoint URL]
+  pagebin publish <file> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--verify] [--assets DIR] [--json] [--endpoint URL]
   pagebin list [--json] [--endpoint URL]
   pagebin reissue <artifact_id> [--json] [--endpoint URL]
-  pagebin update <artifact_id|viewer_url> [file.html|file.md|file.markdown] [--ttl 7d|never] [--json] [--endpoint URL]
-  pagebin watch <file.html|file.md|file.markdown> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
-  pagebin watch <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--endpoint URL]
-  pagebin verify <artifact_id|viewer_url> <file.html|file.md|file.markdown> [--json] [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--assets DIR] [--json] [--endpoint URL]
+  pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
+  pagebin watch <artifact_id|viewer_url> <file> [--endpoint URL]
+  pagebin verify <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
   pagebin versions <artifact_id|viewer_url|file> [--json] [--endpoint URL]
   pagebin rollback <artifact_id|viewer_url|file> <version> [--json] [--endpoint URL]
   pagebin receipts [--json]
@@ -2621,10 +2748,11 @@ Usage:
   pagebin <command> --help
 
 Behavior:
-  publish              Uploads one .html file, or renders one Markdown file to HTML first.
+  publish              Uploads files and HTML bundles; renders Markdown to HTML first.
   --json               Prints id, url, expiresAt, and sandbox as JSON.
   --ttl 7d             Sets expiration; update also accepts never to remove it.
   --sandbox standard   Default. Allows scripts/forms/popups/downloads and clipboard writes, but not same-origin storage.
+  --assets <dir>        Include a directory under its basename; repeat for more directories.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.
@@ -2647,12 +2775,12 @@ Environment:
 function skillText(): string {
   return `---
 name: pagebin
-description: Publish, update, version, roll back, verify, recover, list, reissue, and delete protected PageBin artifacts from the command line.
+description: Publish and manage PageBin documents, images, demo recordings, downloadable files, and HTML bundles with explicit attachments.
 ---
 
 # PageBin CLI ${VERSION}
 
-Use PageBin to publish a local HTML or Markdown file at an unlisted capability URL. Anyone with a viewer URL can read that artifact, so never publish credentials or secrets.
+Use PageBin to publish HTML, Markdown, images, videos, or arbitrary files at an unlisted capability URL. Anyone with a viewer URL can read that artifact, so never publish credentials or secrets.
 
 ## Core workflow
 
@@ -2669,6 +2797,21 @@ pagebin verify <viewer-url-or-id> /absolute/path/artifact.html --json
 PageBin infers repository, project, host, branch, commit, source path, title, type, and agent. Override incorrect inference with metadata flags such as \`--title\`, \`--type\`, or \`--agent\`; use \`--no-infer\` only when inference is unwanted.
 
 Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally temporary. Change an existing lifetime with \`pagebin update <id-or-url> --ttl 7d\`; use \`--ttl never\` to remove expiration.
+
+## Files and HTML attachments
+
+Publish a recording or image with the same publish command. Use the returned \`url\` for the browser viewer, \`rawUrl\` for an image or video source, and \`downloadUrl\` for the original file. Videos use native browser playback without transcoding. In PRs, use a viewer link or a linked image preview; external video links may not render inline.
+
+For a gallery or illustrated report:
+
+1. Write the HTML layout and captions for the task. Choose your own filenames and directories.
+2. Place attachments in explicitly chosen directories. Reference their basenames with relative URLs, for example \`pictures/variant-a.png\`.
+3. Publish with \`pagebin publish /path/index.html --assets /path/pictures --verify --json\`. Repeat \`--assets\` for additional directories. Every file inside each selected directory is included; symlinks are rejected. PageBin does not discover attachments by crawling HTML.
+4. Check that verification succeeds and open the viewer to confirm images load or video plays. Keep the returned identity for subsequent updates.
+
+Local receipts remember attachment directories for update, watch, and verify. When using another machine, supply the directories again. An explicit \`--assets\` list replaces the remembered list. Each version pins its complete bundle; unchanged attachments reuse storage. Removing a file from an included directory removes it from the next version, while retained versions keep it. Reissue and expiry cover all attachments.
+
+Files are limited to 50 MiB each, with 200 files and 250 MiB total per bundle. Keep secrets outside the selected directories. Use \`<img>\` for SVG attachments; uploaded active documents stay sandboxed.
 
 ## Commands
 

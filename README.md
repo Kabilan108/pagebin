@@ -49,7 +49,7 @@ pagebin publish ./report/index.html --assets ./report/pictures --verify --json
 pagebin update ./report/index.html --json
 ```
 
-Image viewers fit the original to the window. Video and audio viewers use native browser controls, with a download fallback for unsupported codecs. PageBin stores the original without transcoding. Other files have a download page. The dashboard opens on Documents; Media, Files, and All filters keep recordings and downloads separate from plans. An HTML bundle is one document entry with an attachment count.
+Image viewers fit the original to the window. Video and audio viewers use native browser controls, with a download fallback for unsupported codecs. PageBin stores the original without transcoding. PDFs open in a self-hosted PDF.js reader on desktop and mobile, with page navigation, zoom, search, and text selection. The reader starts at page width; the original PDF is still available to download. PDF scripts are disabled. Other files have a download page. The dashboard opens on Documents; Media, Files, and All filters keep recordings and downloads separate from plans. An HTML bundle is one document entry with an attachment count.
 
 `--assets DIR` explicitly includes every regular file in that directory, recursively, under its basename. Repeat the flag for more directories. There is no default asset directory or gallery template, and PageBin does not crawl HTML for files. For example, `--assets ./report/pictures` makes `pictures/variant.png` available to relative `<img>` and `<video>` references. Symlinks, duplicate paths, and traversal paths are rejected. File paths may contain spaces and Unicode; control characters, backslashes, percent signs, query markers, and fragment markers are rejected.
 
@@ -157,3 +157,7 @@ nix build github:Kabilan108/pagebin
 ```
 
 The flake exposes the CLI package for `x86_64-linux`.
+
+### PDF reader build
+
+Wrangler builds the reader assets before local development and deployment with `bun run scripts/build-pdf-viewer.ts`. This downloads the pinned official PDF.js legacy distribution, verifies its SHA-256, and disables PDF scripting and saved preference overrides. The generated files live in `dist/worker-assets` and are served by the Worker's `ASSETS` binding. No PDF content or capability URL is sent to a third-party viewer. Builds require access to GitHub releases; checksum or configuration patch mismatches fail the build.

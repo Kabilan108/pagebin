@@ -39,3 +39,12 @@ invocation_logs = true
 enabled = false
 persist = true
 head_sampling_rate = 1
+
+[build]
+command = "bun run scripts/build-pdf-viewer.ts"
+watch_dir = ["worker", "scripts", "shared"]
+
+[assets]
+directory = "./dist/worker-assets"
+binding = "ASSETS"
+run_worker_first = true

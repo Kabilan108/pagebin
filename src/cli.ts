@@ -2800,7 +2800,7 @@ Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally te
 
 ## Files and HTML attachments
 
-Publish a recording or image with the same publish command. Use the returned \`url\` for the browser viewer, \`rawUrl\` for an image or video source, and \`downloadUrl\` for the original file. Videos use native browser playback without transcoding. In PRs, use a viewer link or a linked image preview; external video links may not render inline.
+Publish a recording or image with the same publish command. Use the returned \`url\` for the browser viewer, \`rawUrl\` for an image or video source, and \`downloadUrl\` for the original file. PDFs open in a browser reader on desktop and mobile with zoom, search, and text selection. Videos use native browser playback without transcoding. In PRs, use a viewer link or a linked image preview; external video links may not render inline.
 
 For a gallery or illustrated report:
 

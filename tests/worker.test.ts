@@ -1897,6 +1897,55 @@ async function beginBundle(env: TestEnv, files: Record<string, string | Uint8Arr
   return { ...session, commit: () => uploadRequest(env, `${base}/commit`) };
 }
 describe('file and bundle artifacts', () => {
+  test('reads PDFs inline with a local reader, pinned history, ranges, and revocation', async () => {
+    const env = createEnv();
+    const filename = 'Report & notes.pdf';
+    const original = '%PDF-1.7 first version';
+    const session = await beginBundle(env, {[filename]: original});
+    const published = await (await session.commit()).json() as {id: string; url: string; rawUrl: string; downloadUrl: string};
+    for (const url of [published.url, `${published.url}/v/1`]) {
+      const html = await (await worker.fetch(new Request(url), env as never)).text();
+      expect(html).toContain('/pdfjs/web/viewer.html?file=');
+      expect(html).toContain(encodeURIComponent(new URL(published.rawUrl).pathname));
+      expect(html).toContain('#zoom=page-width');
+      expect(html).toContain('sandbox="allow-scripts allow-same-origin allow-downloads allow-modals allow-popups"');
+      expect(html).not.toContain('<main class="media-view">');
+    }
+    const raw = await worker.fetch(new Request(published.rawUrl), env as never);
+    expect(raw.headers.get('Content-Type')).toBe('application/pdf');
+    expect(raw.headers.get('Content-Disposition')).toStartWith('inline');
+    expect(raw.headers.get('Content-Security-Policy')).toContain("sandbox;");
+    expect(await raw.text()).toBe(original);
+    const head = await worker.fetch(new Request(published.rawUrl, {method: 'HEAD'}), env as never);
+    expect(head.headers.get('Content-Type')).toBe('application/pdf');
+    expect(head.headers.get('Content-Length')).toBe(String(original.length));
+    expect(await head.text()).toBe('');
+    const partial = await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=0-4'}}), env as never);
+    expect(partial.status).toBe(206);
+    expect(await partial.text()).toBe('%PDF-');
+    expect((await worker.fetch(new Request(published.downloadUrl), env as never)).headers.get('Content-Disposition')).toStartWith('attachment');
+    const second = await beginBundle(env, {[filename]: '%PDF-1.7 second version'}, published.id);
+    expect((await second.commit()).status).toBe(200);
+    expect(await (await worker.fetch(new Request(published.rawUrl), env as never)).text()).toBe(original);
+    expect(await (await worker.fetch(new Request(published.url), env as never)).text()).toContain('%2Fv%2F2%2F');
+    expect(await (await worker.fetch(new Request(`${published.url}/v/1`), env as never)).text()).toContain('%2Fv%2F1%2F');
+    await uploadRequest(env, `/api/artifacts/${published.id}/reissue`);
+    for (const url of [published.url, `${published.url}/v/1`, published.rawUrl, published.downloadUrl]) {
+      expect((await worker.fetch(new Request(url), env as never)).status).toBe(404);
+    }
+  });
+  test('serves trusted reader assets with restricted resource and embedding policies', async () => {
+    const env = {...createEnv(), ASSETS: {fetch: async () => new Response('reader', {headers: {'Content-Type': 'text/html'}})}};
+    const response = await worker.fetch(new Request('https://pagebin.test/pdfjs/web/viewer.html'), env as never);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
+    expect(response.headers.get('Cache-Control')).toBe('public, max-age=0, must-revalidate');
+    expect(response.headers.get('Content-Security-Policy')).toContain("connect-src 'self'");
+    expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'self'");
+    expect(response.headers.get('Content-Security-Policy')).not.toContain("'unsafe-eval'");
+    expect((await worker.fetch(new Request('https://pagebin.test/pdfjs/web/viewer.html'), createEnv() as never)).status).toBe(404);
+  });
+
   test('streams binary files with ranges, download headers, and a native player', async () => {
     const env = createEnv();
     const bytes = new Uint8Array([0, 255, 128, 4, 5, 6]);

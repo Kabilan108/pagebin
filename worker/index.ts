@@ -4,6 +4,7 @@ import { NOT_FOUND_HTML } from "./not-found";
 
 interface Env {
   ARTIFACTS: R2Bucket;
+  ASSETS?: Fetcher;
   PAGEBIN_MAX_BYTES?: string;
   PAGEBIN_MAX_FILE_BYTES?: string;
   PAGEBIN_PUBLISH_TOKEN: string;
@@ -172,6 +173,17 @@ export default {
 async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const hostname = url.hostname;
+
+  if (url.pathname.startsWith("/pdfjs/") && (request.method === "GET" || request.method === "HEAD")) {
+    if (!env.ASSETS) return siteNotFound();
+    const asset = await env.ASSETS.fetch(request);
+    const headers = secureHeaders(asset.headers);
+    // Reader assets are public code. Revalidate their ETags instead of downloading
+    // the PDF engine again every time a protected document is opened.
+    headers.set("Cache-Control", "public, max-age=0, must-revalidate");
+    headers.set("Content-Security-Policy", "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
+    return new Response(asset.body, { status: asset.status, headers });
+  }
 
   if (request.method === "GET" && (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")) {
     return serveFavicon();
@@ -2318,6 +2330,11 @@ function manifestRawPath(id: string, token: string, entry: ArtifactVersion): str
 function contentViewer(metadata: ArtifactMetadata, entry: ArtifactVersion, path: string, sandbox: string): string {
   const file = entry.manifest?.files.find(f => f.path === entry.manifest?.entrypoint);
   if (!file || contentKind(file.contentType) === 'document') return `<iframe id="pagebin-frame"${sandbox}${iframePermissionsAttribute(metadata.sandbox)} src="${escapeHtml(path)}" title="${escapeHtml(entry.filename ?? metadata.filename)}"></iframe>`;
+  if (file.contentType === 'application/pdf') {
+    // This frame contains our trusted reader, never uploaded HTML. PDF scripts are disabled.
+    const reader = `/pdfjs/web/viewer.html?file=${encodeURIComponent(path)}#zoom=page-width`;
+    return `<iframe id="pagebin-frame" sandbox="allow-scripts allow-same-origin allow-downloads allow-modals allow-popups" src="${escapeHtml(reader)}" title="${escapeHtml(entry.filename ?? metadata.filename)}" allow="fullscreen"></iframe>`;
+  }
   const src = escapeHtml(path);
   const download = src.replace(/^\/raw\//, '/download/');
   const kind = contentKind(file.contentType);
@@ -2340,7 +2357,7 @@ async function serveFile(request: Request, env: Env, metadata: ArtifactMetadata,
   }
   const head = await env.ARTIFACTS.head(file.objectKey);
   if (!head) return siteNotFound();
-  const safeInline = /^(image\/(png|jpeg|gif|webp|avif|svg\+xml)|video\/(mp4|webm|quicktime)|audio\/(mpeg|wav|ogg|mp4))$/.test(file.contentType) || /^(text\/(html|css|javascript|plain))(;|$)/.test(file.contentType);
+  const safeInline = file.contentType === 'application/pdf' || /^(image\/(png|jpeg|gif|webp|avif|svg\+xml)|video\/(mp4|webm|quicktime)|audio\/(mpeg|wav|ogg|mp4))$/.test(file.contentType) || /^(text\/(html|css|javascript|plain))(;|$)/.test(file.contentType);
   const headers = secureHeaders({
     'Content-Type': safeInline ? file.contentType : 'application/octet-stream',
     'Content-Disposition': `${download || !safeInline ? 'attachment' : 'inline'}; filename="download"; filename*=UTF-8''${encodeURIComponent(path.split('/').pop()!).replaceAll("'", '%27')}`,

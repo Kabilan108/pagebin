@@ -44,6 +44,14 @@ export interface DecisionControl {
   options?: DecisionOption[];
 }
 
+// One viewer page load (page) and its monotonic write counter (n). The server ignores a
+// decision write from the same page with a lower n, so a delayed request cannot overwrite a
+// newer answer sent with keepalive as the page closed.
+export interface DecisionWrite {
+  page: string;
+  n: number;
+}
+
 export interface ReviewDecision {
   id: string;
   question: string;
@@ -52,6 +60,7 @@ export interface ReviewDecision {
   interacted: boolean;
   answeredVersion: number;
   updatedAt: string;
+  lastWrite?: DecisionWrite;
 }
 
 export interface ReviewRecord {

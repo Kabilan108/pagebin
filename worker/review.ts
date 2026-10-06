@@ -2,6 +2,7 @@ import {
   type DecisionControl,
   type DecisionOption,
   type DecisionValue,
+  type DecisionWrite,
   type ReviewAnchor,
   type ReviewComment,
   type ReviewCommentStatus,
@@ -55,6 +56,8 @@ const REVIEW_WRITE_ATTEMPTS = 4;
 const DECISION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 const COMMENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+const WRITE_PAGE_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 
 const CONTROL_TYPES = new Set(["radio", "checkbox", "range", "select", "text", "textarea"]);
 
@@ -286,6 +289,12 @@ export async function putViewerDecision(
 
   const result = await mutateReview(env, artifact, (review) => {
     const index = review.decisions.findIndex((candidate) => candidate.id === decisionId);
+    const stored = review.decisions[index];
+
+    if (stored && isStaleWrite(stored.lastWrite, decision.lastWrite)) {
+      return { review, value: stored };
+    }
+
     const decisions = [...review.decisions];
 
     if (index === -1) {
@@ -593,8 +602,19 @@ function parseDecision(
 ): ParsedDecision {
   const keys = ["id", "question", "controls", "values", "interacted", "answeredVersion"];
 
-  if (!hasExactKeys(value, keys)) {
-    return { response: badRequest(`Decision body must contain only ${keys.join(", ")}.`) };
+  if (
+    !hasOnlyKeys(value, [...keys, "clientSeq"]) ||
+    !keys.every((key) => Object.hasOwn(value, key))
+  ) {
+    return {
+      response: badRequest(
+        `Decision body must contain ${keys.join(", ")} and may contain clientSeq.`,
+      ),
+    };
+  }
+
+  if (value.clientSeq !== undefined && !isDecisionWrite(value.clientSeq)) {
+    return { response: badRequest("Decision clientSeq must be { page, n } with a positive n.") };
   }
 
   if (value.id !== pathId || typeof value.id !== "string") {
@@ -652,8 +672,34 @@ function parseDecision(
       values: value.values,
       interacted: value.interacted,
       answeredVersion: value.answeredVersion,
+      ...(isDecisionWrite(value.clientSeq) ? { lastWrite: value.clientSeq } : {}),
     },
   };
+}
+
+function isDecisionWrite(value: unknown): value is DecisionWrite {
+  return (
+    isPlainObject(value) &&
+    hasExactKeys(value, ["page", "n"]) &&
+    typeof value.page === "string" &&
+    WRITE_PAGE_PATTERN.test(value.page) &&
+    typeof value.n === "number" &&
+    Number.isSafeInteger(value.n) &&
+    value.n > 0
+  );
+}
+
+// Writes from other pages always apply; within one page load, only a higher counter does.
+function isStaleWrite(
+  stored: DecisionWrite | undefined,
+  incoming: DecisionWrite | undefined,
+): boolean {
+  return (
+    stored !== undefined &&
+    incoming !== undefined &&
+    stored.page === incoming.page &&
+    incoming.n <= stored.n
+  );
 }
 
 function isReviewRecord(value: unknown): value is ReviewRecord {
@@ -711,7 +757,7 @@ function isReviewAnchor(value: unknown): value is ReviewAnchor {
 function isReviewDecision(value: unknown): value is ReviewDecision {
   return (
     isPlainObject(value) &&
-    hasExactKeys(value, [
+    hasOnlyKeys(value, [
       "id",
       "question",
       "controls",
@@ -719,7 +765,12 @@ function isReviewDecision(value: unknown): value is ReviewDecision {
       "interacted",
       "answeredVersion",
       "updatedAt",
+      "lastWrite",
     ]) &&
+    ["id", "question", "controls", "values", "interacted", "answeredVersion", "updatedAt"].every(
+      (key) => Object.hasOwn(value, key),
+    ) &&
+    (value.lastWrite === undefined || isDecisionWrite(value.lastWrite)) &&
     typeof value.id === "string" &&
     DECISION_ID_PATTERN.test(value.id) &&
     typeof value.question === "string" &&

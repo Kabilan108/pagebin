@@ -304,44 +304,33 @@ const FRAME_SCRIPT_BODY = `
     return [...groups.values()];
   }
 
-  // The authored default is what the control shows before any interaction, so implicit HTML
-  // defaults (first option, range midpoint, sanitized input values) count as the recommendation.
-  function authoredInputValue(el) {
-    if (el.tagName === "TEXTAREA") return el.defaultValue;
-    const probe = document.createElement("input");
-    for (const name of ["type", "min", "max", "step", "value"]) {
-      const value = el.getAttribute(name);
-      if (value !== null) probe.setAttribute(name, value);
-    }
-    return probe.value;
+  // The authored default is what the control shows before any interaction, including implicit
+  // HTML defaults (first option, range midpoint, sanitized input values). Resetting a clone of
+  // the real control inside a detached form keeps every attribute that shapes those defaults.
+  function authoredElements(els) {
+    const form = document.createElement("form");
+    const clones = els.map((el) => form.appendChild(el.cloneNode(true)));
+    form.reset();
+    return clones;
   }
 
   function readValue(group, authored) {
-    const els = group.elements;
+    const els = authored ? authoredElements(group.elements) : group.elements;
     switch (group.type) {
       case "radio": {
-        const on = authored ? els.filter((e) => e.defaultChecked).pop() : els.find((e) => e.checked);
+        // Several authored checked radios leave the last one checked, as the parser does.
+        const on = authored ? els.filter((e) => e.checked).pop() : els.find((e) => e.checked);
         return on ? on.value : null;
       }
       case "checkbox":
-        return els.filter((e) => (authored ? e.defaultChecked : e.checked)).map((e) => e.value);
+        return els.filter((e) => e.checked).map((e) => e.value);
       case "select": {
         const select = els[0];
-        const options = [...select.options];
-        const picked = authored
-          ? authoredSelectValues(
-              options.map((o) => ({
-                value: o.value,
-                defaultSelected: o.defaultSelected,
-                disabled: o.disabled || (o.parentElement instanceof HTMLOptGroupElement && o.parentElement.disabled),
-              })),
-              select.multiple,
-            )
-          : options.filter((o) => o.selected).map((o) => o.value);
+        const picked = [...select.options].filter((o) => o.selected).map((o) => o.value);
         return select.multiple ? picked : picked.length ? picked[0] : null;
       }
       default:
-        return authored ? authoredInputValue(els[0]) : els[0].value;
+        return els[0].value;
     }
   }
 
@@ -552,32 +541,9 @@ export function frameScriptTag(viewerOrigin: string): string {
     `const VIEWER_ORIGIN = ${scriptLiteral(viewerOrigin)};`,
     `const QUOTE_LIMIT = ${REVIEW_LIMITS.quote};`,
     `const REVIEW_FRAME_CSS = ${scriptLiteral(REVIEW_FRAME_CSS)};`,
-    embeddedFunction("authoredSelectValues", authoredSelectValues),
   ].join("\n  ");
 
   return `<script data-pagebin="frame">(() => {\n  ${constants}\n${FRAME_SCRIPT_BODY}})();</script>`;
-}
-
-export interface SelectOptionDefault {
-  value: string;
-  defaultSelected: boolean;
-  disabled: boolean;
-}
-
-// The browser's initial selection: every selected option for a multiple select; otherwise the
-// last option marked selected, or the first enabled option when none is. Embedded in the frame.
-export function authoredSelectValues(options: SelectOptionDefault[], multiple: boolean): string[] {
-  const marked = options.flatMap((option) => (option.defaultSelected ? [option.value] : []));
-
-  if (multiple) return marked;
-
-  const last = marked.at(-1);
-
-  if (last !== undefined) return [last];
-
-  const firstEnabled = options.find((option) => !option.disabled);
-
-  return firstEnabled ? [firstEnabled.value] : [];
 }
 
 // Emits a self-contained function's source as a const declaration. Wrangler bundles with

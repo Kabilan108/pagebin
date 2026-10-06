@@ -3269,6 +3269,53 @@ describe("review API", () => {
     expect(await removed.json()).toEqual({ deleted: true });
   });
 
+  test("ignores a decision write older than the same page's last write", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    const answer = (theme: string, page: string, n: number): ReviewRequestPayload => ({
+      id: "theme",
+      question: "Which theme?",
+      controls: [{ name: "theme", type: "select", default: "light" }],
+      values: { theme },
+      interacted: true,
+      answeredVersion: 1,
+      clientSeq: { page, n },
+    });
+
+    const put = (payload: ReviewRequestPayload): Promise<Response> =>
+      reviewJsonRequest(`${base}/decisions/theme`, "PUT", payload, env);
+
+    const storedTheme = async (): Promise<string> => {
+      const response = await worker.fetch(new Request(base), env as never);
+
+      const payload = (await response.json()) as {
+        review: { decisions: { values: { theme: string } }[] };
+      };
+
+      return payload.review.decisions[0]!.values.theme;
+    };
+
+    expect((await put(answer("light", "page-one", 2))).status).toBe(200);
+
+    const stale = await put(answer("dark", "page-one", 1));
+
+    expect(stale.status).toBe(200);
+    expect(await stale.json()).toMatchObject({ decision: { values: { theme: "light" } } });
+    expect(await storedTheme()).toBe("light");
+
+    expect((await put(answer("dark", "page-two", 1))).status).toBe(200);
+    expect(await storedTheme()).toBe("dark");
+
+    expect((await put(answer("light", "page-one", 1))).status).toBe(200);
+    expect(await storedTheme()).toBe("light");
+
+    for (const clientSeq of [{ page: "page-one", n: 0 }, { page: "bad page", n: 1 }, { n: 3 }]) {
+      expect((await put({ ...(answer("dark", "x", 1) as object), clientSeq })).status).toBe(400);
+    }
+  });
+
   test("resolves comments atomically and retries review CAS conflicts", async () => {
     const env = createEnv();
     const published = await publishFixture(env, { attributes: { title: "Review plan" } });

@@ -280,6 +280,9 @@ const VIEWER_SCRIPT = `
   const UNDO_MS = 6000;
   const DECISION_SAVE_DELAY_MS = 400;
   const PANEL_MIN = 340;
+  // Orders this page's decision writes on the server, including keepalive writes at pagehide.
+  const WRITE_PAGE = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[b & 63]).join("");
+  let writeCount = 0;
 
   const $ = (id) => document.getElementById(id);
   const frame = $("pagebin-frame");
@@ -680,7 +683,7 @@ const VIEWER_SCRIPT = `
   function decisionPayload(rec) {
     const values = {};
     for (const c of rec.controls) values[c.name] = rec.values[c.name] ?? null;
-    return { id: rec.id, question: rec.question, controls: rec.controls, values, interacted: true, answeredVersion: rec.answeredVersion };
+    return { id: rec.id, question: rec.question, controls: rec.controls, values, interacted: true, answeredVersion: rec.answeredVersion, clientSeq: { page: WRITE_PAGE, n: ++writeCount } };
   }
 
   function saverFor(rec) {
@@ -698,6 +701,7 @@ const VIEWER_SCRIPT = `
 
   function scheduleDecisionSave(rec, delay) {
     clearTimeout(rec.saveTimer);
+    rec.dirty = true;
     rec.saving = true;
     rec.saveTimer = setTimeout(() => {
       rec.saveTimer = 0;
@@ -708,6 +712,7 @@ const VIEWER_SCRIPT = `
 
   // The payload is built when the request starts, so a queued save always carries the latest answer.
   async function putDecision(rec, keepalive) {
+    rec.dirty = false;
     try {
       const payload = await api("PUT", "/decisions/" + encodeURIComponent(rec.id), decisionPayload(rec), keepalive);
       if (payload && payload.decision && isString(payload.decision.updatedAt)) rec.updatedAt = payload.decision.updatedAt;
@@ -722,6 +727,7 @@ const VIEWER_SCRIPT = `
     const rec = recordFrom(view, []);
     clearTimeout(rec.saveTimer);
     rec.saveTimer = 0;
+    rec.dirty = true;
     rec.saving = true;
     saverFor(rec).request();
     render();
@@ -1320,9 +1326,12 @@ const VIEWER_SCRIPT = `
       clearTimeout(pending.timer);
       commitDelete(pending, true);
     }
+    // dirty covers both a pending debounce and a change queued behind an in-flight save. The
+    // keepalive write carries the highest sequence, so an older request landing later is ignored.
     for (const rec of state.decisions.values()) {
-      if (!rec.saveTimer) continue;
+      if (!rec.dirty) continue;
       clearTimeout(rec.saveTimer);
+      rec.saveTimer = 0;
       putDecision(rec, true);
     }
   });

@@ -2,12 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { formatReviewMarkdown, type ReviewFormatInput } from "../shared/review";
 import worker from "../worker/index";
-import {
-  authoredSelectValues,
-  embeddedFunction,
-  frameScriptTag,
-  type SelectOptionDefault,
-} from "../worker/review-frame";
+import { embeddedFunction, frameScriptTag } from "../worker/review-frame";
 import {
   createSerialSaver,
   embeddedFormatterSource,
@@ -370,39 +365,6 @@ describe("embedded response formatter", () => {
 
     expect(script).not.toContain("</script");
     expect(() => new Function(script)).not.toThrow();
-  });
-});
-
-const option = (value: string, defaultSelected = false, disabled = false): SelectOptionDefault => ({
-  value,
-  defaultSelected,
-  disabled,
-});
-
-describe("authored select defaults", () => {
-  test("a single select without a selected option defaults to its first enabled option", () => {
-    expect(authoredSelectValues([option("light"), option("dark")], false)).toEqual(["light"]);
-    expect(authoredSelectValues([option("pick", false, true), option("dark")], false)).toEqual([
-      "dark",
-    ]);
-    expect(authoredSelectValues([option("a", false, true)], false)).toEqual([]);
-  });
-
-  test("a single select keeps the last option marked selected", () => {
-    expect(
-      authoredSelectValues([option("a", true), option("b"), option("c", true)], false),
-    ).toEqual(["c"]);
-  });
-
-  test("a multiple select has no implicit default", () => {
-    expect(authoredSelectValues([option("a"), option("b")], true)).toEqual([]);
-    expect(authoredSelectValues([option("a", true), option("b", true)], true)).toEqual(["a", "b"]);
-  });
-
-  test("ships in the frame script", () => {
-    expect(frameScriptTag("*")).toContain(
-      embeddedFunction("authoredSelectValues", authoredSelectValues),
-    );
   });
 });
 

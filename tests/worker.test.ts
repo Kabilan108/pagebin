@@ -387,6 +387,79 @@ describe("worker", () => {
     expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(404);
   });
 
+  test("defaults review on and accepts review off for multipart publishes", async () => {
+    const env = createEnv();
+    const defaulted = await publishFixture(env);
+    const disabled = await publishFixture(env, { review: false });
+
+    expect(defaulted.review).toBe(true);
+    expect(disabled.review).toBe(false);
+    expect((await readMetadataFixture(env, defaulted.id)).review).toBe(true);
+    expect((await readMetadataFixture(env, disabled.id)).review).toBe(false);
+
+    const list = await worker.fetch(
+      new Request("https://pagebin.test/api/artifacts", {
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    const artifacts = (await list.json()) as { artifacts: Array<{ id: string; review: boolean }> };
+
+    expect(artifacts.artifacts.find((artifact) => artifact.id === defaulted.id)?.review).toBe(true);
+    expect(artifacts.artifacts.find((artifact) => artifact.id === disabled.id)?.review).toBe(false);
+  });
+
+  test("rejects non-boolean review settings at every metadata boundary", async () => {
+    const env = createEnv();
+
+    const invalidMultipart = createMultipartBody({
+      fields: { sandbox: "standard", review: "off" },
+      file: { contents: "<!doctype html><p>invalid</p>", filename: "plan.html" },
+    });
+
+    const multipartResponse = await worker.fetch(
+      new Request("https://pagebin.test/api/publish", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer publish-secret",
+          "Content-Length": String(invalidMultipart.byteLength),
+          "Content-Type": `multipart/form-data; boundary=${invalidMultipart.boundary}`,
+        },
+        body: invalidMultipart.body,
+      }),
+      env as never,
+    );
+
+    const published = await publishFixture(env);
+
+    const patchResponse = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer publish-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ review: "false" }),
+      }),
+      env as never,
+    );
+
+    const bundleResponse = await uploadRequest(env, "/api/uploads", {
+      entrypoint: "plan.html",
+      filename: "plan.html",
+      files: [
+        {
+          path: "plan.html",
+          size: 0,
+          sha256: new Bun.CryptoHasher("sha256").update("").digest("hex"),
+        },
+      ],
+      review: "false",
+    });
+
+    expect(multipartResponse.status).toBe(400);
+    expect(patchResponse.status).toBe(400);
+    expect(bundleResponse.status).toBe(400);
+  });
+
   test("shows known agents as icons and falls back to an escaped name", async () => {
     const env = createEnv();
 
@@ -1012,6 +1085,7 @@ describe("worker", () => {
         expiresAt: string | null;
         filename: string;
         id: string;
+        review: boolean;
         sandbox: string;
         size: number;
         revision: number;
@@ -1030,6 +1104,7 @@ describe("worker", () => {
       expiresAt: null,
       filename: "plan.html",
       id: published.id,
+      review: true,
       sandbox: "standard",
       size: 52,
       revision: 1,
@@ -1357,6 +1432,50 @@ describe("worker", () => {
     expect(viewerHtml).not.toContain("fullscreen");
     expect(viewerHtml).not.toContain("allow-modals");
     expect(rawResponse.headers.get("Content-Security-Policy")).toBe("sandbox");
+
+    const readerBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    const readerResponses = [
+      await worker.fetch(new Request(readerBase), env as never),
+      await reviewJsonRequest(
+        `${readerBase}/comments`,
+        "POST",
+        {
+          anchor: { quote: "strict", prefix: "", suffix: "", version: 1 },
+          body: "Hidden",
+        },
+        env,
+      ),
+      await reviewJsonRequest(
+        `${readerBase}/comments/hidden-comment`,
+        "PATCH",
+        { body: "Hidden edit" },
+        env,
+      ),
+      await worker.fetch(
+        new Request(`${readerBase}/comments/hidden-comment`, { method: "DELETE" }),
+        env as never,
+      ),
+      await reviewJsonRequest(
+        `${readerBase}/decisions/hidden-decision`,
+        "PUT",
+        {
+          id: "hidden-decision",
+          question: "Hidden?",
+          controls: [{ name: "hidden", type: "select", default: "yes" }],
+          values: { hidden: "yes" },
+          interacted: true,
+          answeredVersion: 1,
+          clientSeq: { page: "strict-page", n: 1 },
+        },
+        env,
+      ),
+    ];
+
+    for (const response of readerResponses) {
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Artifact not found." });
+    }
   });
 
   test("expired and unknown artifacts return 404", async () => {
@@ -1912,7 +2031,10 @@ describe("worker", () => {
     );
 
     const viewerUrl = `https://pagebin.test/p/${id}/${token}`;
-    expect((await worker.fetch(new Request(viewerUrl), env as never)).status).toBe(200);
+    const viewerResponse = await worker.fetch(new Request(viewerUrl), env as never);
+
+    expect(viewerResponse.status).toBe(200);
+    expect(await viewerResponse.text()).toContain('id="pb-review-config"');
     expect(
       await (
         await worker.fetch(new Request(viewerUrl.replace("/p/", "/raw/")), env as never)
@@ -1935,12 +2057,14 @@ describe("worker", () => {
     });
 
     const updatePayload = (await updateResponse.json()) as {
+      review: boolean;
       revision: number;
       version: number;
       contentSha256: string;
     };
 
     expect(updateResponse.status).toBe(200);
+    expect(updatePayload.review).toBe(true);
     expect(updatePayload.revision).toBe(2);
     expect(updatePayload.version).toBe(2);
     expect(updatePayload.contentSha256).toMatch(/^[a-f0-9]{64}$/);
@@ -1961,6 +2085,7 @@ describe("worker", () => {
     );
 
     expect(await detailResponse.json()).toMatchObject({
+      review: true,
       version: 2,
       versions: [
         { version: 1, current: false },
@@ -2118,6 +2243,7 @@ describe("worker", () => {
 
 interface PublishFixtureOptions {
   sandbox?: "standard" | "strict";
+  review?: boolean;
   ttlSeconds?: string;
   attributes?: Record<string, string>;
 }
@@ -2125,6 +2251,7 @@ interface PublishFixtureOptions {
 interface PublishedArtifact {
   id: string;
   url: string;
+  review: boolean;
   version: number;
 }
 
@@ -2155,6 +2282,7 @@ async function publishFixtureResponse(
   const multipart = createMultipartBody({
     fields: {
       sandbox: options.sandbox ?? "standard",
+      ...(options.review !== undefined ? { review: String(options.review) } : {}),
       ...(options.ttlSeconds ? { ttlSeconds: options.ttlSeconds } : {}),
       ...(options.attributes ? { attributes: JSON.stringify(options.attributes) } : {}),
     },
@@ -2229,6 +2357,7 @@ async function readMetadataFixture(
   contentKey: string;
   contentSha256: string | null;
   currentVersion: number;
+  review: boolean;
   revision: number;
   size: number;
   updatedAt: string;
@@ -2340,7 +2469,12 @@ async function uploadRequest<T extends Record<string, unknown>>(
   );
 }
 
-async function beginBundle(env: TestEnv, files: Record<string, string | Uint8Array>, id?: string) {
+async function beginBundle(
+  env: TestEnv,
+  files: Record<string, string | Uint8Array>,
+  id?: string,
+  review?: boolean,
+) {
   const manifest = Object.entries(files).map(([path, data]) => ({
     path,
     size: typeof data === "string" ? new TextEncoder().encode(data).length : data.length,
@@ -2349,6 +2483,7 @@ async function beginBundle(env: TestEnv, files: Record<string, string | Uint8Arr
 
   const response = await uploadRequest(env, "/api/uploads", {
     ...(id ? { id } : {}),
+    ...(review !== undefined ? { review } : {}),
     entrypoint: Object.keys(files)[0],
     filename: Object.keys(files)[0],
     files: manifest,
@@ -2378,6 +2513,24 @@ async function beginBundle(env: TestEnv, files: Record<string, string | Uint8Arr
 }
 
 describe("file and bundle artifacts", () => {
+  test("publishes staged bundles with review off", async () => {
+    const env = createEnv();
+
+    const session = await beginBundle(
+      env,
+      { "plan.html": "<!doctype html><p>shared</p>" },
+      undefined,
+      false,
+    );
+
+    const response = await session.commit();
+    const published = (await response.json()) as { id: string; review: boolean };
+
+    expect(response.status).toBe(201);
+    expect(published.review).toBe(false);
+    expect((await readMetadataFixture(env, published.id)).review).toBe(false);
+  });
+
   test("reads PDFs inline with a local reader, pinned history, ranges, and revocation", async () => {
     const env = createEnv();
     const filename = "Report & notes.pdf";
@@ -3064,6 +3217,147 @@ describe("review API", () => {
         )
       ).status,
     ).toBe(401);
+  });
+
+  test("toggles reader review routes and UI while retaining publisher review data", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const token = viewerToken(published.url);
+    const readerBase = `https://pagebin.test/api/artifacts/${published.id}/review/${token}`;
+
+    const created = await reviewJsonRequest(
+      `${readerBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "shared text", prefix: "", suffix: "", version: 1 },
+        body: "Owner-only note",
+      },
+      env,
+    );
+
+    const commentId = ((await created.json()) as { comment: { id: string } }).comment.id;
+
+    const disable = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer publish-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ review: false }),
+      }),
+      env as never,
+    );
+
+    const disabled = (await disable.json()) as { review: boolean; revision: number };
+
+    expect(disable.status).toBe(200);
+    expect(disabled).toMatchObject({ review: false, revision: 2 });
+
+    const contentUpdate = await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><p>updated while review is off</p>",
+      filename: "plan.html",
+    });
+
+    expect(contentUpdate.status).toBe(200);
+    expect(await contentUpdate.json()).toMatchObject({ review: false, revision: 3 });
+
+    const readerResponses = [
+      await worker.fetch(new Request(readerBase), env as never),
+      await reviewJsonRequest(
+        `${readerBase}/comments`,
+        "POST",
+        {
+          anchor: { quote: "other", prefix: "", suffix: "", version: 1 },
+          body: "Hidden",
+        },
+        env,
+      ),
+      await reviewJsonRequest(
+        `${readerBase}/comments/${commentId}`,
+        "PATCH",
+        { body: "Hidden edit" },
+        env,
+      ),
+      await worker.fetch(
+        new Request(`${readerBase}/comments/${commentId}`, { method: "DELETE" }),
+        env as never,
+      ),
+      await reviewJsonRequest(
+        `${readerBase}/decisions/theme`,
+        "PUT",
+        {
+          id: "theme",
+          question: "Theme?",
+          controls: [{ name: "theme", type: "select", default: "light" }],
+          values: { theme: "dark" },
+          interacted: true,
+          answeredVersion: 1,
+          clientSeq: { page: "off-page", n: 1 },
+        },
+        env,
+      ),
+    ];
+
+    for (const response of readerResponses) {
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "Artifact not found." });
+    }
+
+    expect((await publisherReview(env, published.id)).review.comments).toHaveLength(1);
+
+    const resolved = await reviewJsonRequest(
+      `https://pagebin.test/api/artifacts/${published.id}/review/resolve`,
+      "POST",
+      { commentIds: [commentId] },
+      env,
+      "application/json",
+      { Authorization: "Bearer publish-secret" },
+    );
+
+    expect(resolved.status).toBe(200);
+    expect(await resolved.json()).toMatchObject({
+      comments: [{ id: commentId, status: "addressed" }],
+    });
+
+    for (const url of [published.url, `${published.url}/v/1`]) {
+      const html = await (await worker.fetch(new Request(url), env as never)).text();
+
+      expect(html).not.toContain('id="pb-count-btn"');
+      expect(html).not.toContain('id="pb-panel"');
+      expect(html).not.toContain('id="pb-fab"');
+      expect(html).not.toContain('id="pb-review-config"');
+      expect(html).not.toContain("formatReviewMarkdown");
+    }
+
+    const frame = await worker.fetch(
+      new Request(`https://pagebin.test/frame/${published.id}/${token}/v/1`),
+      env as never,
+    );
+
+    const frameHtml = await frame.text();
+
+    expect(frame.status).toBe(200);
+    expect(frameHtml).toContain('window.open(url.href, "_blank", "noopener,noreferrer")');
+    expect(frameHtml).not.toContain("pb:selection");
+    expect(frameHtml).not.toContain("data-pb-id");
+    expect(frameHtml).not.toContain("REVIEW_FRAME_CSS");
+
+    const enable = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer publish-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ review: true }),
+      }),
+      env as never,
+    );
+
+    const enabled = (await enable.json()) as { review: boolean; revision: number };
+
+    expect(enabled).toMatchObject({ review: true, revision: 4 });
+    const restored = await worker.fetch(new Request(readerBase), env as never);
+
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toMatchObject({
+      review: { comments: [{ id: commentId, body: "Owner-only note", status: "addressed" }] },
+    });
   });
 
   test("creates, edits, reopens, deletes, and validates reader review entries", async () => {

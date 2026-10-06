@@ -20,10 +20,12 @@ export PAGEBIN_PUBLISH_TOKEN="..."
 pagebin publish ./plan.html --verify --json
 pagebin publish ./report.md --type report
 pagebin publish ./scratch.html --ttl 7d
+pagebin publish ./shared.html --no-review
 pagebin update ./plan.html --json
 pagebin update <artifact_id_or_viewer_url> ./plan.html
 pagebin update ./plan.html <artifact_id_or_viewer_url>
 pagebin update <artifact_id_or_viewer_url> --ttl never
+pagebin update <artifact_id_or_viewer_url> --review off
 pagebin update <artifact_id_or_viewer_url> ./plan.html --ttl 7d
 pagebin verify <artifact_id_or_viewer_url> ./plan.html --json
 pagebin verify ./plan.html <artifact_id_or_viewer_url> --json
@@ -78,6 +80,8 @@ PageBin automatically retains the last 10 content versions of each artifact. Ide
 
 Readers can comment on selected text and answer decisions embedded in a document. `pagebin review <target>` fetches the review through the publisher API and prints agent-ready Markdown. Add `--json` to include the complete review record, addressed comments, comment ids, and the rendered Markdown. After changing the artifact in response to feedback, run `pagebin review resolve <target> <comment-id>...`; use `--reopen` to mark comments open again. A local source file works as the target when its publication receipt is present.
 
+Review is on by default for standard documents. Publish with `--no-review` when an artifact is meant for people other than the owner. Change an existing artifact with `pagebin update <target> --review on|off`; this keeps stored comments and decisions, bumps the artifact revision, and reloads open viewers. Strict sandbox artifacts never show review controls. Reader review routes return 404 while review is off, but publisher `review` and `review resolve` commands still work.
+
 The viewer uses its capability token for these JSON routes on `page-bin.com` or a local Worker origin:
 
 - `GET /api/artifacts/:id/review/:token`
@@ -116,7 +120,7 @@ Publishing the same endpoint/file pair again is rejected, including while anothe
 
 `publish --verify` fetches `/raw/` and compares SHA-256 hashes. `verify` uses raw bytes when given a viewer URL and stored verification metadata when given an ID.
 
-JSON output includes `schemaVersion: 1`. `watch --json` emits one compact JSON object per line for publish, update, and error events. Diagnostics remain on stderr.
+JSON output includes `schemaVersion: 1`. Publish, update, show, and list JSON include the artifact's `review` setting. `watch --json` emits one compact JSON object per line for publish, update, and error events. Diagnostics remain on stderr.
 
 ## Dashboard
 

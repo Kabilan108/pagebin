@@ -94,6 +94,7 @@ interface PublishOptions {
   endpoint: string;
   filePath: string;
   json: boolean;
+  review: boolean;
   sandbox: SandboxMode;
   ttlSeconds: number | null;
   verify: boolean;
@@ -125,6 +126,7 @@ interface UpdateOptions {
   inferMetadata: boolean;
   attributes: ArtifactAttributes;
   receiptLookup: boolean;
+  review?: boolean | undefined;
   ttlSeconds?: number | null | undefined;
 }
 
@@ -516,6 +518,7 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
   const endpoint = normalizeEndpoint(readEndpoint(args, env), env);
   let filePath: string | null = null;
   let json = false;
+  let review = true;
   const assets: string[] = [];
   let sandbox: SandboxMode = DEFAULT_SANDBOX;
   let ttlSeconds: number | null = null;
@@ -539,6 +542,11 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
 
     if (arg === "--verify") {
       verify = true;
+      continue;
+    }
+
+    if (arg === "--no-review") {
+      review = false;
       continue;
     }
 
@@ -597,6 +605,7 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
     endpoint,
     filePath,
     json,
+    review,
     sandbox,
     ttlSeconds,
     verify,
@@ -694,6 +703,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
   const assets: string[] = [];
   let inferMetadata = true;
   let ttlSeconds: number | null | undefined;
+  let review: boolean | undefined;
   const attributes: ArtifactAttributes = {};
 
   for (let index = 0; index < args.length; index += 1) {
@@ -718,6 +728,12 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
       index += 1;
       const value = requireValue(args[index], "--ttl");
       ttlSeconds = value === "never" ? null : parseTtlSeconds(value);
+      continue;
+    }
+
+    if (arg === "--review") {
+      index += 1;
+      review = parseReviewMode(requireValue(args[index], "--review"));
       continue;
     }
 
@@ -767,12 +783,13 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
       inferMetadata,
       attributes,
       receiptLookup: true,
+      ...(review !== undefined ? { review } : {}),
       ttlSeconds,
     };
   }
 
-  if (!filePath && ttlSeconds === undefined) {
-    throw new CliError("update requires a file path, --ttl, or both.");
+  if (!filePath && ttlSeconds === undefined && review === undefined) {
+    throw new CliError("update requires a file path, --ttl, --review, or a combination.");
   }
 
   if (!filePath && assets.length > 0) {
@@ -800,6 +817,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
     inferMetadata,
     attributes,
     receiptLookup: false,
+    ...(review !== undefined ? { review } : {}),
     ttlSeconds,
   };
 }
@@ -808,6 +826,8 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
   const values: string[] = [];
   let sandbox: SandboxMode = DEFAULT_SANDBOX;
   let sandboxProvided = false;
+  let review = true;
+  let reviewProvided = false;
   let ttlProvided = false;
   let ttlSeconds: number | null = null;
   let inferMetadata = true;
@@ -863,6 +883,12 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
       continue;
     }
 
+    if (arg === "--no-review") {
+      review = false;
+      reviewProvided = true;
+      continue;
+    }
+
     if (arg?.startsWith("-") && !isArtifactId(arg)) {
       throw new CliError(`Unknown option for watch: ${arg}`);
     }
@@ -893,6 +919,7 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
       filePath,
       json,
       mode: "publish",
+      review,
       sandbox,
       ttlSeconds,
       verify: false,
@@ -908,6 +935,10 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
 
   if (sandboxProvided) {
     throw new CliError("--sandbox can only be used with pagebin watch <file>.");
+  }
+
+  if (reviewProvided) {
+    throw new CliError("--no-review can only be used with pagebin watch <file>.");
   }
 
   if (metadataProvided) {
@@ -1490,6 +1521,14 @@ function parseSandbox(value: string): SandboxMode {
   throw new CliError("Sandbox must be standard or strict.");
 }
 
+function parseReviewMode(value: string): boolean {
+  if (value === "on") return true;
+
+  if (value === "off") return false;
+
+  throw new CliError("Review must be on or off.");
+}
+
 function requireValue(value: string | undefined, flag: string): string {
   if (!value || value.startsWith("-")) {
     throw new CliError(`${flag} requires a value.`);
@@ -1525,6 +1564,7 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
 
       response = await sendBundle(options.endpoint, token, bundle, {
         sandbox: options.sandbox,
+        review: options.review,
         ttlSeconds: options.ttlSeconds,
         attributes,
       });
@@ -1537,6 +1577,7 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
       assertSandboxSupportsUpload(sourceKind, hasMermaid, options.sandbox);
 
       form.set("sandbox", options.sandbox);
+      form.set("review", String(options.review));
       setArtifactAttributes(form, attributes);
 
       if (options.ttlSeconds !== null) {
@@ -1565,6 +1606,7 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         revision: payload.revision ?? 1,
+        review: payload.review,
         contentSha256: payload.contentSha256 ?? null,
         attributes: payload.attributes ?? attributes,
       },
@@ -1834,6 +1876,7 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
     response = await sendBundle(resolvedOptions.endpoint, token, bundle, {
       id: resolvedOptions.id,
       attributes,
+      ...(resolvedOptions.review !== undefined ? { review: resolvedOptions.review } : {}),
       ttlSeconds: resolvedOptions.ttlSeconds,
     });
   } else if (resolvedOptions.filePath) {
@@ -1862,6 +1905,10 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
       );
     }
 
+    if (resolvedOptions.review !== undefined) {
+      upload.form.set("review", String(resolvedOptions.review));
+    }
+
     reportStage(options.json, "Uploading artifact…");
     response = await fetch(
       `${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}/content`,
@@ -1880,7 +1927,12 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ ttlSeconds: resolvedOptions.ttlSeconds }),
+        body: JSON.stringify({
+          ...(resolvedOptions.ttlSeconds !== undefined
+            ? { ttlSeconds: resolvedOptions.ttlSeconds }
+            : {}),
+          ...(resolvedOptions.review !== undefined ? { review: resolvedOptions.review } : {}),
+        }),
       },
     );
   }
@@ -2690,7 +2742,9 @@ async function showReceipt(options: ShowOptions): Promise<void> {
   }
 
   if (options.json) {
-    console.log(JSON.stringify(withSchema(receipt), null, 2));
+    console.log(
+      JSON.stringify(withSchema({ ...receipt, review: receipt.review ?? true }), null, 2),
+    );
 
     return;
   }
@@ -2911,6 +2965,7 @@ async function updateReceiptAfterContent(
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       revision: payload.revision ?? existing?.revision ?? 1,
+      review: payload.review,
       contentSha256: payload.contentSha256 ?? existing?.contentSha256 ?? null,
       attributes: payload.attributes ?? { ...existing?.attributes, ...attributes },
       ...(options.bundle || existing?.bundle
@@ -2959,6 +3014,7 @@ async function updateReceiptAfterRollback(
     if (receipt) {
       receipt.updatedAt = new Date().toISOString();
       receipt.revision = payload.revision;
+      receipt.review = payload.review;
       receipt.contentSha256 = payload.contentSha256;
     }
   });
@@ -3311,19 +3367,20 @@ function helpText(topic: HelpTopic | null = null): string {
 Uploads a local file, optionally with explicitly included asset directories, and prints a protected viewer URL.
 
 Usage:
-  pagebin publish <file> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--verify] [--assets DIR] [--json] [--endpoint URL]
+  pagebin publish <file> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--no-review] [--verify] [--assets DIR] [--json] [--endpoint URL]
 
 Options:
   --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
   --sandbox standard   Default. Uses a per-artifact origin with browser storage, history, and IndexedDB; iframe cookies are usually blocked.
   --assets <dir>        Include a directory under its basename; repeat for more directories.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
+  --no-review          Omits the reader comment and decision UI.
   --verify             Fetches the uploaded raw content and verifies its SHA-256 hash.
   --force-new          Intentionally creates another artifact for a file with a local receipt.
   --no-infer           Disables repository, host, title, type, and agent inference.
   --title/--project    Override inferred metadata. See README for every metadata option.
   --type TYPE          Sets the type; common log, audit, and benchmark aliases are accepted.
-  --json               Prints id, url, expiresAt, and sandbox as JSON.
+  --json               Prints id, url, expiresAt, sandbox, and review as JSON.
   --endpoint URL       Worker endpoint. Defaults to PAGEBIN_ENDPOINT.
   -h, --help           Show this help.
 `;
@@ -3356,17 +3413,18 @@ Options:
     case "update":
       return `pagebin update
 
-Replaces content, changes expiration, or does both atomically while preserving existing viewer URLs.
+Replaces content or changes expiration and review metadata while preserving existing viewer URLs.
 
 Usage:
-  pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--assets DIR] [--json] [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--review on|off] [--assets DIR] [--json] [--endpoint URL]
   pagebin update <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
   pagebin update <file> [--assets DIR] [--json] [--endpoint URL]
 
 Options:
   --assets <dir>        Include directories explicitly; defaults to the local receipt when present.
   --ttl 7d|never       Sets expiration relative to update time, or removes it.
-  --json               Prints id, filename, dates, sandbox, size, and url as JSON.
+  --review on|off      Shows or hides reader review controls without deleting review data.
+  --json               Prints id, filename, dates, sandbox, review, size, and url as JSON.
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
   -h, --help           Show this help.
 `;
@@ -3376,7 +3434,7 @@ Options:
 Publishes a file and keeps updating it, or watches a file for an existing artifact.
 
 Usage:
-  pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--assets DIR] [--json] [--endpoint URL]
+  pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--no-review] [--assets DIR] [--json] [--endpoint URL]
   pagebin watch <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
   pagebin watch <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
 
@@ -3385,6 +3443,7 @@ Options:
   --ttl 7d             Sets an expiration for publish-then-watch mode only.
   --sandbox standard   Default for publish-then-watch. Uses a per-artifact origin with browser storage; iframe cookies are usually blocked.
   --sandbox strict     Supports HTML and static Markdown; Mermaid requires standard.
+  --no-review          Omits reader review controls on the first publish.
   --json               Emits versioned JSON Lines publish, update, and error events.
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
   -h, --help           Show this help.
@@ -3502,12 +3561,12 @@ Securely publish documents, images, videos, and arbitrary files to a Cloudflare 
 Use it for durable or temporary agent-generated reports, plans, visual explanations, and previews.
 
 Usage:
-  pagebin publish <file> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--verify] [--assets DIR] [--json] [--endpoint URL]
+  pagebin publish <file> [metadata options] [--ttl 7d] [--sandbox standard|strict] [--no-review] [--verify] [--assets DIR] [--json] [--endpoint URL]
   pagebin list [--json] [--endpoint URL]
   pagebin reissue <artifact_id> [--json] [--endpoint URL]
-  pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--assets DIR] [--json] [--endpoint URL]
+  pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--review on|off] [--assets DIR] [--json] [--endpoint URL]
   pagebin update <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
-  pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
+  pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--no-review] [--endpoint URL]
   pagebin watch <artifact_id|viewer_url> <file> [--endpoint URL]
   pagebin watch <file> <artifact_id|viewer_url> [--endpoint URL]
   pagebin verify <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
@@ -3525,14 +3584,15 @@ Usage:
 
 Behavior:
   publish              Uploads files and HTML bundles; renders Markdown to HTML first.
-  --json               Prints id, url, expiresAt, and sandbox as JSON.
+  --json               Prints id, url, expiresAt, sandbox, and review as JSON.
   --ttl 7d             Sets expiration; update also accepts never to remove it.
   --sandbox standard   Default. Uses a per-artifact origin with browser storage, history, and IndexedDB; iframe cookies are usually blocked.
   --assets <dir>        Include a directory under its basename; repeat for more directories.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
+  --no-review          Omits reader review controls on publish.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
   reissue              Generates a new viewer URL for an artifact and revokes the old URL.
-  update               Replaces content, changes expiration, or does both atomically.
+  update               Replaces content or changes expiration and review metadata.
   watch                Publishes a file, then updates that artifact whenever the file changes.
   verify               Compares the local rendered bytes with raw content or the stored hash.
   versions             Lists retained content versions and pinned viewer URLs when known.
@@ -3579,6 +3639,8 @@ PageBin infers repository, project, host, branch, commit, source path, title, ty
 Set \`PAGEBIN_ENDPOINT\` and \`PAGEBIN_PUBLISH_TOKEN\` in the environment or in \`\${XDG_CONFIG_HOME:-~/.config}/pagebin/env\`. Override that path with \`PAGEBIN_CONFIG\`.
 
 Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally temporary. Change an existing lifetime with \`pagebin update <id-or-url> --ttl 7d\`; use \`--ttl never\` to remove expiration.
+
+Publish with \`--no-review\` when the artifact is meant for people other than the owner. Restore or disable the review layer later with \`pagebin update <target> --review on|off\`.
 
 ## Files and HTML attachments
 

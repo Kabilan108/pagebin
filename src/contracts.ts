@@ -24,6 +24,7 @@ export interface PublishResponse {
   url: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   revision: number;
   version: number;
   contentSha256: string;
@@ -45,6 +46,7 @@ export interface UpdateResponse {
   updatedAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   version: number;
@@ -67,6 +69,7 @@ export interface ListedArtifact {
   createdAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   contentSha256: string | null;
@@ -122,6 +125,7 @@ export interface ArtifactReceipt {
   createdAt: string;
   updatedAt: string;
   revision: number;
+  review?: boolean;
   contentSha256: string | null;
   attributes: ArtifactAttributes;
   watch?: WatchOwnership;
@@ -310,6 +314,7 @@ function isPublishResponse(value: unknown): value is PublishResponse {
     isArtifactUrl(value.url, value.id, "p") &&
     (value.expiresAt === null || isDate(value.expiresAt)) &&
     isSandbox(value.sandbox) &&
+    (value.review === undefined || typeof value.review === "boolean") &&
     isRevision(value.revision) &&
     isRevision(value.version) &&
     isHash(value.contentSha256) &&
@@ -338,6 +343,7 @@ function isUpdateResponse(value: unknown): value is UpdateResponse {
     isDate(value.updatedAt) &&
     (value.expiresAt === null || isDate(value.expiresAt)) &&
     isSandbox(value.sandbox) &&
+    (value.review === undefined || typeof value.review === "boolean") &&
     isSize(value.size) &&
     isRevision(value.revision) &&
     isRevision(value.version) &&
@@ -359,6 +365,7 @@ function isListedArtifact(value: unknown): value is ListedArtifact {
     isDate(value.createdAt) &&
     (value.expiresAt === null || isDate(value.expiresAt)) &&
     isSandbox(value.sandbox) &&
+    (value.review === undefined || typeof value.review === "boolean") &&
     isSize(value.size) &&
     isRevision(value.revision) &&
     (value.contentSha256 === null || isHash(value.contentSha256)) &&
@@ -435,6 +442,7 @@ function isArtifactReceipt(value: unknown): value is ArtifactReceipt {
     isDate(value.createdAt) &&
     isDate(value.updatedAt) &&
     isRevision(value.revision) &&
+    (value.review === undefined || typeof value.review === "boolean") &&
     (value.contentSha256 === null || isHash(value.contentSha256)) &&
     isAttributes(value.attributes) &&
     (value.assets === undefined || (Array.isArray(value.assets) && value.assets.every(isString))) &&
@@ -576,7 +584,9 @@ function parseContract<T>(value: unknown, guard: (value: unknown) => value is T,
 }
 
 export function parsePublishResponse(value: unknown): PublishResponse {
-  return parseContract(value, isPublishResponse, "publish response");
+  const parsed = parseContract(value, isPublishResponse, "publish response");
+
+  return { ...parsed, review: parsed.review ?? true };
 }
 
 export function parseReissueResponse(value: unknown): ReissueResponse {
@@ -584,7 +594,9 @@ export function parseReissueResponse(value: unknown): ReissueResponse {
 }
 
 export function parseUpdateResponse(value: unknown): UpdateResponse {
-  return parseContract(value, isUpdateResponse, "update response");
+  const parsed = parseContract(value, isUpdateResponse, "update response");
+
+  return { ...parsed, review: parsed.review ?? true };
 }
 
 export function parseDeleteResponse(value: unknown): DeleteResponse {
@@ -592,11 +604,20 @@ export function parseDeleteResponse(value: unknown): DeleteResponse {
 }
 
 export function parseListResponse(value: unknown): ListResponse {
-  return parseContract(value, isListResponse, "list response");
+  const parsed = parseContract(value, isListResponse, "list response");
+
+  return {
+    artifacts: parsed.artifacts.map((artifact) => ({
+      ...artifact,
+      review: artifact.review ?? true,
+    })),
+  };
 }
 
 export function parseArtifactDetailResponse(value: unknown): ArtifactDetailResponse {
-  return parseContract(value, isArtifactDetailResponse, "artifact detail response");
+  const parsed = parseContract(value, isArtifactDetailResponse, "artifact detail response");
+
+  return { ...parsed, review: parsed.review ?? true };
 }
 
 export function parseManifestResponse(value: unknown): ManifestResponse {

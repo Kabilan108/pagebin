@@ -30,7 +30,7 @@ import { REVIEW_LIMITS } from "../shared/review";
 // collapsing whitespace so a quote survives re-rendering. Decisions are [data-pb-decision]
 // sections whose control names are the decision id or "<id>:<suffix>"; the authored default
 // is the agent's recommendation.
-const FRAME_SCRIPT_BODY = `
+const EXTERNAL_LINK_SCRIPT_BODY = `
   const navigatesFrame = (link) => ["", "_self", "_top", "_parent"].includes((link.getAttribute("target") || "").toLowerCase());
   addEventListener("click", (event) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -41,7 +41,9 @@ const FRAME_SCRIPT_BODY = `
     event.preventDefault();
     window.open(url.href, "_blank", "noopener,noreferrer");
   });
+`;
 
+const REVIEW_FRAME_SCRIPT_BODY = `
   if (window.parent === window) return;
 
   const CONTEXT = 32;
@@ -536,14 +538,18 @@ const REVIEW_FRAME_CSS = [
 
 // viewerOrigin is the exact origin of the viewer page, or "*" when the frame is served on the
 // viewer's host with an opaque origin; there `frame-ancestors 'self'` already pins the parent.
-export function frameScriptTag(viewerOrigin: string): string {
+export function frameScriptTag(viewerOrigin: string, review = true): string {
+  if (!review) {
+    return `<script data-pagebin="frame">(() => {\n${EXTERNAL_LINK_SCRIPT_BODY}})();</script>`;
+  }
+
   const constants = [
     `const VIEWER_ORIGIN = ${scriptLiteral(viewerOrigin)};`,
     `const QUOTE_LIMIT = ${REVIEW_LIMITS.quote};`,
     `const REVIEW_FRAME_CSS = ${scriptLiteral(REVIEW_FRAME_CSS)};`,
   ].join("\n  ");
 
-  return `<script data-pagebin="frame">(() => {\n  ${constants}\n${FRAME_SCRIPT_BODY}})();</script>`;
+  return `<script data-pagebin="frame">(() => {\n  ${constants}\n${EXTERNAL_LINK_SCRIPT_BODY}${REVIEW_FRAME_SCRIPT_BODY}})();</script>`;
 }
 
 // Emits a self-contained function's source as a const declaration. Wrangler bundles with

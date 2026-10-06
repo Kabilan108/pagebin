@@ -57,6 +57,7 @@ interface ArtifactMetadata {
   updatedAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   contentKey: string;
@@ -109,6 +110,7 @@ interface PublishPayload {
   url: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   revision: number;
   version: number;
   contentSha256: string;
@@ -129,6 +131,7 @@ interface UpdatePayload {
   updatedAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   version: number;
@@ -151,6 +154,7 @@ interface ListedArtifact {
   createdAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   contentSha256: string | null;
@@ -411,7 +415,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   if (request.method === "PATCH" && deleteMatch?.[1]) {
-    return updateArtifactTtl(request, env, deleteMatch[1]);
+    return updateArtifactMetadata(request, env, deleteMatch[1]);
   }
 
   if (request.method === "DELETE" && deleteMatch?.[1]) {
@@ -949,6 +953,7 @@ async function getArtifact(request: Request, env: Env, id: string): Promise<Resp
     updatedAt: metadata.updatedAt,
     expiresAt: metadata.expiresAt,
     sandbox: metadata.sandbox,
+    review: metadata.review,
     size: metadata.size,
     revision: metadata.revision,
     contentSha256: metadata.contentSha256,
@@ -999,6 +1004,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
     updatedAt: nowIso,
     expiresAt,
     sandbox: parsedOptions.sandbox,
+    review: parsedOptions.review,
     size: upload.file.size,
     revision: 1,
     contentKey: htmlKey(id),
@@ -1041,6 +1047,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
     url: `${publicOrigin(request, env)}/p/${id}/${token}`,
     expiresAt,
     sandbox: parsedOptions.sandbox,
+    review: parsedOptions.review,
     revision: metadata.revision,
     version: 1,
     contentSha256,
@@ -1090,11 +1097,13 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   const contentSha256 = await sha256Hex(upload.html);
   let attributes: ArtifactAttributes;
   let ttlSeconds: number | null | undefined;
+  let review: boolean | undefined;
 
   try {
     attributes = parseArtifactAttributes(upload.form);
     const ttlValue = upload.form.get("ttlSeconds");
     ttlSeconds = ttlValue === null ? undefined : parseUpdateTtl(ttlValue);
+    review = parseOptionalReviewFormValue(upload.form.get("review"));
   } catch (error) {
     return json(
       { error: error instanceof Error ? error.message : "Invalid artifact attributes." },
@@ -1111,7 +1120,8 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     const isNoOp =
       upload.displayFilename === metadata.filename &&
       JSON.stringify(mergedAttributes) === JSON.stringify(metadata.attributes) &&
-      ttlSeconds === undefined;
+      ttlSeconds === undefined &&
+      review === undefined;
 
     if (isNoOp) {
       return json(updatePayload(metadata));
@@ -1126,6 +1136,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
       revision: metadata.revision + 1,
       attributes: mergedAttributes,
       expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
+      review: review ?? metadata.review,
     };
 
     if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
@@ -1159,6 +1170,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     currentVersion: nextVersion.version,
     attributes: mergedAttributes,
     expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
+    review: review ?? metadata.review,
   };
 
   await env.ARTIFACTS.put(nextContentKey, upload.html, {
@@ -1187,7 +1199,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   return json(updatePayload(nextMetadata));
 }
 
-async function updateArtifactTtl(request: Request, env: Env, id: string): Promise<Response> {
+async function updateArtifactMetadata(request: Request, env: Env, id: string): Promise<Response> {
   if (!(await isAuthorized(request, env))) {
     return json({ error: "Unauthorized." }, 401);
   }
@@ -1211,27 +1223,30 @@ async function updateArtifactTtl(request: Request, env: Env, id: string): Promis
   try {
     body = await request.json();
   } catch {
-    return json({ error: "TTL update body must be valid JSON." }, 400);
+    return json({ error: "Metadata update body must be valid JSON." }, 400);
   }
 
-  if (
-    !isPlainObject(body) ||
-    !Object.hasOwn(body, "ttlSeconds") ||
-    Object.keys(body).length !== 1
-  ) {
-    return json({ error: "TTL update body must contain only ttlSeconds." }, 400);
+  if (!isPlainObject(body)) {
+    return json({ error: "Metadata update body must be a JSON object." }, 400);
+  }
+
+  const keys = Object.keys(body);
+
+  if (keys.length === 0 || keys.some((key) => key !== "ttlSeconds" && key !== "review")) {
+    return json({ error: "Metadata update body may contain only ttlSeconds and review." }, 400);
   }
 
   let ttlSeconds: number | null | undefined;
+  let review: boolean | undefined;
 
   try {
-    ttlSeconds = parseUpdateTtl(body.ttlSeconds);
+    ttlSeconds = Object.hasOwn(body, "ttlSeconds") ? parseUpdateTtl(body.ttlSeconds) : undefined;
+    review = Object.hasOwn(body, "review") ? parseReviewBoolean(body.review) : undefined;
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "Invalid TTL." }, 400);
-  }
-
-  if (ttlSeconds === undefined) {
-    return json({ error: "ttlSeconds is required." }, 400);
+    return json(
+      { error: error instanceof Error ? error.message : "Invalid metadata update." },
+      400,
+    );
   }
 
   const updatedAt = new Date().toISOString();
@@ -1241,6 +1256,7 @@ async function updateArtifactTtl(request: Request, env: Env, id: string): Promis
     updatedAt,
     revision: stored.metadata.revision + 1,
     expiresAt: updatedExpiration(stored.metadata.expiresAt, ttlSeconds, updatedAt),
+    review: review ?? stored.metadata.review,
   };
 
   if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
@@ -1261,6 +1277,7 @@ async function listArtifacts(request: Request, env: Env): Promise<Response> {
     createdAt: artifact.createdAt,
     expiresAt: artifact.expiresAt,
     sandbox: artifact.sandbox,
+    review: artifact.review,
     size: artifact.size,
     revision: artifact.revision,
     contentSha256: artifact.contentSha256,
@@ -1492,7 +1509,7 @@ async function routeReviewRequest(
   if (!id || !token || (viewerMatch[4] && !itemId)) return reviewNotFound();
   const metadata = await readAuthorizedMetadata(env, id, token);
 
-  if (!metadata) return reviewNotFound();
+  if (!metadata || !metadata.review || metadata.sandbox !== "standard") return reviewNotFound();
 
   const artifact = reviewArtifact(metadata);
 
@@ -1870,7 +1887,7 @@ function reviewViewerConfig(
   const file = entry.manifest?.files.find((f) => f.path === entry.manifest?.entrypoint);
   const isDocument = entry.manifest ? contentKind(file?.contentType ?? "") === "document" : true;
 
-  if (metadata.sandbox !== "standard" || !isDocument) return null;
+  if (!metadata.review || metadata.sandbox !== "standard" || !isDocument) return null;
 
   return {
     id: metadata.id,
@@ -2221,14 +2238,18 @@ async function readMultipartForm(
   }
 }
 
-function parsePublishOptions(
-  form: FormData,
-):
-  | { ttlSeconds: number | null; sandbox: SandboxMode; attributes: ArtifactAttributes }
+function parsePublishOptions(form: FormData):
+  | {
+      ttlSeconds: number | null;
+      sandbox: SandboxMode;
+      review: boolean;
+      attributes: ArtifactAttributes;
+    }
   | { error: string } {
   try {
     return {
       sandbox: parseSandbox(form.get("sandbox")),
+      review: parsePublishReviewFormValue(form.get("review")),
       ttlSeconds: parseOptionalPositiveInt(form.get("ttlSeconds")),
       attributes: parseArtifactAttributes(form),
     };
@@ -2424,6 +2445,7 @@ function updatePayload(metadata: ArtifactMetadata): UpdatePayload {
     updatedAt: metadata.updatedAt,
     expiresAt: metadata.expiresAt,
     sandbox: metadata.sandbox,
+    review: metadata.review,
     size: metadata.size,
     revision: metadata.revision,
     version: artifactHead(metadata).version,
@@ -2442,6 +2464,26 @@ function parseSandbox(value: unknown): SandboxMode {
   }
 
   throw new Error("Invalid sandbox mode.");
+}
+
+function parseReviewBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+
+  throw new Error("Review must be a boolean.");
+}
+
+function parsePublishReviewFormValue(value: unknown): boolean {
+  return parseOptionalReviewFormValue(value) ?? true;
+}
+
+function parseOptionalReviewFormValue(value: unknown): boolean | undefined {
+  if (value === null) return undefined;
+
+  if (value === "true") return true;
+
+  if (value === "false") return false;
+
+  throw new Error("Review must be true or false.");
 }
 
 async function readUtf8File(file: UploadedFile): Promise<string | null> {
@@ -2756,6 +2798,7 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
     ...metadata,
     updatedAt,
     revision: metadata.revision ?? 1,
+    review: metadata.review ?? true,
     contentKey,
     contentSha256,
     versions,
@@ -2918,6 +2961,7 @@ interface UploadSession {
   filename: string;
   manifest: ContentManifest;
   sandbox: SandboxMode;
+  review?: boolean | undefined;
   ttlSeconds?: number | null | undefined;
   attributes: ArtifactAttributes;
 }
@@ -3225,7 +3269,7 @@ async function serveFile(
 
     return withFrameScript(
       new Response(object.body, { status: 200, headers }),
-      frameScriptTag(frameViewerOrigin(request, env)),
+      frameScriptTag(frameViewerOrigin(request, env), metadata.review),
     );
   }
 
@@ -3309,6 +3353,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
     let ttlSeconds: number | null | undefined;
     let attributes: ArtifactAttributes;
     let sandbox: SandboxMode;
+    let review: boolean | undefined;
 
     try {
       ttlSeconds =
@@ -3320,6 +3365,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
 
       if ("error" in parsed) throw new Error(parsed.error);
       sandbox = stored?.metadata.sandbox ?? parsed.sandbox;
+      review = body.review === undefined ? undefined : parseReviewBoolean(body.review);
     } catch (error) {
       return json({ error: String(error) }, 400);
     }
@@ -3402,6 +3448,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
         sha256: await sha256Hex(manifestSource(body.entrypoint, valid)),
       },
       sandbox,
+      review,
       ttlSeconds,
       attributes,
     };
@@ -3477,6 +3524,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
     previous &&
     session.filename === previous.filename &&
     session.ttlSeconds === undefined &&
+    session.review === undefined &&
     JSON.stringify({ ...previous.attributes, ...session.attributes }) ===
       JSON.stringify(previous.attributes)
   ) {
@@ -3525,6 +3573,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
     updatedAt: now,
     expiresAt: updatedExpiration(previous?.expiresAt ?? null, session.ttlSeconds, now),
     sandbox: session.sandbox,
+    review: session.review ?? previous?.review ?? true,
     size,
     revision: (previous?.revision ?? 0) + 1,
     contentKey,

@@ -347,7 +347,11 @@ const REVIEW_FRAME_SCRIPT_BODY = `
     const offered = (v) => optionsOf(group).some((o) => o.value === v);
     switch (group.type) {
       case "radio":
-        if (value === null || value === undefined) return true;
+        // A saved "none" must clear an option the current version checks by default.
+        if (value === null || value === undefined) {
+          els.forEach((e) => (e.checked = false));
+          return true;
+        }
         if (!offered(value)) return false;
         els.forEach((e) => (e.checked = e.value === value));
         return true;
@@ -361,6 +365,8 @@ const REVIEW_FRAME_SCRIPT_BODY = `
         const wanted = Array.isArray(value) ? value : value === null || value === undefined ? [] : [value];
         if (!wanted.every(offered)) return false;
         [...els[0].options].forEach((o) => (o.selected = wanted.includes(o.value)));
+        // Deselecting every option of a single select reselects the first; -1 keeps it empty.
+        if (wanted.length === 0) els[0].selectedIndex = -1;
         return true;
       }
       default:

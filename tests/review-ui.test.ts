@@ -6,6 +6,7 @@ import { embeddedFunction, frameScriptTag } from "../worker/review-frame";
 import {
   createSerialSaver,
   embeddedFormatterSource,
+  mergeLoaded,
   reviewViewerScript,
 } from "../worker/review-ui";
 
@@ -446,5 +447,33 @@ describe("serial decision saver", () => {
     expect(reviewViewerScript()).toContain(
       embeddedFunction("createSerialSaver", createSerialSaver),
     );
+  });
+});
+
+describe("initial review load merge", () => {
+  test("keeps comments saved while the load was pending and adds the rest", () => {
+    const local = [
+      { id: "saved-during-load", body: "new" },
+      { id: "local-pending", body: "pending" },
+    ];
+
+    const loaded = [
+      { id: "older", body: "from server" },
+      { id: "saved-during-load", body: "stale copy" },
+    ];
+
+    expect(mergeLoaded(local, loaded)).toEqual([
+      { id: "older", body: "from server" },
+      { id: "saved-during-load", body: "new" },
+      { id: "local-pending", body: "pending" },
+    ]);
+  });
+
+  test("takes the server copy when nothing changed locally", () => {
+    expect(mergeLoaded([], [{ id: "a" }, { id: "b" }])).toEqual([{ id: "a" }, { id: "b" }]);
+  });
+
+  test("ships in the viewer script", () => {
+    expect(reviewViewerScript()).toContain(embeddedFunction("mergeLoaded", mergeLoaded));
   });
 });

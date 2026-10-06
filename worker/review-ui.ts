@@ -126,6 +126,8 @@ button.pb-quote:disabled{cursor:default;color:var(--pb-muted)}
 .pb-card.detached .pb-quote{border-left-color:var(--pb-amber);border-left-style:dashed}
 .pb-tag{--c:var(--pb-amber);align-self:flex-start}
 .pb-tag svg{flex-shrink:0;width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.pb-card.failed{border-color:color-mix(in srgb,var(--pb-danger) 45%,var(--pb-line))}
+.pb-card.failed .pb-tag{--c:var(--pb-danger)}
 .pb-card.addressed{background:color-mix(in srgb,var(--pb-green) 7%,var(--pb-panel))}
 .pb-card.addressed .pb-quote{border-left-color:var(--pb-green);border-left-style:dotted}
 .pb-card.addressed .body{color:var(--pb-muted)}
@@ -199,7 +201,7 @@ ${frameHtml}
 <div class="pb-composer-foot">${modHint}<button class="pb-btn quiet" id="pb-composer-cancel" type="button">Cancel</button><button class="pb-btn primary" id="pb-composer-save" type="button" disabled>Comment</button></div>
 </div>
 <template id="pb-tpl-decision"><article class="pb-drow" role="listitem" tabindex="-1"><button class="q" type="button" title="Jump to this decision"></button><div class="answer"></div><div class="dnote" hidden></div><div class="meta"><span class="pb-chip"></span><span class="state saving"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="keep" type="button" title="Confirm the recommended answer">Keep recommendation</button><button class="pb-ib" data-act="jump-decision" type="button" title="Jump to this decision">${arrow}</button></span></div></article></template>
-<template id="pb-tpl-card"><article class="pb-card" role="listitem" tabindex="-1"><div class="pb-tag" hidden></div><button class="pb-quote" type="button" title="Jump to this text"></button><div class="body"></div><div class="edit" hidden><textarea rows="3" maxlength="${limit}" aria-label="Edit comment"></textarea><div class="pb-card-editfoot">${modHint}<button class="pb-btn quiet" data-act="edit-cancel" type="button">Cancel</button><button class="pb-btn primary" data-act="edit-save" type="button">Save</button></div></div><div class="meta"><span class="when"></span><span class="state"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="expand" type="button" hidden>Show</button><button class="pb-ib text" data-act="reopen" type="button" title="Reopen this comment for the agent" hidden>Reopen</button><button class="pb-ib" data-act="jump" type="button" title="Jump to anchor">${arrow}</button><button class="pb-ib" data-act="edit" type="button" title="Edit"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M12 8l4 4"/></svg></button><button class="pb-ib danger" data-act="delete" type="button" title="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></span></div></article></template>
+<template id="pb-tpl-card"><article class="pb-card" role="listitem" tabindex="-1"><div class="pb-tag" hidden></div><button class="pb-quote" type="button" title="Jump to this text"></button><div class="body"></div><div class="edit" hidden><textarea rows="3" maxlength="${limit}" aria-label="Edit comment"></textarea><div class="pb-card-editfoot">${modHint}<button class="pb-btn quiet" data-act="edit-cancel" type="button">Cancel</button><button class="pb-btn primary" data-act="edit-save" type="button">Save</button></div></div><div class="meta"><span class="when"></span><span class="state"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="expand" type="button" hidden>Show</button><button class="pb-ib text" data-act="reopen" type="button" title="Reopen this comment for the agent" hidden>Reopen</button><button class="pb-ib text" data-act="retry" type="button" title="Save this comment again" hidden>Retry</button><button class="pb-ib text danger" data-act="discard" type="button" title="Drop this unsaved comment" hidden>Discard</button><button class="pb-ib" data-act="jump" type="button" title="Jump to anchor">${arrow}</button><button class="pb-ib" data-act="edit" type="button" title="Edit"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M12 8l4 4"/></svg></button><button class="pb-ib danger" data-act="delete" type="button" title="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></span></div></article></template>
 <script type="application/json" id="pb-review-config">${reviewConfigJson(config)}</script>
 <script>${reviewViewerScript()}</script>`;
 }
@@ -250,11 +252,25 @@ export function createSerialSaver(send: () => Promise<void>, onIdle: () => void)
   };
 }
 
+export interface ReviewItem {
+  id: string;
+}
+
+// Merges the initial load into items created while it was pending. Local items win by id,
+// because anything the reader saved after the request started is newer than its copy.
+// Embedded in the viewer script.
+export function mergeLoaded<T extends ReviewItem>(local: T[], loaded: T[]): T[] {
+  const localIds = new Set(local.map((item) => item.id));
+
+  return [...loaded.filter((item) => !localIds.has(item.id)), ...local];
+}
+
 export function reviewViewerScript(): string {
   // Each embedded function may carry its own __name shim; keep only the first declaration.
   const helpers = [
     embeddedFormatterSource(),
     embeddedFunction("createSerialSaver", createSerialSaver),
+    embeddedFunction("mergeLoaded", mergeLoaded),
   ]
     .join("\n")
     .split("\n")
@@ -386,10 +402,11 @@ const VIEWER_SCRIPT = `
     try {
       const payload = await api("GET", "");
       const review = payload && payload.review ? payload.review : {};
-      state.comments = (Array.isArray(review.comments) ? review.comments : []).filter(validComment).map(localComment);
-      state.decisions.clear();
+      // Comments and answers saved while this request was pending are newer than its copy.
+      const loaded = (Array.isArray(review.comments) ? review.comments : []).filter(validComment).map(localComment);
+      state.comments = mergeLoaded(state.comments, loaded);
       for (const d of Array.isArray(review.decisions) ? review.decisions : []) {
-        if (validDecision(d)) state.decisions.set(d.id, { ...d, notOffered: [], saving: false, saveTimer: 0, saver: null });
+        if (validDecision(d) && !state.decisions.has(d.id)) state.decisions.set(d.id, { ...d, notOffered: [], saving: false, saveTimer: 0, saver: null });
       }
       state.loaded = true;
       state.loadError = "";
@@ -560,22 +577,37 @@ const VIEWER_SCRIPT = `
       store("session", FIRST_SAVE_KEY, "1");
       if (!state.panelOpen && !mobile()) setPanel(true);
     }
+    await submitComment(comment, draft);
+  }
+
+  // draft is the composer state to reopen on failure; Retry from the panel passes null.
+  async function submitComment(comment, draft) {
+    const savedDraft = () => JSON.parse(stored("local", DRAFT_KEY) || "null");
+    const isThisDraft = (d) => !!d && d.body.trim() === comment.body && d.anchor.quote === comment.anchor.quote;
     try {
-      const payload = await api("POST", "/comments", { anchor: draft.anchor, body });
+      const payload = await api("POST", "/comments", { anchor: comment.anchor, body: comment.body });
       if (!payload || !validComment(payload.comment)) throw new Error("unexpected response");
-      Object.assign(comment, payload.comment, { saving: false, local: false });
-      const savedDraft = JSON.parse(stored("local", DRAFT_KEY) || "null");
+      Object.assign(comment, payload.comment, { saving: false, local: false, failed: false });
       // A newer draft may have been started while this one was saving; keep it.
-      if (savedDraft && savedDraft.body.trim() === body && savedDraft.anchor.quote === draft.anchor.quote) store("local", DRAFT_KEY, null);
+      if (isThisDraft(savedDraft())) store("local", DRAFT_KEY, null);
       pushHighlights();
       render();
       toast("Comment saved");
     } catch (error) {
-      state.comments = state.comments.filter((c) => c !== comment);
-      pushHighlights();
-      render({ bump: true });
-      openComposer(draft, body);
-      toast("Comment not saved: " + errorText(error));
+      const stash = savedDraft();
+      const newerDraft = (!composer.hidden && state.draft !== draft) || (!!stash && !isThisDraft(stash));
+      if (draft && !newerDraft) {
+        state.comments = state.comments.filter((c) => c !== comment);
+        pushHighlights();
+        render({ bump: true });
+        openComposer(draft, comment.body);
+        toast("Comment not saved: " + errorText(error));
+        return;
+      }
+      // Reopening it would replace the draft the reader is writing now; park it in the panel.
+      Object.assign(comment, { saving: false, failed: true, error: errorText(error) });
+      render();
+      toast("Comment not saved. Retry it from the panel.");
     }
   }
 
@@ -601,7 +633,7 @@ const VIEWER_SCRIPT = `
     });
   }
 
-  const inResponse = (c) => c.status === "open" && c.found !== false;
+  const inResponse = (c) => c.status === "open" && c.found !== false && !c.failed;
 
   // ---- decisions ----
   // A view merges the frame's description of a decision in this version with the saved record.
@@ -748,7 +780,7 @@ const VIEWER_SCRIPT = `
       orphaned: v.orphaned,
       notOffered: v.notOfferedNames.length > 0,
     }));
-    const comments = orderedComments().map((c) => ({
+    const comments = orderedComments().filter((c) => !c.failed).map((c) => ({
       id: c.id,
       anchor: c.anchor,
       body: c.body,
@@ -914,8 +946,12 @@ const VIEWER_SCRIPT = `
     el.classList.toggle("detached", detached);
     el.classList.toggle("addressed", addressed);
     el.classList.toggle("collapsed", collapsed);
+    el.classList.toggle("failed", !!c.failed);
     const tag = el.querySelector(".pb-tag");
-    if (addressed) {
+    if (c.failed) {
+      tag.hidden = false;
+      tag.innerHTML = ICON_WARN + " Not saved \\u00b7 " + escapeHtml(c.error || "network error");
+    } else if (addressed) {
       tag.hidden = false;
       tag.innerHTML = ICON_CHECK + " Addressed by agent";
     } else if (detached) {
@@ -932,7 +968,7 @@ const VIEWER_SCRIPT = `
     el.querySelector(".when").textContent = "v" + c.anchor.version + " \\u00b7 " + relTime(c.updatedAt) + (c.updatedAt !== c.createdAt && !addressed ? " (edited)" : "");
     const stateEl = el.querySelector(".state");
     stateEl.className = "state " + (c.saving ? "saving" : "saved");
-    stateEl.innerHTML = c.saving ? "Saving\\u2026" : addressed ? "" : ICON_CHECK + " Saved";
+    stateEl.innerHTML = c.saving ? "Saving\\u2026" : addressed || c.failed ? "" : ICON_CHECK + " Saved";
     const expand = el.querySelector('[data-act="expand"]');
     expand.hidden = !addressed;
     expand.textContent = collapsed ? "Show" : "Hide";
@@ -940,8 +976,11 @@ const VIEWER_SCRIPT = `
     reopenButton.hidden = !addressed;
     reopenButton.disabled = c.saving;
     el.querySelector('[data-act="jump"]').disabled = c.found === false;
-    el.querySelector('[data-act="edit"]').hidden = addressed;
+    el.querySelector('[data-act="retry"]').hidden = !c.failed;
+    el.querySelector('[data-act="discard"]').hidden = !c.failed;
+    el.querySelector('[data-act="edit"]').hidden = addressed || c.local;
     el.querySelector('[data-act="edit"]').disabled = c.saving;
+    el.querySelector('[data-act="delete"]').hidden = c.local;
     el.querySelector('[data-act="delete"]').disabled = c.saving;
     if (state.editingId === c.id) {
       bodyEl.hidden = true;
@@ -1269,6 +1308,16 @@ const VIEWER_SCRIPT = `
     if (act === "edit-save") commitEdit(cardEl, c);
     if (act === "delete") deleteComment(c.id);
     if (act === "reopen") reopen(c);
+    if (act === "retry") {
+      Object.assign(c, { saving: true, failed: false });
+      render();
+      submitComment(c, null);
+    }
+    if (act === "discard") {
+      state.comments = state.comments.filter((x) => x !== c);
+      pushHighlights();
+      render({ bump: true });
+    }
     if (act === "expand") {
       if (state.expanded.has(c.id)) state.expanded.delete(c.id);
       else state.expanded.add(c.id);

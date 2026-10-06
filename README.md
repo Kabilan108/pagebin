@@ -161,3 +161,44 @@ The flake exposes the CLI package for `x86_64-linux`.
 ### PDF reader build
 
 Wrangler builds the reader assets before local development and deployment with `bun run scripts/build-pdf-viewer.ts`. This downloads the pinned official PDF.js legacy distribution, verifies its SHA-256, and disables PDF scripting and saved preference overrides. The generated files live in `dist/worker-assets` and are served by the Worker's `ASSETS` binding. No PDF content or capability URL is sent to a third-party viewer. Builds require access to GitHub releases; checksum or configuration patch mismatches fail the build.
+
+## Development checks
+
+Install dependencies and the local commit hook after cloning:
+
+```bash
+direnv exec . bun install --frozen-lockfile
+direnv exec . prek install
+```
+
+`direnv exec . prek run --all-files` runs formatting checks, lint, TypeScript
+typechecking, and the full Bun test suite. The installed pre-commit hook runs all
+four checks before each commit. The release workflow also runs these checks on
+relevant pushes to `main`.
+
+Use `direnv exec . bun run format` to apply Oxfmt formatting and
+`direnv exec . bun run lint:fix` for safe Oxlint fixes. Lint warnings fail the check.
+
+The generic [anti-slop rules](https://github.com/dmmulroy/anti-slop) are vendored
+under `tools/oxlint/anti-slop`, with their source revision and licenses. PageBin
+enables all generic rules except `no-conditional-empty-object-spread`. Optional
+fields deliberately use omission, including under TypeScript's
+`exactOptionalPropertyTypes`.
+
+`no-runtime-typeof` allows type predicates. Explicit, documented exceptions for
+`no-runtime-typeof`, `no-unknown-parameters`, and `no-unsafe-dictionary-type` are
+confined to the functions that parse external JSON/YAML or multipart values.
+Application logic consumes validated contracts. Test fixtures additionally permit
+runtime type assertions/checks and unparsed dictionaries. Production assertions
+require a `SAFETY:` comment stating their invariant. Private Worker-owned R2
+metadata/session reads retain an explicit storage-schema trust assumption.
+
+CLI API responses and every schema-1 receipt record are validated before use.
+Malformed records fail without rewriting the store. YAML frontmatter is copied
+to an acyclic tree before rendering, with limits of 256 KiB of input, 32 nesting
+levels, 10,000 expanded values, and 1 MiB of expanded text. Cycles or exceeded
+limits render a `frontmatter_error` property while preserving the document body.
+
+Effect-specific rules are unused because PageBin does not depend on Effect.
+Vendored tooling, agent skills, and prototypes are excluded from lint and format
+checks. Formatting also preserves test fixtures and agent instruction files.

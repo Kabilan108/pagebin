@@ -1,4 +1,16 @@
-import { type ContentFile, type ContentManifest, type StoredFile, FILE_LIMIT, BUNDLE_LIMIT, FILE_COUNT_LIMIT, validPath, contentType, contentKind, manifestSource, filePathUrl } from "../shared/content";
+import {
+  type ContentFile,
+  type ContentManifest,
+  type StoredFile,
+  FILE_LIMIT,
+  BUNDLE_LIMIT,
+  FILE_COUNT_LIMIT,
+  validPath,
+  contentType,
+  contentKind,
+  manifestSource,
+  filePathUrl,
+} from "../shared/content";
 import { FAVICON_SVG, dashboardHtml } from "./dashboard";
 import { NOT_FOUND_HTML } from "./not-found";
 
@@ -137,6 +149,7 @@ interface StoredArtifactMetadata {
 }
 
 type SandboxMode = "standard" | "strict";
+
 type ArtifactType = "plan" | "report" | "review" | "explainer" | "implementation-log" | "other";
 
 interface UploadedFile {
@@ -146,13 +159,21 @@ interface UploadedFile {
 }
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
+
 const MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
 const MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
+
 const ORPHAN_CONTENT_GRACE_MS = 60 * 60 * 1000;
+
 const MAX_ARTIFACT_VERSIONS = 10;
+
 const METADATA_READ_CONCURRENCY = 6;
+
 const STANDARD_SANDBOX = "allow-scripts allow-forms allow-popups allow-downloads";
+
 const STANDARD_IFRAME_PERMISSIONS = "clipboard-write";
+
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
 export default {
@@ -161,11 +182,16 @@ export default {
       return await handleRequest(request, env);
     } catch (error) {
       console.error(error);
+
       return json({ error: "Internal server error." }, 500);
     }
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    _ctx: ExecutionContext,
+  ): Promise<void> {
     await cleanupExpiredArtifacts(env);
   },
 };
@@ -174,18 +200,28 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const hostname = url.hostname;
 
-  if (url.pathname.startsWith("/pdfjs/") && (request.method === "GET" || request.method === "HEAD")) {
+  if (
+    url.pathname.startsWith("/pdfjs/") &&
+    (request.method === "GET" || request.method === "HEAD")
+  ) {
     if (!env.ASSETS) return siteNotFound();
     const asset = await env.ASSETS.fetch(request);
     const headers = secureHeaders(asset.headers);
     // Reader assets are public code. Revalidate their ETags instead of downloading
     // the PDF engine again every time a protected document is opened.
     headers.set("Cache-Control", "public, max-age=0, must-revalidate");
-    headers.set("Content-Security-Policy", "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
+    headers.set(
+      "Content-Security-Policy",
+      "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    );
+
     return new Response(asset.body, { status: asset.status, headers });
   }
 
-  if (request.method === "GET" && (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")) {
+  if (
+    request.method === "GET" &&
+    (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")
+  ) {
     return serveFavicon();
   }
 
@@ -210,7 +246,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return misdirected();
   }
 
-  if (hostname === "api.page-bin.com" && (url.pathname === "/" || url.pathname.startsWith("/p/") || url.pathname.startsWith("/raw/") || url.pathname.startsWith("/download/"))) {
+  if (
+    hostname === "api.page-bin.com" &&
+    (url.pathname === "/" ||
+      url.pathname.startsWith("/p/") ||
+      url.pathname.startsWith("/raw/") ||
+      url.pathname.startsWith("/download/"))
+  ) {
     return misdirected();
   }
 
@@ -222,24 +264,59 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   if (url.pathname === "/api/uploads" || url.pathname.startsWith("/api/uploads/")) {
     if (!(await isAuthorized(request, env))) return json({ error: "Unauthorized." }, 401);
+
     return routeUpload(request, env, url);
   }
-  const manifestMatch = /^\/api\/artifacts\/([^/]+)\/manifest\/([^/]+)(?:\/v\/([1-9]\d*))?$/.exec(url.pathname);
-  if (request.method === 'GET' && manifestMatch) {
+
+  const manifestMatch = /^\/api\/artifacts\/([^/]+)\/manifest\/([^/]+)(?:\/v\/([1-9]\d*))?$/.exec(
+    url.pathname,
+  );
+
+  if (request.method === "GET" && manifestMatch) {
     const metadata = await readAuthorizedMetadata(env, manifestMatch[1]!, manifestMatch[2]!);
+
     if (!metadata) return siteNotFound();
-    const entry = manifestMatch[3] ? metadata.versions.find(v => v.version === Number(manifestMatch[3])) : artifactHead(metadata);
+
+    const entry = manifestMatch[3]
+      ? metadata.versions.find((v) => v.version === Number(manifestMatch[3]))
+      : artifactHead(metadata);
+
     if (!entry?.manifest) return notFound();
-    return json({ version: entry.version, revision: metadata.revision, manifest: { ...entry.manifest, files: entry.manifest.files.map(({objectKey: _, ...file}) => file) } });
+
+    return json({
+      version: entry.version,
+      revision: metadata.revision,
+      manifest: {
+        ...entry.manifest,
+        files: entry.manifest.files.map(({ path, contentType, size, sha256 }) => ({
+          path,
+          contentType,
+          size,
+          sha256,
+        })),
+      },
+    });
   }
-  const fileMatch = url.pathname.match(/^\/(raw|download)\/([^/]+)\/([^/]+)(?:\/v\/([1-9]\d*)(?:\/(.+))?)?$/);
+
+  const fileMatch = url.pathname.match(
+    /^\/(raw|download)\/([^/]+)\/([^/]+)(?:\/v\/([1-9]\d*)(?:\/(.+))?)?$/,
+  );
+
   if ((request.method === "GET" || request.method === "HEAD") && fileMatch) {
     const metadata = await readAuthorizedMetadata(env, fileMatch[2]!, fileMatch[3]!);
+
     if (!metadata) return siteNotFound();
-    const entry = fileMatch[4] ? metadata.versions.find(v => v.version === Number(fileMatch[4])) : artifactHead(metadata);
+
+    const entry = fileMatch[4]
+      ? metadata.versions.find((v) => v.version === Number(fileMatch[4]))
+      : artifactHead(metadata);
+
     if (!entry) return siteNotFound();
-    if (entry.manifest || fileMatch[1] === "download" || request.method === 'HEAD') return serveFile(request, env, metadata, entry, fileMatch[5], fileMatch[1] === "download");
+
+    if (entry.manifest || fileMatch[1] === "download" || request.method === "HEAD")
+      return serveFile(request, env, metadata, entry, fileMatch[5], fileMatch[1] === "download");
   }
+
   if (request.method === "POST" && url.pathname === "/api/publish") {
     return publish(request, env);
   }
@@ -294,8 +371,19 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   const pinnedViewerMatch = url.pathname.match(/^\/p\/([^/]+)\/([^/]+)\/v\/([^/]+)$/);
 
-  if (request.method === "GET" && pinnedViewerMatch?.[1] && pinnedViewerMatch[2] && pinnedViewerMatch[3]) {
-    return servePinnedViewer(env, request.url, pinnedViewerMatch[1], pinnedViewerMatch[2], pinnedViewerMatch[3]);
+  if (
+    request.method === "GET" &&
+    pinnedViewerMatch?.[1] &&
+    pinnedViewerMatch[2] &&
+    pinnedViewerMatch[3]
+  ) {
+    return servePinnedViewer(
+      env,
+      request.url,
+      pinnedViewerMatch[1],
+      pinnedViewerMatch[2],
+      pinnedViewerMatch[3],
+    );
   }
 
   const viewerMatch = url.pathname.match(/^\/p\/([^/]+)\/([^/]+)$/);
@@ -316,11 +404,21 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return serveRaw(env, rawMatch[1], rawMatch[2]);
   }
 
-  return url.pathname.startsWith("/api/") || hostname === "api.page-bin.com" ? notFound() : siteNotFound();
+  return url.pathname.startsWith("/api/") || hostname === "api.page-bin.com"
+    ? notFound()
+    : siteNotFound();
 }
 
-async function routeDashboard(request: Request, env: Env, url: URL, hostname: string): Promise<Response | null> {
-  const isDashboardPath = url.pathname === "/" || url.pathname.startsWith("/api/dashboard/") || url.pathname === "/api/dashboard/artifacts";
+async function routeDashboard(
+  request: Request,
+  env: Env,
+  url: URL,
+  hostname: string,
+): Promise<Response | null> {
+  const isDashboardPath =
+    url.pathname === "/" ||
+    url.pathname.startsWith("/api/dashboard/") ||
+    url.pathname === "/api/dashboard/artifacts";
 
   if (!isDashboardPath) {
     return null;
@@ -350,6 +448,7 @@ async function routeDashboard(request: Request, env: Env, url: URL, hostname: st
     if (!hasDashboardMutationHeader(request)) {
       return json({ error: "Missing dashboard mutation header." }, 403);
     }
+
     return dashboardManagementRequest(request, env, reissueMatch[1], "reissue");
   }
 
@@ -360,14 +459,17 @@ async function routeDashboard(request: Request, env: Env, url: URL, hostname: st
       return json({ error: "Missing dashboard mutation header." }, 403);
     }
 
-    const internalRequest = new Request(`${new URL(request.url).origin}/api/artifacts/${encodeURIComponent(rollbackMatch[1])}/rollback`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.PAGEBIN_PUBLISH_TOKEN}`,
-        "Content-Type": "application/json",
+    const internalRequest = new Request(
+      `${new URL(request.url).origin}/api/artifacts/${encodeURIComponent(rollbackMatch[1])}/rollback`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.PAGEBIN_PUBLISH_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: await request.text(),
       },
-      body: await request.text(),
-    });
+    );
 
     return rollbackArtifact(internalRequest, env, rollbackMatch[1]);
   }
@@ -378,6 +480,7 @@ async function routeDashboard(request: Request, env: Env, url: URL, hostname: st
     if (!hasDashboardMutationHeader(request)) {
       return json({ error: "Missing dashboard mutation header." }, 403);
     }
+
     return dashboardManagementRequest(request, env, artifactMatch[1], "delete");
   }
 
@@ -407,15 +510,20 @@ function devAdminHostnames(env: Env): string[] {
     .filter(Boolean);
 }
 
-
 async function dashboardArtifacts(env: Env, url: URL): Promise<Response> {
   const search = url.searchParams.get("search")?.trim().toLowerCase() ?? "";
   const project = url.searchParams.get("project")?.trim() ?? "";
   const sourceHost = url.searchParams.get("sourceHost")?.trim() ?? "";
   const now = Date.now();
+
   const artifacts = (await readAllArtifactMetadata(env))
     .filter((artifact) => {
-      const haystack = [artifact.filename, artifact.attributes.title, artifact.attributes.project, artifact.attributes.sourceHost]
+      const haystack = [
+        artifact.filename,
+        artifact.attributes.title,
+        artifact.attributes.project,
+        artifact.attributes.sourceHost,
+      ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -428,6 +536,7 @@ async function dashboardArtifacts(env: Env, url: URL): Promise<Response> {
       );
     })
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
   const page = artifacts.map((artifact) => ({
     id: artifact.id,
     filename: artifact.filename,
@@ -439,19 +548,32 @@ async function dashboardArtifacts(env: Env, url: URL): Promise<Response> {
     revision: artifact.revision,
     contentSha256: artifact.contentSha256,
     attributes: artifact.attributes,
-    kind: contentKind(artifactHead(artifact).manifest?.files.find(f => f.path === artifactHead(artifact).manifest?.entrypoint)?.contentType ?? "text/html"),
-    contentType: artifactHead(artifact).manifest?.files.find(f => f.path === artifactHead(artifact).manifest?.entrypoint)?.contentType ?? "text/html",
+    kind: contentKind(
+      artifactHead(artifact).manifest?.files.find(
+        (f) => f.path === artifactHead(artifact).manifest?.entrypoint,
+      )?.contentType ?? "text/html",
+    ),
+    contentType:
+      artifactHead(artifact).manifest?.files.find(
+        (f) => f.path === artifactHead(artifact).manifest?.entrypoint,
+      )?.contentType ?? "text/html",
     fileCount: artifactHead(artifact).manifest?.files.length ?? 1,
     linkRecoverable: Boolean(artifact.encryptedToken),
     version: artifactHead(artifact).version,
     versions: artifactVersionSummaries(artifact),
   }));
+
   const nextCursor = null;
 
   return json({ artifacts: page, nextCursor, total: artifacts.length });
 }
 
-async function dashboardArtifactLink(request: Request, env: Env, id: string, redirect: boolean): Promise<Response> {
+async function dashboardArtifactLink(
+  request: Request,
+  env: Env,
+  id: string,
+  redirect: boolean,
+): Promise<Response> {
   if (!isValidId(id)) {
     return notFound();
   }
@@ -465,7 +587,10 @@ async function dashboardArtifactLink(request: Request, env: Env, id: string, red
   const token = await decryptViewerToken(env, id, stored.metadata.encryptedToken);
 
   if (!token || !constantTimeEqual(await sha256Hex(token), stored.metadata.tokenHash)) {
-    return json({ error: "The viewer URL could not be recovered. Reissue it to create a new link." }, 409);
+    return json(
+      { error: "The viewer URL could not be recovered. Reissue it to create a new link." },
+      409,
+    );
   }
 
   const url = `${publicOrigin(request, env)}/p/${id}/${token}`;
@@ -483,13 +608,19 @@ async function dashboardManagementRequest(
   id: string,
   action: "reissue" | "delete",
 ): Promise<Response> {
-  const path = action === "reissue" ? `/api/artifacts/${encodeURIComponent(id)}/reissue` : `/api/artifacts/${encodeURIComponent(id)}`;
+  const path =
+    action === "reissue"
+      ? `/api/artifacts/${encodeURIComponent(id)}/reissue`
+      : `/api/artifacts/${encodeURIComponent(id)}`;
+
   const internalRequest = new Request(`${new URL(request.url).origin}${path}`, {
     method: action === "reissue" ? "POST" : "DELETE",
     headers: { Authorization: `Bearer ${env.PAGEBIN_PUBLISH_TOKEN}` },
   });
 
-  return action === "reissue" ? reissueArtifact(internalRequest, env, id) : deleteArtifact(internalRequest, env, id);
+  return action === "reissue"
+    ? reissueArtifact(internalRequest, env, id)
+    : deleteArtifact(internalRequest, env, id);
 }
 
 async function readAllArtifactMetadata(env: Env): Promise<ArtifactMetadata[]> {
@@ -497,20 +628,29 @@ async function readAllArtifactMetadata(env: Env): Promise<ArtifactMetadata[]> {
   let cursor: string | undefined;
 
   do {
-    const options: R2ListOptions = cursor ? { cursor, prefix: "artifacts/" } : { prefix: "artifacts/" };
+    const options: R2ListOptions = cursor
+      ? { cursor, prefix: "artifacts/" }
+      : { prefix: "artifacts/" };
+
     const result = await env.ARTIFACTS.list(options);
 
     cursor = result.truncated ? result.cursor : undefined;
 
-    artifacts.push(...await readListedArtifactMetadata(env, result.objects));
+    artifacts.push(...(await readListedArtifactMetadata(env, result.objects)));
   } while (cursor);
 
   return artifacts;
 }
 
-async function readListedArtifactMetadata(env: Env, objects: R2Object[]): Promise<ArtifactMetadata[]> {
-  const keys = objects.filter((object) => object.key.endsWith("/metadata.json")).map((object) => object.key);
-  const results = new Array<ArtifactMetadata | null>(keys.length).fill(null);
+async function readListedArtifactMetadata(
+  env: Env,
+  objects: R2Object[],
+): Promise<ArtifactMetadata[]> {
+  const keys = objects.flatMap((object) =>
+    object.key.endsWith("/metadata.json") ? [object.key] : [],
+  );
+
+  const results = Array.from({ length: keys.length }, (): ArtifactMetadata | null => null);
   let nextIndex = 0;
 
   const readNext = async (): Promise<void> => {
@@ -532,6 +672,8 @@ async function readListedArtifactMetadata(env: Env, objects: R2Object[]): Promis
       const serialized = await stored.text();
 
       try {
+        // SAFETY: Only the Worker writes this private metadata key using ArtifactMetadata.
+        // normalizeMetadata supplies legacy defaults; malformed entries are caught below.
         const metadata = normalizeMetadata(JSON.parse(serialized) as ArtifactMetadata);
 
         if (!metadata.deletedAt) {
@@ -543,19 +685,28 @@ async function readListedArtifactMetadata(env: Env, objects: R2Object[]): Promis
     }
   };
 
-  await Promise.all(Array.from({ length: Math.min(METADATA_READ_CONCURRENCY, keys.length) }, readNext));
+  await Promise.all(
+    Array.from({ length: Math.min(METADATA_READ_CONCURRENCY, keys.length) }, readNext),
+  );
 
   return results.filter((metadata): metadata is ArtifactMetadata => metadata !== null);
 }
 
-async function isDashboardAuthorized(request: Request, env: Env, hostname: string): Promise<boolean> {
+async function isDashboardAuthorized(
+  request: Request,
+  env: Env,
+  hostname: string,
+): Promise<boolean> {
   if (isLocalDevHostname(hostname) || devAdminHostnames(env).includes(hostname)) {
     return true;
   }
 
   const teamDomain = env.PAGEBIN_ACCESS_TEAM_DOMAIN?.trim();
   const audience = env.PAGEBIN_ACCESS_AUD?.trim();
-  const token = request.headers.get("Cf-Access-Jwt-Assertion") ?? readCookie(request.headers.get("Cookie"), "CF_Authorization");
+
+  const token =
+    request.headers.get("Cf-Access-Jwt-Assertion") ??
+    readCookie(request.headers.get("Cookie"), "CF_Authorization");
 
   if (!teamDomain || !audience || !token) {
     return false;
@@ -580,22 +731,95 @@ function readCookie(header: string | null, name: string): string | null {
   return null;
 }
 
-async function validateAccessJwt(token: string, teamDomain: string, audience: string): Promise<boolean> {
+interface AccessHeader {
+  alg: "RS256";
+  kid: string;
+}
+
+interface AccessClaims {
+  aud: string | string[];
+  exp: number;
+  iss: string;
+  iat?: number;
+  nbf?: number;
+}
+
+// Decode and validate Cloudflare Access data before the signature/claim checks.
+// oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters
+function parseAccessHeader(value: unknown): AccessHeader | null {
+  if (!isPlainObject(value) || value.alg !== "RS256" || typeof value.kid !== "string" || !value.kid)
+    return null;
+
+  return { alg: "RS256", kid: value.kid };
+}
+
+function parseAccessClaims(value: unknown): AccessClaims | null {
+  if (
+    !isPlainObject(value) ||
+    typeof value.iss !== "string" ||
+    typeof value.exp !== "number" ||
+    !Number.isFinite(value.exp)
+  )
+    return null;
+  const aud = value.aud;
+
+  if (
+    typeof aud !== "string" &&
+    !(Array.isArray(aud) && aud.every((item): item is string => typeof item === "string"))
+  )
+    return null;
+  const claims: AccessClaims = { aud, exp: value.exp, iss: value.iss };
+
+  for (const key of ["iat", "nbf"] as const) {
+    if (value[key] === undefined) continue;
+
+    if (typeof value[key] !== "number" || !Number.isFinite(value[key])) return null;
+    claims[key] = value[key];
+  }
+
+  return claims;
+}
+
+function parseAccessKey(value: unknown, kid: string): JsonWebKey | null {
+  if (!isPlainObject(value) || !Array.isArray(value.keys)) return null;
+  const key = value.keys.find((entry) => isPlainObject(entry) && entry.kid === kid);
+
+  if (
+    !isPlainObject(key) ||
+    key.kty !== "RSA" ||
+    typeof key.n !== "string" ||
+    typeof key.e !== "string"
+  )
+    return null;
+
+  return { kty: "RSA", n: key.n, e: key.e };
+}
+// oxlint-enable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters
+
+async function validateAccessJwt(
+  token: string,
+  teamDomain: string,
+  audience: string,
+): Promise<boolean> {
   try {
-    const [encodedHeader, encodedPayload, encodedSignature] = token.split(".");
+    const parts = token.split(".");
+
+    if (parts.length !== 3) return false;
+    const [encodedHeader, encodedPayload, encodedSignature] = parts;
 
     if (!encodedHeader || !encodedPayload || !encodedSignature) {
       return false;
     }
 
-    const header = JSON.parse(new TextDecoder().decode(decodeBase64Url(encodedHeader))) as { alg?: string; kid?: string };
-    const payload = JSON.parse(new TextDecoder().decode(decodeBase64Url(encodedPayload))) as {
-      aud?: string | string[];
-      exp?: number;
-      iat?: number;
-      iss?: string;
-      nbf?: number;
-    };
+    const header = parseAccessHeader(
+      JSON.parse(new TextDecoder().decode(decodeBase64Url(encodedHeader))),
+    );
+
+    const payload = parseAccessClaims(
+      JSON.parse(new TextDecoder().decode(decodeBase64Url(encodedPayload))),
+    );
+
+    if (!header || !payload) return false;
 
     const now = Date.now() / 1000;
     const clockSkewSeconds = 60;
@@ -618,20 +842,27 @@ async function validateAccessJwt(token: string, teamDomain: string, audience: st
       return false;
     }
 
-    const certsResponse = await fetch(`${expectedIssuer}/cdn-cgi/access/certs`, { cf: { cacheTtl: 3600, cacheEverything: true } });
+    const certsResponse = await fetch(`${expectedIssuer}/cdn-cgi/access/certs`, {
+      cf: { cacheTtl: 3600, cacheEverything: true },
+    });
 
     if (!certsResponse.ok) {
       return false;
     }
 
-    const certs = (await certsResponse.json()) as { keys?: Array<JsonWebKey & { kid?: string }> };
-    const jwk = certs.keys?.find((key) => key.kid === header.kid);
+    const jwk = parseAccessKey(await certsResponse.json(), header.kid);
 
     if (!jwk) {
       return false;
     }
 
-    const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
 
     return crypto.subtle.verify(
       "RSASSA-PKCS1-v1_5",
@@ -661,6 +892,7 @@ async function getArtifact(request: Request, env: Env, id: string): Promise<Resp
 
   const metadata = stored.metadata;
   const head = artifactHead(metadata);
+
   const payload: ArtifactDetail = {
     id: metadata.id,
     filename: metadata.filename,
@@ -704,8 +936,12 @@ async function publish(request: Request, env: Env): Promise<Response> {
   const contentSha256 = await sha256Hex(upload.html);
   const now = new Date();
   const nowIso = now.toISOString();
+
   const expiresAt =
-    parsedOptions.ttlSeconds === null ? null : new Date(now.getTime() + parsedOptions.ttlSeconds * 1000).toISOString();
+    parsedOptions.ttlSeconds === null
+      ? null
+      : new Date(now.getTime() + parsedOptions.ttlSeconds * 1000).toISOString();
+
   const metadata: ArtifactMetadata = {
     id,
     filename: upload.displayFilename,
@@ -779,6 +1015,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   if (!stored || stored.metadata.deletedAt) {
     return notFound();
   }
+
   const { metadata } = stored;
 
   if (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt)) {
@@ -786,7 +1023,13 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   }
 
   if (artifactHead(metadata).manifest) {
-    return json({ error: "This artifact uses a file manifest. Update it with the staged upload API; include --assets when updating an HTML bundle from another machine." }, 400);
+    return json(
+      {
+        error:
+          "This artifact uses a file manifest. Update it with the staged upload API; include --assets when updating an HTML bundle from another machine.",
+      },
+      400,
+    );
   }
 
   const upload = await readHtmlUpload(request, env);
@@ -804,7 +1047,10 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     const ttlValue = upload.form.get("ttlSeconds");
     ttlSeconds = ttlValue === null ? undefined : parseUpdateTtl(ttlValue);
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "Invalid artifact attributes." }, 400);
+    return json(
+      { error: error instanceof Error ? error.message : "Invalid artifact attributes." },
+      400,
+    );
   }
 
   const mergedAttributes = {
@@ -823,6 +1069,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     }
 
     const updatedAt = new Date().toISOString();
+
     const nextMetadata: ArtifactMetadata = {
       ...metadata,
       filename: upload.displayFilename,
@@ -842,13 +1089,15 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   const updatedAt = new Date().toISOString();
   const revision = metadata.revision + 1;
   const nextContentKey = versionedHtmlKey(id, revision);
+
   const nextVersion: ArtifactVersion = {
-    version: (metadata.versions[metadata.versions.length - 1] as ArtifactVersion).version + 1,
+    version: lastArtifactVersion(metadata.versions).version + 1,
     contentKey: nextContentKey,
     contentSha256,
     size: upload.file.size,
     createdAt: updatedAt,
   };
+
   const nextMetadata: ArtifactMetadata = {
     ...metadata,
     filename: upload.displayFilename,
@@ -876,6 +1125,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
       await env.ARTIFACTS.delete(nextContentKey).catch((cleanupError) => {
         console.error("Failed to clean up conflicted artifact content.", cleanupError);
       });
+
       return conflict();
     }
   } catch (error) {
@@ -915,7 +1165,11 @@ async function updateArtifactTtl(request: Request, env: Env, id: string): Promis
     return json({ error: "TTL update body must be valid JSON." }, 400);
   }
 
-  if (!isPlainObject(body) || !Object.hasOwn(body, "ttlSeconds") || Object.keys(body).length !== 1) {
+  if (
+    !isPlainObject(body) ||
+    !Object.hasOwn(body, "ttlSeconds") ||
+    Object.keys(body).length !== 1
+  ) {
     return json({ error: "TTL update body must contain only ttlSeconds." }, 400);
   }
 
@@ -932,6 +1186,7 @@ async function updateArtifactTtl(request: Request, env: Env, id: string): Promis
   }
 
   const updatedAt = new Date().toISOString();
+
   const nextMetadata: ArtifactMetadata = {
     ...stored.metadata,
     updatedAt,
@@ -952,16 +1207,16 @@ async function listArtifacts(request: Request, env: Env): Promise<Response> {
   }
 
   const artifacts: ListedArtifact[] = (await readAllArtifactMetadata(env)).map((artifact) => ({
-        id: artifact.id,
-        filename: artifact.filename,
-        createdAt: artifact.createdAt,
-        expiresAt: artifact.expiresAt,
-        sandbox: artifact.sandbox,
-        size: artifact.size,
-        revision: artifact.revision,
-        contentSha256: artifact.contentSha256,
-        attributes: artifact.attributes,
-      }));
+    id: artifact.id,
+    filename: artifact.filename,
+    createdAt: artifact.createdAt,
+    expiresAt: artifact.expiresAt,
+    sandbox: artifact.sandbox,
+    size: artifact.size,
+    revision: artifact.revision,
+    contentSha256: artifact.contentSha256,
+    attributes: artifact.attributes,
+  }));
 
   artifacts.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 
@@ -982,6 +1237,7 @@ async function reissueArtifact(request: Request, env: Env, id: string): Promise<
   if (!stored || stored.metadata.deletedAt) {
     return notFound();
   }
+
   const { metadata } = stored;
 
   if (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt)) {
@@ -992,6 +1248,7 @@ async function reissueArtifact(request: Request, env: Env, id: string): Promise<
   const tokenHash = await sha256Hex(token);
   const encryptedToken = await encryptViewerToken(env, id, token);
   const { encryptedToken: _previousEncryptedToken, ...metadataWithoutEncryptedToken } = metadata;
+
   const nextMetadata: ArtifactMetadata = {
     ...metadataWithoutEncryptedToken,
     tokenHash,
@@ -1048,7 +1305,12 @@ async function rollbackArtifact(request: Request, env: Env, id: string): Promise
     return json({ error: "Rollback body must contain only version." }, 400);
   }
 
-  if (typeof body.version !== "number" || !Number.isSafeInteger(body.version) || body.version <= 0) {
+  if (
+    // oxlint-disable-next-line anti-slop/no-runtime-typeof -- Validate the untrusted rollback request before using its version.
+    typeof body.version !== "number" ||
+    !Number.isSafeInteger(body.version) ||
+    body.version <= 0
+  ) {
     return json({ error: "Rollback version must be a positive integer." }, 400);
   }
 
@@ -1063,6 +1325,7 @@ async function rollbackArtifact(request: Request, env: Env, id: string): Promise
   }
 
   const updatedAt = new Date().toISOString();
+
   const nextMetadata: ArtifactMetadata = {
     ...metadata,
     updatedAt,
@@ -1118,7 +1381,10 @@ async function cleanupExpiredArtifacts(env: Env): Promise<void> {
   let cursor: string | undefined;
 
   do {
-    const options: R2ListOptions = cursor ? { cursor, prefix: "artifacts/" } : { prefix: "artifacts/" };
+    const options: R2ListOptions = cursor
+      ? { cursor, prefix: "artifacts/" }
+      : { prefix: "artifacts/" };
+
     const result = await env.ARTIFACTS.list(options);
 
     cursor = result.truncated ? result.cursor : undefined;
@@ -1143,11 +1409,13 @@ async function cleanupExpiredArtifact(env: Env, key: string): Promise<void> {
   if (!id) {
     return;
   }
+
   const stored = await readStoredMetadata(env, id);
 
   if (!stored) {
     return;
   }
+
   const { metadata } = stored;
 
   if (!metadata.deletedAt && (!metadata.expiresAt || Date.now() < Date.parse(metadata.expiresAt))) {
@@ -1179,7 +1447,12 @@ async function cleanupOrphanedContent(env: Env, object: R2Object): Promise<void>
 
   const stored = await readStoredMetadata(env, id);
 
-  const referencedKeys = new Set(stored?.metadata.versions.flatMap((version) => [version.contentKey, ...(version.manifest?.files.map(f => f.objectKey) ?? [])]) ?? []);
+  const referencedKeys = new Set(
+    stored?.metadata.versions.flatMap((version) => [
+      version.contentKey,
+      ...(version.manifest?.files.map((f) => f.objectKey) ?? []),
+    ]) ?? [],
+  );
 
   if (stored) {
     referencedKeys.add(stored.metadata.contentKey);
@@ -1280,15 +1553,19 @@ const VIEWER_AGENT_ICONS: Record<ViewerAgentBrand, string> = {
     '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>',
   codex:
     '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>',
-  opencode: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 24H2V0h20zM17 4.8H7v14.4h10z"/></svg>',
+  opencode:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 24H2V0h20zM17 4.8H7v14.4h10z"/></svg>',
 };
 
 function viewerAgentBrand(agent: string): ViewerAgentBrand | null {
   const normalized = agent.toLowerCase();
 
   if (normalized.includes("claude")) return "claude";
+
   if (normalized.includes("codex")) return "codex";
+
   if (normalized.includes("opencode")) return "opencode";
+
   if (normalized === "amp" || normalized.includes("ampcode")) return "amp";
 
   return null;
@@ -1309,25 +1586,38 @@ function viewerAgentHtml(agent: string | undefined): string {
   return `<span class="pb-agent-name" title="Publishing agent">${escapedAgent}</span>`;
 }
 
-function scrubberBarHtml(id: string, token: string, metadata: ArtifactMetadata, pinnedVersion: number | null): string {
+function scrubberBarHtml(
+  id: string,
+  token: string,
+  metadata: ArtifactMetadata,
+  pinnedVersion: number | null,
+): string {
   const current = artifactHead(metadata).version;
   const viewed = pinnedVersion ?? current;
   const basePath = `/p/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
-  const versionHref = (version: number): string => (version === current ? basePath : `${basePath}/v/${version}`);
+
+  const versionHref = (version: number): string =>
+    version === current ? basePath : `${basePath}/v/${version}`;
+
   const newestFirst = [...metadata.versions].reverse();
+
   const menuItems = newestFirst
     .map(
       (entry) =>
         `<a${entry.version === viewed ? ' class="sel"' : ""} href="${escapeHtml(versionHref(entry.version))}">v${entry.version} · ${escapeHtml(entry.createdAt.slice(0, 10))}</a>`,
     )
     .join("");
+
   const options = newestFirst
     .map(
       (entry) =>
         `<option value="${escapeHtml(versionHref(entry.version))}"${entry.version === viewed ? " selected" : ""}>v${entry.version}</option>`,
     )
     .join("");
-  const liveDot = pinnedVersion === null ? `<i class="pb-live" title="Follows updates automatically"></i>` : "";
+
+  const liveDot =
+    pinnedVersion === null ? `<i class="pb-live" title="Follows updates automatically"></i>` : "";
+
   const dropdown = `<span class="pb-dd" id="pagebin-dd"><button class="trigger" type="button">v<span id="pagebin-vnum">${viewed}</span></button><div class="menu">${menuItems}</div><select aria-label="Version">${options}</select></span>`;
   const copy = `<button class="pb-copy" id="pagebin-copy" type="button" title="Copy link to this version">${VIEWER_COPY_ICON}</button>`;
   const agent = viewerAgentHtml(metadata.attributes.agent);
@@ -1390,7 +1680,12 @@ if (pagebinDd) {
 `;
 }
 
-async function serveViewer(env: Env, requestUrl: string, id: string, token: string): Promise<Response> {
+async function serveViewer(
+  env: Env,
+  requestUrl: string,
+  id: string,
+  token: string,
+): Promise<Response> {
   const metadata = await readAuthorizedMetadata(env, id, token);
 
   if (!metadata) {
@@ -1398,10 +1693,15 @@ async function serveViewer(env: Env, requestUrl: string, id: string, token: stri
   }
 
   const url = new URL(requestUrl);
-  const rawPath = artifactHead(metadata).manifest ? manifestRawPath(id, token, artifactHead(metadata)) : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+
+  const rawPath = artifactHead(metadata).manifest
+    ? manifestRawPath(id, token, artifactHead(metadata))
+    : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+
   const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
   const sandbox = iframeSandboxAttribute(metadata.sandbox);
   const version = metadata.revision;
+
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1457,7 +1757,8 @@ pagebinSchedule();
 </html>`;
 
   return text(html, 200, {
-    "Content-Security-Policy": "default-src 'none'; connect-src 'self'; frame-src 'self'; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy":
+      "default-src 'none'; connect-src 'self'; frame-src 'self'; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     "Content-Type": "text/html; charset=utf-8",
     Link: `<${url.origin}/robots.txt>; rel="robots"`,
   });
@@ -1472,15 +1773,22 @@ async function servePinnedViewer(
 ): Promise<Response> {
   const metadata = await readAuthorizedMetadata(env, id, token);
   const version = parseArtifactVersionNumber(versionValue);
-  const entry = version === null ? null : metadata?.versions.find((candidate) => candidate.version === version);
+
+  const entry =
+    version === null ? null : metadata?.versions.find((candidate) => candidate.version === version);
 
   if (!metadata || !entry) {
     return siteNotFound();
   }
 
   const url = new URL(requestUrl);
-  const rawPath = entry.manifest ? manifestRawPath(id, token, entry) : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}`;
+
+  const rawPath = entry.manifest
+    ? manifestRawPath(id, token, entry)
+    : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}`;
+
   const sandbox = iframeSandboxAttribute(metadata.sandbox);
+
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1501,7 +1809,8 @@ ${scrubberBarHtml(id, token, metadata, entry.version)}${contentViewer(metadata, 
 </html>`;
 
   return text(html, 200, {
-    "Content-Security-Policy": "default-src 'none'; connect-src 'self'; frame-src 'self'; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy":
+      "default-src 'none'; connect-src 'self'; frame-src 'self'; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     "Content-Type": "text/html; charset=utf-8",
     Link: `<${url.origin}/robots.txt>; rel="robots"`,
   });
@@ -1547,7 +1856,9 @@ async function servePinnedRaw(
 ): Promise<Response> {
   const metadata = await readAuthorizedMetadata(env, id, token);
   const version = parseArtifactVersionNumber(versionValue);
-  const entry = version === null ? null : metadata?.versions.find((candidate) => candidate.version === version);
+
+  const entry =
+    version === null ? null : metadata?.versions.find((candidate) => candidate.version === version);
 
   if (!metadata || !entry) {
     return siteNotFound();
@@ -1568,7 +1879,11 @@ async function servePinnedRaw(
   });
 }
 
-async function readAuthorizedMetadata(env: Env, id: string, token: string): Promise<ArtifactMetadata | null> {
+async function readAuthorizedMetadata(
+  env: Env,
+  id: string,
+  token: string,
+): Promise<ArtifactMetadata | null> {
   if (!isValidId(id) || !token) {
     return null;
   }
@@ -1579,6 +1894,8 @@ async function readAuthorizedMetadata(env: Env, id: string, token: string): Prom
     return null;
   }
 
+  // SAFETY: This private R2 metadata key is written by the Worker using ArtifactMetadata;
+  // normalizeMetadata reconciles legacy fields before consumers use them.
   const metadata = normalizeMetadata(JSON.parse(await object.text()) as ArtifactMetadata);
 
   if (metadata.deletedAt || (metadata.expiresAt && Date.now() >= Date.parse(metadata.expiresAt))) {
@@ -1611,7 +1928,10 @@ async function isAuthorized(request: Request, env: Env): Promise<boolean> {
 async function readHtmlUpload(
   request: Request,
   env: Env,
-): Promise<{ displayFilename: string; file: UploadedFile; form: FormData; html: string } | { error: string; status: 400 | 413 | 415 }> {
+): Promise<
+  | { displayFilename: string; file: UploadedFile; form: FormData; html: string }
+  | { error: string; status: 400 | 413 | 415 }
+> {
   const maxBytes = readMaxBytes(env);
   const contentLength = readContentLength(request);
 
@@ -1694,7 +2014,9 @@ async function readMultipartForm(
 
 function parsePublishOptions(
   form: FormData,
-): { ttlSeconds: number | null; sandbox: SandboxMode; attributes: ArtifactAttributes } | { error: string } {
+):
+  | { ttlSeconds: number | null; sandbox: SandboxMode; attributes: ArtifactAttributes }
+  | { error: string } {
   try {
     return {
       sandbox: parseSandbox(form.get("sandbox")),
@@ -1708,6 +2030,8 @@ function parsePublishOptions(
   }
 }
 
+// These functions validate multipart/JSON input and return concrete domain values.
+// oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type
 function parseArtifactAttributes(form: FormData): ArtifactAttributes {
   const value = form.get("attributes");
 
@@ -1750,6 +2074,7 @@ function parseArtifactAttributes(form: FormData): ArtifactAttributes {
     }
   }
 
+  // SAFETY: Every included attribute is validated above; the filter only removes absent values.
   return Object.fromEntries(
     Object.entries({
       title: readOptionalAttribute(parsed, "title", 200),
@@ -1765,7 +2090,11 @@ function parseArtifactAttributes(form: FormData): ArtifactAttributes {
   ) as ArtifactAttributes;
 }
 
-function readOptionalAttribute(object: Record<string, unknown>, key: string, maxLength: number): string | undefined {
+function readOptionalAttribute(
+  object: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string | undefined {
   const value = object[key];
 
   if (value === undefined || value === null || value === "") {
@@ -1784,7 +2113,14 @@ function readArtifactType(value: unknown): ArtifactType | undefined {
     return undefined;
   }
 
-  if (value === "plan" || value === "report" || value === "review" || value === "explainer" || value === "implementation-log" || value === "other") {
+  if (
+    value === "plan" ||
+    value === "report" ||
+    value === "review" ||
+    value === "explainer" ||
+    value === "implementation-log" ||
+    value === "other"
+  ) {
     return value;
   }
 
@@ -1807,6 +2143,7 @@ function readDisplayFilename(form: FormData, fallback: string): string {
 
 function normalizeDisplayFilename(value: string): string {
   const normalized = value.trim().replaceAll("\0", "").replaceAll("\\", "/");
+
   const filename = normalized
     .split("/")
     .filter((part) => part.length > 0)
@@ -1857,12 +2194,18 @@ function parseUpdateTtl(value: unknown): number | null | undefined {
   return parsed;
 }
 
-function updatedExpiration(current: string | null, ttlSeconds: number | null | undefined, updatedAt: string): string | null {
+function updatedExpiration(
+  current: string | null,
+  ttlSeconds: number | null | undefined,
+  updatedAt: string,
+): string | null {
   if (ttlSeconds === undefined) {
     return current;
   }
 
-  return ttlSeconds === null ? null : new Date(Date.parse(updatedAt) + ttlSeconds * 1000).toISOString();
+  return ttlSeconds === null
+    ? null
+    : new Date(Date.parse(updatedAt) + ttlSeconds * 1000).toISOString();
 }
 
 function updatePayload(metadata: ArtifactMetadata): UpdatePayload {
@@ -1894,7 +2237,9 @@ function parseSandbox(value: unknown): SandboxMode {
 
 async function readUtf8File(file: UploadedFile): Promise<string | null> {
   try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(await file.arrayBuffer());
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
+      await file.arrayBuffer(),
+    );
   } catch {
     return null;
   }
@@ -1912,6 +2257,8 @@ function isUploadedFile(value: unknown): value is UploadedFile {
     typeof value.arrayBuffer === "function"
   );
 }
+
+// oxlint-enable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type
 
 function readMaxBytes(env: Env): number {
   const parsed = Number(env.PAGEBIN_MAX_BYTES ?? DEFAULT_MAX_BYTES);
@@ -1963,7 +2310,10 @@ async function deleteArtifactContent(env: Env, id: string): Promise<void> {
   let cursor: string | undefined;
 
   do {
-    const options: R2ListOptions = cursor ? { cursor, prefix: `artifacts/${id}/` } : { prefix: `artifacts/${id}/` };
+    const options: R2ListOptions = cursor
+      ? { cursor, prefix: `artifacts/${id}/` }
+      : { prefix: `artifacts/${id}/` };
+
     const result = await env.ARTIFACTS.list(options);
 
     cursor = result.truncated ? result.cursor : undefined;
@@ -1991,10 +2341,15 @@ function publicOrigin(request: Request, env: Env): string {
   }
 
   const url = new URL(configured);
+
   return url.origin;
 }
 
-async function encryptViewerToken(env: Env, id: string, token: string): Promise<EncryptedViewerToken | null> {
+async function encryptViewerToken(
+  env: Env,
+  id: string,
+  token: string,
+): Promise<EncryptedViewerToken | null> {
   const key = await importCapabilityKey(env);
 
   if (!key) {
@@ -2003,6 +2358,7 @@ async function encryptViewerToken(env: Env, id: string, token: string): Promise<
 
   const keyVersion = env.PAGEBIN_CAPABILITY_KEY_VERSION?.trim() || "v1";
   const iv = crypto.getRandomValues(new Uint8Array(12));
+
   const ciphertext = await crypto.subtle.encrypt(
     {
       name: "AES-GCM",
@@ -2020,7 +2376,11 @@ async function encryptViewerToken(env: Env, id: string, token: string): Promise<
   };
 }
 
-async function decryptViewerToken(env: Env, id: string, encrypted: EncryptedViewerToken): Promise<string | null> {
+async function decryptViewerToken(
+  env: Env,
+  id: string,
+  encrypted: EncryptedViewerToken,
+): Promise<string | null> {
   const configuredVersion = env.PAGEBIN_CAPABILITY_KEY_VERSION?.trim() || "v1";
 
   if (encrypted.keyVersion !== configuredVersion) {
@@ -2084,7 +2444,11 @@ function base64Url(bytes: Uint8Array): string {
 }
 
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
-  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const padded = value
+    .replaceAll("-", "+")
+    .replaceAll("_", "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
+
   const binary = atob(padded);
   const bytes = new Uint8Array(binary.length);
 
@@ -2137,11 +2501,13 @@ function isValidId(id: string): boolean {
 }
 
 function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
-  const attributes = { ...(metadata.attributes ?? {}) } as ArtifactAttributes & Record<string, unknown>;
-  delete attributes.status;
+  const attributes = { ...metadata.attributes };
+
+  if ("status" in attributes) delete attributes.status;
   const updatedAt = metadata.updatedAt ?? metadata.createdAt;
   const contentKey = metadata.contentKey ?? htmlKey(metadata.id);
   const contentSha256 = metadata.contentSha256 ?? null;
+
   let versions =
     Array.isArray(metadata.versions) && metadata.versions.length > 0
       ? metadata.versions
@@ -2154,9 +2520,10 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
             createdAt: updatedAt,
           },
         ];
+
   if (!versions.some((entry) => entry.contentKey === contentKey)) {
     versions = appendArtifactVersion(versions, {
-      version: (versions[versions.length - 1] as ArtifactVersion).version + 1,
+      version: lastArtifactVersion(versions).version + 1,
       contentKey,
       contentSha256,
       size: metadata.size,
@@ -2165,11 +2532,13 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
   }
 
   const storedCurrent = versions.find((entry) => entry.version === metadata.currentVersion);
+
   const currentEntry =
     storedCurrent && storedCurrent.contentKey === contentKey
       ? storedCurrent
       : ([...versions].reverse().find((entry) => entry.contentKey === contentKey) ??
-        (versions[versions.length - 1] as ArtifactVersion));
+        lastArtifactVersion(versions));
+
   const currentVersion = currentEntry.version;
 
   return {
@@ -2184,6 +2553,14 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
   };
 }
 
+function lastArtifactVersion(versions: ArtifactVersion[]): ArtifactVersion {
+  const version = versions.at(-1);
+
+  if (!version) throw new Error("Artifact content history is empty.");
+
+  return version;
+}
+
 function artifactHead(metadata: ArtifactMetadata): ArtifactVersion {
   const head =
     metadata.versions.find((entry) => entry.version === metadata.currentVersion) ??
@@ -2196,7 +2573,10 @@ function artifactHead(metadata: ArtifactMetadata): ArtifactVersion {
   return head;
 }
 
-function appendArtifactVersion(versions: ArtifactVersion[], version: ArtifactVersion): ArtifactVersion[] {
+function appendArtifactVersion(
+  versions: ArtifactVersion[],
+  version: ArtifactVersion,
+): ArtifactVersion[] {
   return [...versions, version].slice(-MAX_ARTIFACT_VERSIONS);
 }
 
@@ -2230,6 +2610,8 @@ async function readStoredMetadata(env: Env, id: string): Promise<StoredArtifactM
   }
 
   return {
+    // SAFETY: This private metadata key is Worker-owned and written using ArtifactMetadata;
+    // legacy fields are reconciled by normalizeMetadata.
     metadata: normalizeMetadata(JSON.parse(await object.text()) as ArtifactMetadata),
     etag: object.etag,
   };
@@ -2261,10 +2643,14 @@ function tombstoneMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
 }
 
 function escapeHtml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
-function json(payload: unknown, status = 200): Response {
+function json<T>(payload: T, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     status,
     headers: secureHeaders({
@@ -2288,7 +2674,8 @@ function notFound(): Response {
 
 function siteNotFound(): Response {
   return text(NOT_FOUND_HTML, 404, {
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    "Content-Security-Policy":
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
     "Content-Type": "text/html; charset=utf-8",
   });
 }
@@ -2323,174 +2710,449 @@ interface UploadSession {
   ttlSeconds?: number | null | undefined;
   attributes: ArtifactAttributes;
 }
-function sessionKey(id: string, session: string): string { return `artifacts/${id}/content/session-${session}.json`; }
+
+function sessionKey(id: string, session: string): string {
+  return `artifacts/${id}/content/session-${session}.json`;
+}
+
 function manifestRawPath(id: string, token: string, entry: ArtifactVersion): string {
   return `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}/${filePathUrl(entry.manifest!.entrypoint)}`;
 }
-function contentViewer(metadata: ArtifactMetadata, entry: ArtifactVersion, path: string, sandbox: string): string {
-  const file = entry.manifest?.files.find(f => f.path === entry.manifest?.entrypoint);
-  if (!file || contentKind(file.contentType) === 'document') return `<iframe id="pagebin-frame"${sandbox}${iframePermissionsAttribute(metadata.sandbox)} src="${escapeHtml(path)}" title="${escapeHtml(entry.filename ?? metadata.filename)}"></iframe>`;
-  if (file.contentType === 'application/pdf') {
+
+function contentViewer(
+  metadata: ArtifactMetadata,
+  entry: ArtifactVersion,
+  path: string,
+  sandbox: string,
+): string {
+  const file = entry.manifest?.files.find((f) => f.path === entry.manifest?.entrypoint);
+
+  if (!file || contentKind(file.contentType) === "document")
+    return `<iframe id="pagebin-frame"${sandbox}${iframePermissionsAttribute(metadata.sandbox)} src="${escapeHtml(path)}" title="${escapeHtml(entry.filename ?? metadata.filename)}"></iframe>`;
+
+  if (file.contentType === "application/pdf") {
     // This frame contains our trusted reader, never uploaded HTML. PDF scripts are disabled.
     const reader = `/pdfjs/web/viewer.html?file=${encodeURIComponent(path)}#zoom=page-width`;
+
     return `<iframe id="pagebin-frame" sandbox="allow-scripts allow-same-origin allow-downloads allow-modals allow-popups" src="${escapeHtml(reader)}" title="${escapeHtml(entry.filename ?? metadata.filename)}" allow="fullscreen"></iframe>`;
   }
+
   const src = escapeHtml(path);
-  const download = src.replace(/^\/raw\//, '/download/');
+  const download = src.replace(/^\/raw\//, "/download/");
   const kind = contentKind(file.contentType);
-  const media = kind === 'image' ? `<a href="${src}" target="_blank" rel="noreferrer"><img src="${src}" alt="${escapeHtml(metadata.attributes.title ?? entry.filename ?? metadata.filename)}"></a>` :
-    kind === 'video' || kind === 'audio' ? `<${kind} controls playsinline preload="metadata" src="${src}"></${kind}><p>If this format cannot play in your browser, download the original.</p>` : `<h1>${escapeHtml(entry.filename ?? metadata.filename)}</h1>`;
+
+  const media =
+    kind === "image"
+      ? `<a href="${src}" target="_blank" rel="noreferrer"><img src="${src}" alt="${escapeHtml(metadata.attributes.title ?? entry.filename ?? metadata.filename)}"></a>`
+      : kind === "video" || kind === "audio"
+        ? `<${kind} controls playsinline preload="metadata" src="${src}"></${kind}><p>If this format cannot play in your browser, download the original.</p>`
+        : `<h1>${escapeHtml(entry.filename ?? metadata.filename)}</h1>`;
+
   return `<main class="media-view">${media}<p>${escapeHtml(file.contentType)} · ${(file.size / 1048576).toFixed(2)} MiB</p><a href="${download}">Download original</a></main>`;
 }
-async function serveFile(request: Request, env: Env, metadata: ArtifactMetadata, entry: ArtifactVersion, encodedPath: string | undefined, download: boolean): Promise<Response> {
+
+async function serveFile(
+  request: Request,
+  env: Env,
+  metadata: ArtifactMetadata,
+  entry: ArtifactVersion,
+  encodedPath: string | undefined,
+  download: boolean,
+): Promise<Response> {
   let path: string;
-  try { path = encodedPath === undefined ? entry.manifest?.entrypoint ?? metadata.filename : decodeURIComponent(encodedPath); }
-  catch { return siteNotFound(); }
-  if (!validPath(path)) return siteNotFound();
-  const file = entry.manifest ? entry.manifest.files.find(f => f.path === path) : { objectKey: entry.contentKey, contentType: 'text/html; charset=utf-8', size: entry.size, path };
-  if (!file) return siteNotFound();
-  // An entry document must have a canonical filename URL so relative references stay version-pinned.
-  if (!encodedPath && entry.manifest && !download && file.contentType.startsWith('text/html')) {
-    const url = new URL(request.url);
-    url.pathname = manifestRawPath(metadata.id, url.pathname.split('/')[3]!, entry);
-    return new Response(null, { status: 307, headers: secureHeaders({ Location: url.toString() }) });
+
+  try {
+    path =
+      encodedPath === undefined
+        ? (entry.manifest?.entrypoint ?? metadata.filename)
+        : decodeURIComponent(encodedPath);
+  } catch {
+    return siteNotFound();
   }
+
+  if (!validPath(path)) return siteNotFound();
+
+  const file = entry.manifest
+    ? entry.manifest.files.find((f) => f.path === path)
+    : {
+        objectKey: entry.contentKey,
+        contentType: "text/html; charset=utf-8",
+        size: entry.size,
+        path,
+      };
+
+  if (!file) return siteNotFound();
+
+  // An entry document must have a canonical filename URL so relative references stay version-pinned.
+  if (!encodedPath && entry.manifest && !download && file.contentType.startsWith("text/html")) {
+    const url = new URL(request.url);
+    url.pathname = manifestRawPath(metadata.id, url.pathname.split("/")[3]!, entry);
+
+    return new Response(null, {
+      status: 307,
+      headers: secureHeaders({ Location: url.toString() }),
+    });
+  }
+
   const head = await env.ARTIFACTS.head(file.objectKey);
+
   if (!head) return siteNotFound();
-  const safeInline = file.contentType === 'application/pdf' || /^(image\/(png|jpeg|gif|webp|avif|svg\+xml)|video\/(mp4|webm|quicktime)|audio\/(mpeg|wav|ogg|mp4))$/.test(file.contentType) || /^(text\/(html|css|javascript|plain))(;|$)/.test(file.contentType);
+
+  const safeInline =
+    file.contentType === "application/pdf" ||
+    /^(image\/(png|jpeg|gif|webp|avif|svg\+xml)|video\/(mp4|webm|quicktime)|audio\/(mpeg|wav|ogg|mp4))$/.test(
+      file.contentType,
+    ) ||
+    /^(text\/(html|css|javascript|plain))(;|$)/.test(file.contentType);
+
   const headers = secureHeaders({
-    'Content-Type': safeInline ? file.contentType : 'application/octet-stream',
-    'Content-Disposition': `${download || !safeInline ? 'attachment' : 'inline'}; filename="download"; filename*=UTF-8''${encodeURIComponent(path.split('/').pop()!).replaceAll("'", '%27')}`,
-    'Content-Length': String(head.size), 'Accept-Ranges': 'bytes', ETag: head.httpEtag,
-    'Content-Security-Policy': file.contentType.startsWith('text/html') ? rawSandboxCsp(metadata.sandbox) : "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+    "Content-Type": safeInline ? file.contentType : "application/octet-stream",
+    "Content-Disposition": `${download || !safeInline ? "attachment" : "inline"}; filename="download"; filename*=UTF-8''${encodeURIComponent(path.split("/").pop()!).replaceAll("'", "%27")}`,
+    "Content-Length": String(head.size),
+    "Accept-Ranges": "bytes",
+    ETag: head.httpEtag,
+    "Content-Security-Policy": file.contentType.startsWith("text/html")
+      ? rawSandboxCsp(metadata.sandbox)
+      : "sandbox; default-src 'none'; style-src 'unsafe-inline'",
   });
-  if (request.method === 'HEAD') return new Response(null, { headers });
+
+  if (request.method === "HEAD") return new Response(null, { headers });
   let range: { offset: number; length: number } | undefined;
-  const requested = request.headers.get('Range');
-  const ifRange = request.headers.get('If-Range');
+  const requested = request.headers.get("Range");
+  const ifRange = request.headers.get("If-Range");
+
   if (requested && (!ifRange || ifRange === head.httpEtag)) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(requested);
+
     if (match && (match[1] || match[2])) {
       const start = match[1] ? Number(match[1]) : Math.max(0, head.size - Number(match[2]));
       const end = match[1] && match[2] ? Math.min(head.size - 1, Number(match[2])) : head.size - 1;
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= head.size) {
-        headers.set('Content-Range', `bytes */${head.size}`); headers.set('Content-Length', '0');
+
+      if (
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        start > end ||
+        start >= head.size
+      ) {
+        headers.set("Content-Range", `bytes */${head.size}`);
+        headers.set("Content-Length", "0");
+
         return new Response(null, { status: 416, headers });
       }
+
       range = { offset: start, length: end - start + 1 };
-      headers.set('Content-Range', `bytes ${start}-${end}/${head.size}`);
-      headers.set('Content-Length', String(range.length));
+      headers.set("Content-Range", `bytes ${start}-${end}/${head.size}`);
+      headers.set("Content-Length", String(range.length));
     }
   }
+
   const object = await env.ARTIFACTS.get(file.objectKey, range ? { range } : undefined);
+
   if (!object) return siteNotFound();
+
   return new Response(object.body, { status: range ? 206 : 200, headers });
 }
+
+// Upload JSON is validated here before constructing ContentFile and UploadSession values.
+// oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unsafe-dictionary-type
 async function uploadJson(request: Request): Promise<Record<string, unknown>> {
-  const length = Number(request.headers.get('Content-Length'));
-  if (!Number.isSafeInteger(length) || length <= 0 || length > 256 * 1024) throw new Error('Upload metadata must be at most 256 KiB with Content-Length.');
+  const length = Number(request.headers.get("Content-Length"));
+
+  if (!Number.isSafeInteger(length) || length <= 0 || length > 256 * 1024)
+    throw new Error("Upload metadata must be at most 256 KiB with Content-Length.");
   const body: unknown = await request.json();
-  if (!isPlainObject(body)) throw new Error('Expected a JSON object.');
+
+  if (!isPlainObject(body)) throw new Error("Expected a JSON object.");
+
   return body;
 }
+
 async function routeUpload(request: Request, env: Env, url: URL): Promise<Response> {
-  if (url.pathname === '/api/uploads' && request.method === 'POST') {
+  if (url.pathname === "/api/uploads" && request.method === "POST") {
     let body: Record<string, unknown>;
-    try { body = await uploadJson(request); } catch (error) { return json({ error: String(error) }, 400); }
+
+    try {
+      body = await uploadJson(request);
+    } catch (error) {
+      return json({ error: String(error) }, 400);
+    }
+
     const id = body.id === undefined ? randomBase64Url(16) : String(body.id);
+
     if (!isValidId(id)) return notFound();
     const stored = body.id === undefined ? null : await readStoredMetadata(env, id);
-    if (body.id !== undefined && (!stored || stored.metadata.deletedAt || (stored.metadata.expiresAt && Date.parse(stored.metadata.expiresAt) <= Date.now()))) return notFound();
+
+    if (
+      body.id !== undefined &&
+      (!stored ||
+        stored.metadata.deletedAt ||
+        (stored.metadata.expiresAt && Date.parse(stored.metadata.expiresAt) <= Date.now()))
+    )
+      return notFound();
     const form = new FormData();
-    form.set('sandbox', String(body.sandbox ?? stored?.metadata.sandbox ?? 'standard'));
-    if (body.attributes !== undefined) form.set('attributes', JSON.stringify(body.attributes));
+    form.set("sandbox", String(body.sandbox ?? stored?.metadata.sandbox ?? "standard"));
+
+    if (body.attributes !== undefined) form.set("attributes", JSON.stringify(body.attributes));
     // Parse lifetime with the existing update semantics, including explicit null = never.
     let ttlSeconds: number | null | undefined;
     let attributes: ArtifactAttributes;
     let sandbox: SandboxMode;
+
     try {
-      ttlSeconds = body.ttlSeconds === undefined ? undefined : parseUpdateTtl(body.ttlSeconds === null ? 'never' : String(body.ttlSeconds));
+      ttlSeconds =
+        body.ttlSeconds === undefined
+          ? undefined
+          : parseUpdateTtl(body.ttlSeconds === null ? "never" : String(body.ttlSeconds));
       attributes = parseArtifactAttributes(form);
       const parsed = parsePublishOptions(form);
-      if ('error' in parsed) throw new Error(parsed.error);
+
+      if ("error" in parsed) throw new Error(parsed.error);
       sandbox = stored?.metadata.sandbox ?? parsed.sandbox;
-    } catch (error) { return json({ error: String(error) }, 400); }
+    } catch (error) {
+      return json({ error: String(error) }, 400);
+    }
+
     const configuredLimit = Number(env.PAGEBIN_MAX_FILE_BYTES ?? FILE_LIMIT);
-    const maxFileBytes = Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : FILE_LIMIT;
+
+    const maxFileBytes =
+      Number.isSafeInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : FILE_LIMIT;
+
     const files = body.files;
-    if (!Array.isArray(files) || files.length === 0 || files.length > FILE_COUNT_LIMIT || typeof body.entrypoint !== 'string' || typeof body.filename !== 'string' || !validPath(body.filename) || body.filename.includes('/')) return json({ error: 'Invalid file manifest.' }, 400);
+
+    if (
+      !Array.isArray(files) ||
+      files.length === 0 ||
+      files.length > FILE_COUNT_LIMIT ||
+      typeof body.entrypoint !== "string" ||
+      typeof body.filename !== "string" ||
+      !validPath(body.filename) ||
+      body.filename.includes("/")
+    )
+      return json({ error: "Invalid file manifest." }, 400);
     const paths = new Set<string>();
     let total = 0;
     const valid: ContentFile[] = [];
+
     for (const value of files) {
-      if (!isPlainObject(value) || typeof value.path !== 'string' || !validPath(value.path) || paths.has(value.path) || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256) || typeof value.size !== 'number' || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > maxFileBytes) return json({ error: 'Invalid path, checksum, duplicate file, or file size limit exceeded.' }, 400);
-      paths.add(value.path); total += value.size;
-      valid.push({ path: value.path, sha256: value.sha256, size: value.size, contentType: contentType(value.path) });
+      if (
+        !isPlainObject(value) ||
+        typeof value.path !== "string" ||
+        !validPath(value.path) ||
+        paths.has(value.path) ||
+        typeof value.sha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(value.sha256) ||
+        typeof value.size !== "number" ||
+        !Number.isSafeInteger(value.size) ||
+        value.size < 0 ||
+        value.size > maxFileBytes
+      )
+        return json(
+          { error: "Invalid path, checksum, duplicate file, or file size limit exceeded." },
+          400,
+        );
+      paths.add(value.path);
+      total += value.size;
+      valid.push({
+        path: value.path,
+        sha256: value.sha256,
+        size: value.size,
+        contentType: contentType(value.path),
+      });
     }
-    if (total > BUNDLE_LIMIT || !paths.has(body.entrypoint)) return json({ error: 'Bundle exceeds 250 MiB or entrypoint is missing.' }, 400);
+
+    if (total > BUNDLE_LIMIT || !paths.has(body.entrypoint))
+      return json({ error: "Bundle exceeds 250 MiB or entrypoint is missing." }, 400);
     const sessionId = randomBase64Url(16);
-    const existing = stored?.metadata.versions.flatMap(v => v.manifest?.files ?? []) ?? [];
+    const existing = stored?.metadata.versions.flatMap((v) => v.manifest?.files ?? []) ?? [];
     const uploadFiles: StoredFile[] = [];
     const missing: string[] = [];
+
     for (const file of valid) {
-      const reuse = existing.find(f => f.sha256 === file.sha256 && f.size === file.size);
-      const reusable = reuse && await env.ARTIFACTS.head(reuse.objectKey);
-      const objectKey = reusable ? reuse.objectKey : `artifacts/${id}/content/${sessionId}-${uploadFiles.length}`;
+      const reuse = existing.find((f) => f.sha256 === file.sha256 && f.size === file.size);
+      const reusable = reuse && (await env.ARTIFACTS.head(reuse.objectKey));
+
+      const objectKey = reusable
+        ? reuse.objectKey
+        : `artifacts/${id}/content/${sessionId}-${uploadFiles.length}`;
+
       if (!reusable) missing.push(file.path);
       uploadFiles.push({ ...file, objectKey });
     }
-    const session: UploadSession = { id, baseEtag: stored?.etag ?? null, filename: body.filename, expiresAt: Date.now() + 30 * 60 * 1000, manifest: { entrypoint: body.entrypoint, files: uploadFiles, sha256: await sha256Hex(manifestSource(body.entrypoint, valid)) }, sandbox, ttlSeconds, attributes };
+
+    const session: UploadSession = {
+      id,
+      baseEtag: stored?.etag ?? null,
+      filename: body.filename,
+      expiresAt: Date.now() + 30 * 60 * 1000,
+      manifest: {
+        entrypoint: body.entrypoint,
+        files: uploadFiles,
+        sha256: await sha256Hex(manifestSource(body.entrypoint, valid)),
+      },
+      sandbox,
+      ttlSeconds,
+      attributes,
+    };
+
     await env.ARTIFACTS.put(sessionKey(id, sessionId), JSON.stringify(session));
+
     return json({ id, sessionId, missing }, 201);
   }
-  const match = /^\/api\/uploads\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)\/(file|commit)$/.exec(url.pathname);
+
+  const match = /^\/api\/uploads\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)\/(file|commit)$/.exec(
+    url.pathname,
+  );
+
   if (!match) return notFound();
   const [, id, sessionId, action] = match;
   const object = await env.ARTIFACTS.get(sessionKey(id!, sessionId!));
+
   if (!object) return notFound();
+  // SAFETY: Only routeUpload writes this private session key, after validating its manifest and options.
   const session = JSON.parse(await object.text()) as UploadSession;
-  if (session.expiresAt <= Date.now()) return json({ error: 'Upload session expired.' }, 410);
-  if (action === 'file' && request.method === 'PUT') {
-    const file = session.manifest.files.find(f => f.path === url.searchParams.get('path'));
-    if (!file || !file.objectKey.startsWith(`artifacts/${id}/content/${sessionId}-`)) return notFound();
-    if (request.headers.get('Content-Length') !== String(file.size)) return json({ error: 'Content-Length must match the manifest.' }, 400);
+
+  if (session.expiresAt <= Date.now()) return json({ error: "Upload session expired." }, 410);
+
+  if (action === "file" && request.method === "PUT") {
+    const file = session.manifest.files.find((f) => f.path === url.searchParams.get("path"));
+
+    if (!file || !file.objectKey.startsWith(`artifacts/${id}/content/${sessionId}-`))
+      return notFound();
+
+    if (request.headers.get("Content-Length") !== String(file.size))
+      return json({ error: "Content-Length must match the manifest." }, 400);
+
     // R2 validates the checksum while consuming the stream, without buffering it in the Worker.
-    try { await env.ARTIFACTS.put(file.objectKey, request.body ?? new Uint8Array(), { sha256: file.sha256, httpMetadata: { contentType: file.contentType } }); }
-    catch { return json({ error: 'File upload failed or checksum did not match. Retry this file.' }, 400); }
+    try {
+      await env.ARTIFACTS.put(file.objectKey, request.body ?? new Uint8Array(), {
+        sha256: file.sha256,
+        httpMetadata: { contentType: file.contentType },
+      });
+    } catch {
+      return json({ error: "File upload failed or checksum did not match. Retry this file." }, 400);
+    }
+
     return json({ uploaded: true });
   }
-  if (action !== 'commit' || request.method !== 'POST') return notFound();
+
+  if (action !== "commit" || request.method !== "POST") return notFound();
   const stored = await readStoredMetadata(env, id!);
-  if ((stored?.etag ?? null) !== session.baseEtag || stored?.metadata.deletedAt || (stored?.metadata.expiresAt && Date.parse(stored.metadata.expiresAt) <= Date.now())) return conflict();
+
+  if (
+    (stored?.etag ?? null) !== session.baseEtag ||
+    stored?.metadata.deletedAt ||
+    (stored?.metadata.expiresAt && Date.parse(stored.metadata.expiresAt) <= Date.now())
+  )
+    return conflict();
+
   for (const file of session.manifest.files) {
     const uploaded = await env.ARTIFACTS.head(file.objectKey);
-    if (!uploaded || uploaded.size !== file.size) return json({ error: `Missing file: ${file.path}` }, 409);
+
+    if (!uploaded || uploaded.size !== file.size)
+      return json({ error: `Missing file: ${file.path}` }, 409);
   }
+
   const now = new Date().toISOString();
   const previous = stored?.metadata;
   const current = previous ? artifactHead(previous) : null;
-  const same = previous?.contentSha256 === session.manifest.sha256 && current?.manifest?.sha256 === session.manifest.sha256;
-  if (same && previous && session.filename === previous.filename && session.ttlSeconds === undefined && JSON.stringify({ ...previous.attributes, ...session.attributes }) === JSON.stringify(previous.attributes)) {
+
+  const same =
+    previous?.contentSha256 === session.manifest.sha256 &&
+    current?.manifest?.sha256 === session.manifest.sha256;
+
+  if (
+    same &&
+    previous &&
+    session.filename === previous.filename &&
+    session.ttlSeconds === undefined &&
+    JSON.stringify({ ...previous.attributes, ...session.attributes }) ===
+      JSON.stringify(previous.attributes)
+  ) {
     await env.ARTIFACTS.delete(sessionKey(id!, sessionId!));
-    return json({ ...updatePayload(previous), entrypoint: session.manifest.entrypoint, files: session.manifest.files.map(({objectKey: _, ...file}) => file) });
+
+    return json({
+      ...updatePayload(previous),
+      entrypoint: session.manifest.entrypoint,
+      files: session.manifest.files.map(({ path, contentType, size, sha256 }) => ({
+        path,
+        contentType,
+        size,
+        sha256,
+      })),
+    });
   }
+
   const version = same ? current!.version : (previous?.versions.at(-1)?.version ?? 0) + 1;
-  const contentKey = same ? current!.contentKey : `artifacts/${id}/content/manifest-${sessionId}.json`;
+
+  const contentKey = same
+    ? current!.contentKey
+    : `artifacts/${id}/content/manifest-${sessionId}.json`;
+
   const size = session.manifest.files.reduce((sum, file) => sum + file.size, 0);
-  const entry: ArtifactVersion = { version, contentKey, contentSha256: session.manifest.sha256, size, createdAt: now, filename: session.filename, manifest: session.manifest };
+
+  const entry: ArtifactVersion = {
+    version,
+    contentKey,
+    contentSha256: session.manifest.sha256,
+    size,
+    createdAt: now,
+    filename: session.filename,
+    manifest: session.manifest,
+  };
+
   const token = previous ? null : randomBase64Url(32);
+
   const metadata: ArtifactMetadata = {
-    ...(previous ?? { id: id!, tokenHash: await sha256Hex(token!), createdAt: now, encryptedToken: await encryptViewerToken(env, id!, token!) ?? undefined }),
-    filename: session.filename, updatedAt: now, expiresAt: updatedExpiration(previous?.expiresAt ?? null, session.ttlSeconds, now),
-    sandbox: session.sandbox, size, revision: (previous?.revision ?? 0) + 1, contentKey, contentSha256: session.manifest.sha256,
-    currentVersion: version, versions: same ? previous!.versions : appendArtifactVersion(previous?.versions ?? [], entry),
+    ...(previous ?? {
+      id: id!,
+      tokenHash: await sha256Hex(token!),
+      createdAt: now,
+      encryptedToken: (await encryptViewerToken(env, id!, token!)) ?? undefined,
+    }),
+    filename: session.filename,
+    updatedAt: now,
+    expiresAt: updatedExpiration(previous?.expiresAt ?? null, session.ttlSeconds, now),
+    sandbox: session.sandbox,
+    size,
+    revision: (previous?.revision ?? 0) + 1,
+    contentKey,
+    contentSha256: session.manifest.sha256,
+    currentVersion: version,
+    versions: same ? previous!.versions : appendArtifactVersion(previous?.versions ?? [], entry),
     attributes: { ...previous?.attributes, ...session.attributes },
   };
+
   if (!same) await env.ARTIFACTS.put(contentKey, JSON.stringify(session.manifest));
-  const written = await env.ARTIFACTS.put(metadataKey(id!), JSON.stringify(metadata), { onlyIf: stored ? { etagMatches: stored.etag } : { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } });
+
+  const written = await env.ARTIFACTS.put(metadataKey(id!), JSON.stringify(metadata), {
+    onlyIf: stored ? { etagMatches: stored.etag } : { etagDoesNotMatch: "*" },
+    httpMetadata: { contentType: "application/json" },
+  });
+
   if (!written) return conflict();
   await env.ARTIFACTS.delete(sessionKey(id!, sessionId!));
   const viewerUrl = token ? `${publicOrigin(request, env)}/p/${id}/${token}` : null;
-  const rawUrl = token ? `${publicOrigin(request, env)}${manifestRawPath(id!, token, entry)}` : null;
-  return json({ ...updatePayload(metadata), ...(viewerUrl ? { url: viewerUrl, rawUrl, downloadUrl: rawUrl!.replace('/raw/', '/download/') } : {}), entrypoint: session.manifest.entrypoint, files: session.manifest.files.map(({objectKey: _, ...file}) => file) }, previous ? 200 : 201);
+
+  const rawUrl = token
+    ? `${publicOrigin(request, env)}${manifestRawPath(id!, token, entry)}`
+    : null;
+
+  return json(
+    {
+      ...updatePayload(metadata),
+      ...(viewerUrl
+        ? { url: viewerUrl, rawUrl, downloadUrl: rawUrl!.replace("/raw/", "/download/") }
+        : {}),
+      entrypoint: session.manifest.entrypoint,
+      files: session.manifest.files.map(({ path, contentType, size, sha256 }) => ({
+        path,
+        contentType,
+        size,
+        sha256,
+      })),
+    },
+    previous ? 200 : 201,
+  );
 }
+
+// oxlint-enable anti-slop/no-runtime-typeof, anti-slop/no-unsafe-dictionary-type

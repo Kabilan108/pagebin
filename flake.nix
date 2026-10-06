@@ -111,6 +111,7 @@
             packages = [
               pkgs.bun
               pkgs.nodejs_24
+              pkgs.prek
               pkgs.wrangler
             ];
           };

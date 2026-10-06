@@ -11,13 +11,20 @@
     "build:linux": "bun build ./src/cli.ts --compile --target=bun-linux-x64 --outfile dist/pagebin-linux-x64",
     "deploy": "wrangler deploy",
     "test": "bun test",
-    "typecheck": "tsc -p tsconfig.cli.json --noEmit && tsc -p tsconfig.worker.json --noEmit"
+    "typecheck": "tsc -p tsconfig.cli.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix --deny-warnings .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check ."
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250523.0",
+    "@oxlint/plugins": "1.87.0",
     "@types/bun": "^1.2.15",
     "@types/js-yaml": "^4.0.9",
     "fflate": "0.8.3",
+    "oxfmt": "0.72.0",
+    "oxlint": "1.87.0",
     "typescript": "^5.8.3",
     "wrangler": "^4.18.0"
   },

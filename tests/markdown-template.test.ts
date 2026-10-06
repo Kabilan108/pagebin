@@ -19,7 +19,8 @@ describe("renderMarkdownDocument", () => {
   });
 
   test("renders frontmatter, metadata, outlines, and unique heading anchors", () => {
-    const html = renderMarkdownDocument(`---
+    const html = renderMarkdownDocument(
+      `---
 title: Release notes
 description: What changed
 owner: PageBin
@@ -34,7 +35,9 @@ Branch: main
 
 ## Details
 ## Details
-`, "release.md");
+`,
+      "release.md",
+    );
 
     expect(html).toContain("What changed");
     expect(html).toContain('<div class="meta-key">owner</div>');
@@ -47,7 +50,8 @@ Branch: main
   });
 
   test("pre-renders code highlighting, line numbers, task lists, tables, and footnotes", () => {
-    const html = renderMarkdownDocument(`# Features
+    const html = renderMarkdownDocument(
+      `# Features
 
 - [x] shipped
 
@@ -63,7 +67,9 @@ console.log(value);
 Footnote[^one].
 
 [^one]: Static output.
-`, "features.md");
+`,
+      "features.md",
+    );
 
     expect(html).toContain('class="task-list-item"');
     expect(html).toContain('<div class="table-frame"><div class="table-scroll"><table>');
@@ -82,29 +88,37 @@ flowchart LR
   A --> B
 \`\`\`
 `;
+
     const { hasMermaid, html } = renderMarkdownArtifact(markdown, "diagram.md");
 
     expect(hasMermaid).toBe(true);
     expect(html).toContain("mermaid@11.6.0/dist/mermaid.min.js");
     expect(html).toContain('integrity="sha384-');
-    expect(html).toContain("window.addEventListener(\"DOMContentLoaded\",renderMermaid)");
+    expect(html).toContain('window.addEventListener("DOMContentLoaded",renderMermaid)');
     expect(html).not.toContain("marked@");
     expect(html).not.toContain("highlight.min.js");
   });
 
   test("uses parsed Mermaid blocks as the strict-sandbox source of truth", () => {
-    const nested = renderMarkdownArtifact(`> \`\`\`mermaid
+    const nested = renderMarkdownArtifact(
+      `> \`\`\`mermaid
 > flowchart LR
 >   A --> B
 > \`\`\`
-`, "nested.md");
-    const documented = renderMarkdownArtifact(`\`\`\`\`markdown
+`,
+      "nested.md",
+    );
+
+    const documented = renderMarkdownArtifact(
+      `\`\`\`\`markdown
 \`\`\`mermaid
 flowchart LR
   A --> B
 \`\`\`
 \`\`\`\`
-`, "documented.md");
+`,
+      "documented.md",
+    );
 
     expect(nested.hasMermaid).toBe(true);
     expect(nested.html).toContain("mermaid@11.6.0/dist/mermaid.min.js");
@@ -113,12 +127,14 @@ flowchart LR
   });
 
   test("keeps raw HTML active and renders deterministically", () => {
-    const markdown = "# Interactive\n\n<button onclick=\"document.title='clicked'\">Run</button>\n<script>globalThis.ready=true</script>\n";
+    const markdown =
+      "# Interactive\n\n<button onclick=\"document.title='clicked'\">Run</button>\n<script>globalThis.ready=true</script>\n";
+
     const first = renderMarkdownDocument(markdown, "interactive.md");
     const second = renderMarkdownDocument(markdown, "interactive.md");
 
     expect(first).toBe(second);
-    expect(first).toContain('<button onclick="document.title=\'clicked\'">Run</button>');
+    expect(first).toContain("<button onclick=\"document.title='clicked'\">Run</button>");
     expect(first).toContain("<script>globalThis.ready=true</script>");
   });
 
@@ -127,5 +143,44 @@ flowchart LR
 
     expect(html).toContain('<h1 id="empty-metadata">');
     expect(html).not.toContain("<hr>");
+  });
+
+  test("reports cyclic YAML aliases while preserving the document body", () => {
+    for (const yaml of ["loop: &loop\n  self: *loop", "items: &items [*items]"]) {
+      const html = renderMarkdownDocument(`---\n${yaml}\n---\n# Still readable\n`, "cycle.md");
+      expect(html).toContain("Frontmatter contains a cyclic YAML alias.");
+      expect(html).toContain('<h1 id="still-readable">');
+    }
+  });
+
+  test("allows shared aliases, dates, arrays, and escaped metadata", () => {
+    const html = renderMarkdownDocument(
+      '---\nfirst: &common {label: "<script>bad</script>"}\nsecond: *common\ndate: 2026-10-05\nitems: [true, 42, null]\n---\n# Shared\n',
+      "shared.md",
+    );
+
+    expect(html).not.toContain("frontmatter_error");
+    expect(html).toContain("&lt;script&gt;bad&lt;/script&gt;");
+    expect(html).not.toContain("<script>bad</script>");
+    expect(html).toContain("2026-10-05");
+    expect(html).toContain('<li class="meta-token">true</li>');
+  });
+
+  test("bounds nesting, expanded alias values, input bytes, and expanded text", () => {
+    const deep = `value: ${"[".repeat(40)}0${"]".repeat(40)}`;
+    const wide = `leaf: &leaf [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]\nbranches: &branches [${Array(100).fill("*leaf").join(", ")}]\nroot: [${Array(20).fill("*branches").join(", ")}]`;
+    const large = `text: "${"x".repeat(256 * 1024)}"`;
+    const repeatedText = `text: &text "${"x".repeat(100_000)}"\ncopies: [${Array(20).fill("*text").join(", ")}]`;
+
+    for (const [yaml, message] of [
+      [deep, "nesting limit"],
+      [wide, "expanded value limit"],
+      [large, "size limit"],
+      [repeatedText, "expanded text limit"],
+    ]) {
+      const html = renderMarkdownDocument(`---\n${yaml}\n---\n# Limited\n`, "limits.md");
+      expect(html).toContain(message!);
+      expect(html).toContain('<h1 id="limited">');
+    }
   });
 });

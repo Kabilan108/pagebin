@@ -5,142 +5,53 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, relative, resolve } from "node:path";
 
+import {
+  type PublishResponse,
+  type UpdateResponse,
+  type ArtifactAttributes,
+  type ArtifactDetailResponse,
+  type VerificationResult,
+  type ArtifactReceipt,
+  type WatchOwnership,
+  type ReceiptStore,
+  type SandboxMode,
+  type ArtifactType,
+  type ClientManifest,
+  type ListedArtifact,
+  parsePublishResponse,
+  parseUpdateResponse,
+  parseDeleteResponse,
+  parseReissueResponse,
+  parseListResponse,
+  parseArtifactDetailResponse,
+  parseManifestResponse,
+  parseReceiptStore,
+} from "./contracts";
+
 import { prepareBundle, sendBundle, verifyBundle, type LocalBundle } from "./file-upload";
-import { FILE_LIMIT, filePathUrl, type ContentManifest } from "../shared/content";
+import { FILE_LIMIT, filePathUrl } from "../shared/content";
 
 import packageJson from "../package.json" with { type: "json" };
 
 const DEFAULT_MAX_BYTES = FILE_LIMIT;
+
 const DEFAULT_SANDBOX = "standard";
+
 const MAX_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
+
 const VERSION = packageJson.version;
+
 const ARTIFACT_ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
+
 const RED = "\x1b[31m";
+
 const RESET = "\x1b[0m";
+
 const HTML_EXTENSION = ".html";
+
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
+
 const OUTPUT_SCHEMA_VERSION = 1;
-
-interface PublishResponse {
-  rawUrl?: string;
-  downloadUrl?: string;
-  id: string;
-  url: string;
-  expiresAt: string | null;
-  sandbox: SandboxMode;
-  revision: number;
-  version: number;
-  contentSha256: string;
-  attributes: ArtifactAttributes;
-}
-
-interface ReissueResponse {
-  id: string;
-  url: string;
-  expiresAt: string | null;
-  sandbox: SandboxMode;
-  revision: number;
-}
-
-interface UpdateResponse {
-  entrypoint?: string;
-  id: string;
-  filename: string;
-  updatedAt: string;
-  expiresAt: string | null;
-  sandbox: SandboxMode;
-  size: number;
-  revision: number;
-  version: number;
-  contentSha256: string | null;
-  attributes: ArtifactAttributes;
-}
-
-interface DeleteResponse {
-  id: string;
-  deleted: boolean;
-}
-
-interface ListResponse {
-  artifacts: ListedArtifact[];
-}
-
-interface ListedArtifact {
-  id: string;
-  filename: string;
-  createdAt: string;
-  expiresAt: string | null;
-  sandbox: SandboxMode;
-  size: number;
-  revision: number;
-  contentSha256: string | null;
-  attributes: ArtifactAttributes;
-}
-
-interface ArtifactAttributes {
-  title?: string;
-  project?: string;
-  repo?: string;
-  sourceHost?: string;
-  gitBranch?: string;
-  gitCommit?: string;
-  sourcePath?: string;
-  artifactType?: ArtifactType;
-  agent?: string;
-}
-
-interface ArtifactDetailResponse extends ListedArtifact {
-  manifest?: ContentManifest;
-  updatedAt: string;
-  version: number;
-  versions: ArtifactVersionSummary[];
-}
-
-interface ArtifactVersionSummary {
-  version: number;
-  size: number;
-  createdAt: string;
-  contentSha256: string | null;
-  current: boolean;
-}
-
-interface VerificationResult {
-  verified: true;
-  method: "raw" | "metadata";
-  id: string;
-  url: string | null;
-  localSha256: string;
-  remoteSha256: string;
-  size: number;
-  revision: number | null;
-}
-
-interface ArtifactReceipt {
-  assets?: string[];
-  bundle?: boolean;
-  endpoint: string;
-  id: string;
-  url: string | null;
-  rawUrl: string | null;
-  filePath: string;
-  createdAt: string;
-  updatedAt: string;
-  revision: number;
-  contentSha256: string | null;
-  attributes: ArtifactAttributes;
-  watch?: WatchOwnership;
-}
-
-interface WatchOwnership {
-  pid: number;
-  host: string;
-  startedAt: string;
-}
-
-interface ReceiptStore {
-  schemaVersion: 1;
-  artifacts: ArtifactReceipt[];
-}
 
 interface PublishOptions {
   assets?: string[];
@@ -179,7 +90,7 @@ interface UpdateOptions {
   inferMetadata: boolean;
   attributes: ArtifactAttributes;
   receiptLookup: boolean;
-  ttlSeconds: number | null | undefined;
+  ttlSeconds?: number | null | undefined;
 }
 
 interface WatchPublishOptions extends PublishOptions {
@@ -241,17 +152,26 @@ interface ArtifactTarget {
   urlOrigin: string | null;
 }
 
-interface ParsedCommand {
-  command: "publish" | "delete" | "reissue" | "update" | "watch" | "list" | "verify" | "versions" | "rollback" | "receipts" | "show" | "skill" | "help" | "version";
-  options?: PublishOptions | DeleteOptions | ReissueOptions | UpdateOptions | WatchOptions | ListOptions | VerifyOptions | VersionHistoryOptions | RollbackOptions | ReceiptListOptions | ShowOptions | HelpOptions;
-}
+type ParsedCommand =
+  | { command: "publish"; options: PublishOptions }
+  | { command: "delete"; options: DeleteOptions }
+  | { command: "reissue"; options: ReissueOptions }
+  | { command: "update"; options: UpdateOptions }
+  | { command: "watch"; options: WatchOptions }
+  | { command: "list"; options: ListOptions }
+  | { command: "verify"; options: VerifyOptions }
+  | { command: "versions"; options: VersionHistoryOptions }
+  | { command: "rollback"; options: RollbackOptions }
+  | { command: "receipts"; options: ReceiptListOptions }
+  | { command: "show"; options: ShowOptions }
+  | { command: "help"; options: HelpOptions }
+  | { command: "skill" | "version"; options?: never };
 
-type SandboxMode = "standard" | "strict";
 type UploadSourceKind = "html" | "markdown";
-type ArtifactType = "plan" | "report" | "review" | "explainer" | "implementation-log" | "other";
+
 type HelpTopic = Exclude<ParsedCommand["command"], "help">;
 
-const ATTRIBUTE_FLAGS: Record<string, keyof ArtifactAttributes> = {
+const ATTRIBUTE_FLAGS = {
   "--title": "title",
   "--project": "project",
   "--repo": "repo",
@@ -261,7 +181,11 @@ const ATTRIBUTE_FLAGS: Record<string, keyof ArtifactAttributes> = {
   "--source-path": "sourcePath",
   "--type": "artifactType",
   "--agent": "agent",
-};
+} as const satisfies Record<string, keyof ArtifactAttributes>;
+
+const ATTRIBUTE_FLAG_KEYS = new Map<string, keyof ArtifactAttributes>(
+  Object.entries(ATTRIBUTE_FLAGS),
+);
 
 class CliError extends Error {
   constructor(
@@ -281,6 +205,7 @@ export function parseTtlSeconds(value: string): number {
 
   const amount = Number(match[1]);
   const unit = match[2];
+
   const multipliers = {
     s: 1,
     m: 60,
@@ -293,7 +218,7 @@ export function parseTtlSeconds(value: string): number {
     throw new CliError("TTL must include a unit.");
   }
 
-  const multiplier = multipliers[unit as keyof typeof multipliers];
+  const multiplier = new Map(Object.entries(multipliers)).get(unit);
 
   if (!multiplier) {
     throw new CliError("TTL must use s, m, h, d, or w.");
@@ -401,7 +326,6 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     };
   }
 
-
   if (command === "verify") {
     return {
       command,
@@ -423,7 +347,6 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     };
   }
 
-
   if (command === "receipts") {
     return { command, options: parseReceiptListOptions(rest) };
   }
@@ -441,46 +364,60 @@ async function main(): Promise<void> {
 
     switch (parsed.command) {
       case "publish":
-        await publishArtifact(parsed.options as PublishOptions);
+        await publishArtifact(parsed.options);
+
         return;
       case "delete":
-        await deleteArtifact(parsed.options as DeleteOptions);
+        await deleteArtifact(parsed.options);
+
         return;
       case "reissue":
-        await reissueArtifact(parsed.options as ReissueOptions);
+        await reissueArtifact(parsed.options);
+
         return;
       case "update":
-        await updateArtifact(parsed.options as UpdateOptions);
+        await updateArtifact(parsed.options);
+
         return;
       case "watch":
-        await watchArtifact(parsed.options as WatchOptions);
+        await watchArtifact(parsed.options);
+
         return;
       case "list":
-        await listArtifacts(parsed.options as ListOptions);
+        await listArtifacts(parsed.options);
+
         return;
       case "verify":
-        await verifyArtifact(parsed.options as VerifyOptions);
+        await verifyArtifact(parsed.options);
+
         return;
       case "versions":
-        await listArtifactVersions(parsed.options as VersionHistoryOptions);
+        await listArtifactVersions(parsed.options);
+
         return;
       case "rollback":
-        await rollbackArtifact(parsed.options as RollbackOptions);
+        await rollbackArtifact(parsed.options);
+
         return;
       case "receipts":
-        await listReceipts(parsed.options as ReceiptListOptions);
+        await listReceipts(parsed.options);
+
         return;
       case "show":
-        await showReceipt(parsed.options as ShowOptions);
+        await showReceipt(parsed.options);
+
         return;
       case "version":
         console.log(VERSION);
+
         return;
       case "skill":
         console.log(skillText());
+
         return;
       case "help":
-        console.log(helpText((parsed.options as HelpOptions | undefined)?.topic ?? null));
+        console.log(helpText(parsed.options.topic));
+
         return;
     }
   } catch (error) {
@@ -780,7 +717,10 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
   }
 
   const target = parseArtifactTarget(targetValue);
-  const endpoint = normalizeEndpoint(readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "");
+
+  const endpoint = normalizeEndpoint(
+    readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "",
+  );
 
   return {
     ...(assets.length ? { assets } : {}),
@@ -862,7 +802,9 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
     values.push(arg ?? "");
 
     if (values.length > 2) {
-      throw new CliError("watch accepts either one file path or one artifact target and one file path.");
+      throw new CliError(
+        "watch accepts either one file path or one artifact target and one file path.",
+      );
     }
   }
 
@@ -907,11 +849,16 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
   const [targetValue, filePath] = values;
 
   if (!targetValue || !filePath) {
-    throw new CliError("watch accepts either one file path or one artifact target and one file path.");
+    throw new CliError(
+      "watch accepts either one file path or one artifact target and one file path.",
+    );
   }
 
   const target = parseArtifactTarget(targetValue);
-  const endpoint = normalizeEndpoint(readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "");
+
+  const endpoint = normalizeEndpoint(
+    readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "",
+  );
 
   return {
     ...(assets.length ? { assets } : {}),
@@ -1006,14 +953,19 @@ function parseVerifyOptions(args: string[], env: NodeJS.ProcessEnv): VerifyOptio
   }
 
   const target = parseArtifactTarget(targetValue);
-  const endpoint = normalizeEndpoint(readEndpointOption(args) ?? target.urlOrigin ?? env.PAGEBIN_ENDPOINT ?? "");
+
+  const endpoint = normalizeEndpoint(
+    readEndpointOption(args) ?? target.urlOrigin ?? env.PAGEBIN_ENDPOINT ?? "",
+  );
 
   return {
     ...(assets.length ? { assets } : {}),
     endpoint,
     filePath,
     id: target.id,
-    ...(targetValue.match(/\/v\/([1-9]\d*)/) ? { version: Number(targetValue.match(/\/v\/([1-9]\d*)/)![1]) } : {}),
+    ...(targetValue.match(/\/v\/([1-9]\d*)/)
+      ? { version: Number(targetValue.match(/\/v\/([1-9]\d*)/)![1]) }
+      : {}),
     json,
     url: target.url,
   };
@@ -1116,7 +1068,9 @@ function parseVersionHistoryTarget(
   const target = parseArtifactTarget(value);
 
   return {
-    endpoint: normalizeEndpoint(readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? ""),
+    endpoint: normalizeEndpoint(
+      readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "",
+    ),
     filePath: null,
     id: target.id,
     json,
@@ -1194,7 +1148,9 @@ function parseArtifactTarget(value: string): ArtifactTarget {
     throw new CliError("Artifact viewer URL must use https unless it points at localhost.");
   }
 
-  const match = url.pathname.match(/^\/(?:p|raw|download)\/([^/]+)\/([^/]+)(?:\/v\/([1-9]\d*)(?:\/.+)?)?$/);
+  const match = url.pathname.match(
+    /^\/(?:p|raw|download)\/([^/]+)\/([^/]+)(?:\/v\/([1-9]\d*)(?:\/.+)?)?$/,
+  );
 
   if (
     !match?.[1] ||
@@ -1204,7 +1160,9 @@ function parseArtifactTarget(value: string): ArtifactTarget {
     throw new CliError("Artifact viewer URL must look like /p/<artifact_id>/<token>.");
   }
 
-  url.pathname = url.pathname.replace(/\/v\/[1-9]\d*(?:\/.*)?$/, "").replace(/^\/download\//, "/raw/");
+  url.pathname = url.pathname
+    .replace(/\/v\/[1-9]\d*(?:\/.*)?$/, "")
+    .replace(/^\/download\//, "/raw/");
 
   return {
     id: match[1],
@@ -1219,7 +1177,8 @@ function parseArtifactAttributeOption(
   attributes: ArtifactAttributes,
 ): number | null {
   const arg = args[index];
-  const key = arg ? ATTRIBUTE_FLAGS[arg] : undefined;
+
+  const key = arg ? ATTRIBUTE_FLAG_KEYS.get(arg) : undefined;
 
   if (!key || !arg) {
     return null;
@@ -1227,16 +1186,28 @@ function parseArtifactAttributeOption(
 
   const value = requireValue(args[index + 1], arg);
 
-  if (key === "artifactType" && !isArtifactType(value)) {
-    throw new CliError("--type must be plan, report, review, explainer, implementation-log, or other.");
+  if (key === "artifactType") {
+    if (!isArtifactType(value))
+      throw new CliError(
+        "--type must be plan, report, review, explainer, implementation-log, or other.",
+      );
+    attributes.artifactType = value;
+  } else {
+    attributes[key] = value;
   }
 
-  (attributes as Record<string, string>)[key] = value;
   return index + 1;
 }
 
 function isArtifactType(value: string): value is ArtifactType {
-  return value === "plan" || value === "report" || value === "review" || value === "explainer" || value === "implementation-log" || value === "other";
+  return (
+    value === "plan" ||
+    value === "report" ||
+    value === "review" ||
+    value === "explainer" ||
+    value === "implementation-log" ||
+    value === "other"
+  );
 }
 
 function parseSandbox(value: string): SandboxMode {
@@ -1257,7 +1228,13 @@ function requireValue(value: string | undefined, flag: string): string {
 
 async function publishArtifact(options: PublishOptions, output = true): Promise<PublishResponse> {
   const token = readPublishToken();
-  const attributes = await resolveArtifactAttributes(options.filePath, options.attributes, options.inferMetadata);
+
+  const attributes = await resolveArtifactAttributes(
+    options.filePath,
+    options.attributes,
+    options.inferMetadata,
+  );
+
   const absoluteFilePath = resolve(options.filePath);
   const existingReceipt = await findReceiptByFile(options.endpoint, absoluteFilePath);
 
@@ -1270,11 +1247,24 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
 
   let response: Response;
   const useBundle = await requiresBundle(options.filePath, options.assets ?? []);
+
   if (useBundle) {
-    const bundle = await prepareArtifactBundle(options.filePath, options.assets ?? [], options.sandbox);
-    response = await sendBundle(options.endpoint, token, bundle, { sandbox: options.sandbox, ttlSeconds: options.ttlSeconds, attributes });
+    const bundle = await prepareArtifactBundle(
+      options.filePath,
+      options.assets ?? [],
+      options.sandbox,
+    );
+
+    response = await sendBundle(options.endpoint, token, bundle, {
+      sandbox: options.sandbox,
+      ttlSeconds: options.ttlSeconds,
+      attributes,
+    });
   } else {
-    reportStage(options.json, isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
+    reportStage(
+      options.json,
+      isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…",
+    );
     const { form, hasMermaid, sourceKind } = await createHtmlUploadForm(options.filePath);
     assertSandboxSupportsUpload(sourceKind, hasMermaid, options.sandbox);
 
@@ -1293,9 +1283,9 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
       },
       body: form,
     });
-
   }
-  const payload = await readJsonResponse<PublishResponse>(response);
+
+  const payload = await readJsonResponse(response, parsePublishResponse);
   await upsertReceipt({
     endpoint: options.endpoint,
     id: payload.id,
@@ -1335,38 +1325,61 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
   }
 
   if (options.json) {
-    console.log(JSON.stringify(withSchema(verification ? { ...payload, verification } : payload), null, 2));
+    console.log(
+      JSON.stringify(withSchema(verification ? { ...payload, verification } : payload), null, 2),
+    );
+
     return payload;
   }
 
   console.log(payload.url);
 
   if (verification) {
-    console.error(`Verified revision ${verification.revision ?? "unknown"} (${verification.localSha256}).`);
+    console.error(
+      `Verified revision ${verification.revision ?? "unknown"} (${verification.localSha256}).`,
+    );
   }
+
   return payload;
 }
 
 function isDocumentFile(filePath: string): boolean {
   return isMarkdownFile(filePath) || [".html", ".htm"].includes(extname(filePath).toLowerCase());
 }
+
 async function requiresBundle(filePath: string, assets: string[]): Promise<boolean> {
-  if (assets.length || !isDocumentFile(filePath) || (await stat(filePath)).size > 10 * 1024 * 1024) return true;
-  return isMarkdownFile(filePath) && (await readUploadFile(filePath)).bytes.byteLength > 10 * 1024 * 1024;
+  if (assets.length || !isDocumentFile(filePath) || (await stat(filePath)).size > 10 * 1024 * 1024)
+    return true;
+
+  return (
+    isMarkdownFile(filePath) && (await readUploadFile(filePath)).bytes.byteLength > 10 * 1024 * 1024
+  );
 }
-async function prepareArtifactBundle(filePath: string, assets: string[], sandbox: SandboxMode = 'standard'): Promise<LocalBundle> {
+
+async function prepareArtifactBundle(
+  filePath: string,
+  assets: string[],
+  sandbox: SandboxMode = "standard",
+): Promise<LocalBundle> {
   if (isMarkdownFile(filePath)) {
     const upload = await readUploadFile(filePath);
     assertSandboxSupportsUpload(upload.sourceKind, upload.hasMermaid, sandbox);
-    return prepareBundle(filePath, assets, { blob: new Blob([new Uint8Array(upload.bytes)]), name: upload.uploadFilename });
+
+    return prepareBundle(filePath, assets, {
+      blob: new Blob([new Uint8Array(upload.bytes)]),
+      name: upload.uploadFilename,
+    });
   }
+
   return prepareBundle(filePath, assets);
 }
+
 async function verifyArtifact(options: VerifyOptions): Promise<void> {
   const result = await verifyArtifactContent(options);
 
   if (options.json) {
     console.log(JSON.stringify(withSchema(result), null, 2));
+
     return;
   }
 
@@ -1376,29 +1389,49 @@ async function verifyArtifact(options: VerifyOptions): Promise<void> {
 async function verifyArtifactContent(options: VerifyOptions): Promise<VerificationResult> {
   const receipt = await findReceiptForArtifact(options.endpoint, options.id);
   const assets = options.assets ?? receipt?.assets ?? [];
-  if (options.bundle || receipt?.bundle || await requiresBundle(options.filePath, assets)) {
+
+  if (options.bundle || receipt?.bundle || (await requiresBundle(options.filePath, assets))) {
     const bundle = await prepareArtifactBundle(options.filePath, assets);
-    let detail: { manifest?: ContentManifest; version: number; revision: number };
+    let detail: { manifest?: ClientManifest; version: number; revision: number };
+
     if (options.url) {
       const viewer = new URL(options.url);
-      const token = viewer.pathname.split('/')[3];
-      viewer.pathname = `/api/artifacts/${options.id}/manifest/${token}${options.version ? `/v/${options.version}` : ''}`;
-      viewer.search = '';
-      detail = await readJsonResponse(await fetch(viewer));
+      const token = viewer.pathname.split("/")[3];
+      viewer.pathname = `/api/artifacts/${options.id}/manifest/${token}${options.version ? `/v/${options.version}` : ""}`;
+      viewer.search = "";
+      detail = await readJsonResponse(await fetch(viewer), parseManifestResponse);
     } else {
       detail = await fetchArtifactDetail(options.endpoint, options.id, readPublishToken());
     }
-    if (!detail.manifest || detail.manifest.sha256 !== bundle.sha256) throw new CliError("Bundle manifest does not match local files.");
+
+    if (!detail.manifest || detail.manifest.sha256 !== bundle.sha256)
+      throw new CliError("Bundle manifest does not match local files.");
     const url = options.url;
+
     if (url) await verifyBundle(toRawUrl(url), bundle, detail.version);
-    return { verified: true, method: url ? 'raw' : 'metadata', id: options.id, url: url ?? null, localSha256: bundle.sha256, remoteSha256: detail.manifest.sha256, size: bundle.files.reduce((n,f) => n + f.size, 0), revision: detail.revision };
+
+    return {
+      verified: true,
+      method: url ? "raw" : "metadata",
+      id: options.id,
+      url: url ?? null,
+      localSha256: bundle.sha256,
+      remoteSha256: detail.manifest.sha256,
+      size: bundle.files.reduce((n, f) => n + f.size, 0),
+      revision: detail.revision,
+    };
   }
-  reportStage(options.json, isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
+
+  reportStage(
+    options.json,
+    isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…",
+  );
   const upload = await readUploadFile(options.filePath);
   const localSha256 = await sha256Bytes(upload.bytes);
 
   if (options.url) {
     const rawUrl = toRawUrl(options.url) + (options.version ? `/v/${options.version}` : "");
+
     const response = await fetch(rawUrl, {
       headers: {
         Accept: "text/html",
@@ -1428,13 +1461,20 @@ async function verifyArtifactContent(options: VerifyOptions): Promise<Verificati
   }
 
   const token = readPublishToken();
-  const response = await fetch(`${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const artifact = await readJsonResponse<ArtifactDetailResponse>(response);
+
+  const response = await fetch(
+    `${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+
+  const artifact = await readJsonResponse(response, parseArtifactDetailResponse);
 
   if (!artifact.contentSha256) {
-    throw new CliError("This legacy artifact has no stored content hash; update or reissue it before verifying by ID.");
+    throw new CliError(
+      "This legacy artifact has no stored content hash; update or reissue it before verifying by ID.",
+    );
   }
 
   assertMatchingContent(localSha256, artifact.contentSha256, options.id);
@@ -1453,7 +1493,9 @@ async function verifyArtifactContent(options: VerifyOptions): Promise<Verificati
 
 function assertMatchingContent(localSha256: string, remoteSha256: string, id: string): void {
   if (localSha256 !== remoteSha256) {
-    throw new CliError(`Artifact ${id} does not match the local file (local ${localSha256}, remote ${remoteSha256}).`);
+    throw new CliError(
+      `Artifact ${id} does not match the local file (local ${localSha256}, remote ${remoteSha256}).`,
+    );
   }
 }
 
@@ -1461,6 +1503,7 @@ function toRawUrl(value: string): string {
   const url = new URL(value);
 
   url.pathname = url.pathname.replace(/^\/p\//, "/raw/");
+
   return url.toString();
 }
 
@@ -1470,6 +1513,7 @@ function toViewerUrl(value: string): string {
   url.pathname = url.pathname.replace(/^\/raw\//, "/p/").replace(/\/+$/, "");
   url.search = "";
   url.hash = "";
+
   return url.toString().replace(/\/$/, "");
 }
 
@@ -1482,52 +1526,90 @@ async function sha256Bytes(bytes: Uint8Array): Promise<string> {
 async function updateArtifact(options: UpdateOptions, output = true): Promise<UpdateResponse> {
   const resolvedOptions = options.receiptLookup ? await resolveUpdateReceipt(options) : options;
   const token = readPublishToken();
+
   const attributes = resolvedOptions.filePath
-    ? await resolveArtifactAttributes(resolvedOptions.filePath, resolvedOptions.attributes, resolvedOptions.inferMetadata)
+    ? await resolveArtifactAttributes(
+        resolvedOptions.filePath,
+        resolvedOptions.attributes,
+        resolvedOptions.inferMetadata,
+      )
     : resolvedOptions.attributes;
+
   const existing = await findReceiptForArtifact(resolvedOptions.endpoint, resolvedOptions.id);
   const assets = resolvedOptions.assets ?? existing?.assets ?? [];
+
   if (!resolvedOptions.url && existing?.url) resolvedOptions.url = existing.url;
-  const useBundle = Boolean(resolvedOptions.filePath && (existing?.bundle || await requiresBundle(resolvedOptions.filePath, assets)));
-  if (useBundle) { resolvedOptions.bundle = true; resolvedOptions.assets = assets; }
+
+  const useBundle = Boolean(
+    resolvedOptions.filePath &&
+    (existing?.bundle || (await requiresBundle(resolvedOptions.filePath, assets))),
+  );
+
+  if (useBundle) {
+    resolvedOptions.bundle = true;
+    resolvedOptions.assets = assets;
+  }
+
   let response: Response;
 
   if (resolvedOptions.filePath && useBundle) {
     const detail = await fetchArtifactDetail(resolvedOptions.endpoint, resolvedOptions.id, token);
     const bundle = await prepareArtifactBundle(resolvedOptions.filePath, assets, detail.sandbox);
-    response = await sendBundle(resolvedOptions.endpoint, token, bundle, { id: resolvedOptions.id, attributes, ttlSeconds: resolvedOptions.ttlSeconds });
+    response = await sendBundle(resolvedOptions.endpoint, token, bundle, {
+      id: resolvedOptions.id,
+      attributes,
+      ttlSeconds: resolvedOptions.ttlSeconds,
+    });
   } else if (resolvedOptions.filePath) {
-    reportStage(options.json, isMarkdownFile(resolvedOptions.filePath) ? "Rendering Markdown…" : "Preparing HTML…");
+    reportStage(
+      options.json,
+      isMarkdownFile(resolvedOptions.filePath) ? "Rendering Markdown…" : "Preparing HTML…",
+    );
     const upload = await createHtmlUploadForm(resolvedOptions.filePath);
 
     if (upload.hasMermaid) {
-      const artifact = await fetchArtifactDetail(resolvedOptions.endpoint, resolvedOptions.id, token);
+      const artifact = await fetchArtifactDetail(
+        resolvedOptions.endpoint,
+        resolvedOptions.id,
+        token,
+      );
+
       assertSandboxSupportsUpload(upload.sourceKind, upload.hasMermaid, artifact.sandbox);
     }
 
     setArtifactAttributes(upload.form, attributes);
 
     if (resolvedOptions.ttlSeconds !== undefined) {
-      upload.form.set("ttlSeconds", resolvedOptions.ttlSeconds === null ? "never" : String(resolvedOptions.ttlSeconds));
+      upload.form.set(
+        "ttlSeconds",
+        resolvedOptions.ttlSeconds === null ? "never" : String(resolvedOptions.ttlSeconds),
+      );
     }
 
     reportStage(options.json, "Uploading artifact…");
-    response = await fetch(`${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}/content`, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${token}` },
-      body: upload.form,
-    });
-  } else {
-    response = await fetch(`${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+    response = await fetch(
+      `${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}/content`,
+      {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}` },
+        body: upload.form,
       },
-      body: JSON.stringify({ ttlSeconds: resolvedOptions.ttlSeconds }),
-    });
+    );
+  } else {
+    response = await fetch(
+      `${resolvedOptions.endpoint}/api/artifacts/${encodeURIComponent(resolvedOptions.id)}`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ttlSeconds: resolvedOptions.ttlSeconds }),
+      },
+    );
   }
-  const payload = await readJsonResponse<UpdateResponse>(response);
+
+  const payload = await readJsonResponse(response, parseUpdateResponse);
 
   await updateReceiptAfterContent(resolvedOptions, payload, attributes);
 
@@ -1536,11 +1618,28 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
   }
 
   if (options.json) {
-    console.log(JSON.stringify(withSchema({ ...payload, url: resolvedOptions.url, ...(payload.entrypoint && resolvedOptions.url ? { rawUrl: `${toRawUrl(resolvedOptions.url)}/v/${payload.version}/${filePathUrl(payload.entrypoint)}`, downloadUrl: `${toRawUrl(resolvedOptions.url).replace("/raw/", "/download/")}/v/${payload.version}/${filePathUrl(payload.entrypoint)}` } : {}) }), null, 2));
+    console.log(
+      JSON.stringify(
+        withSchema({
+          ...payload,
+          url: resolvedOptions.url,
+          ...(payload.entrypoint && resolvedOptions.url
+            ? {
+                rawUrl: `${toRawUrl(resolvedOptions.url)}/v/${payload.version}/${filePathUrl(payload.entrypoint)}`,
+                downloadUrl: `${toRawUrl(resolvedOptions.url).replace("/raw/", "/download/")}/v/${payload.version}/${filePathUrl(payload.entrypoint)}`,
+              }
+            : {}),
+        }),
+        null,
+        2,
+      ),
+    );
+
     return payload;
   }
 
   console.log(resolvedOptions.url ?? payload.id);
+
   return payload;
 }
 
@@ -1559,11 +1658,13 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
   const runUpdate = (): void => {
     if (!updateOptions) {
       pending = true;
+
       return;
     }
 
     if (running) {
       pending = true;
+
       return;
     }
 
@@ -1572,8 +1673,8 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
       .then((payload) => {
         emitWatchEvent(options.json, "updated", { ...payload, url: updateOptions?.url ?? null });
       })
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
+      .catch((cause: unknown) => {
+        const message = cause instanceof Error ? cause.message : String(cause);
 
         if (options.json) {
           console.log(JSON.stringify(withSchema({ event: "error", error: message })));
@@ -1593,15 +1694,20 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
 
   const assetWatchers: ReturnType<typeof watch>[] = [];
   let watcher: ReturnType<typeof watch>;
+
   try {
     for (const asset of assets) {
-      assetWatchers.push(watch(asset, { recursive: true }, () => {
-        if (timeout) clearTimeout(timeout);
-        timeout = setTimeout(runUpdate, 250);
-      }));
+      assetWatchers.push(
+        watch(asset, { recursive: true }, () => {
+          if (timeout) clearTimeout(timeout);
+          timeout = setTimeout(runUpdate, 250);
+        }),
+      );
     }
+
     watcher = watch(watchedDirectory, (eventType, filename) => {
       if (eventType !== "rename" && filename && filename.toString() !== watchedBasename) return;
+
       if (timeout) clearTimeout(timeout);
       timeout = setTimeout(runUpdate, 250);
     });
@@ -1610,7 +1716,9 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
     throw error;
   }
 
-  console.error(`Watching ${options.filePath}; press Ctrl-C to stop. Keep this process under tmux or another supervisor for long-running agent jobs.`);
+  console.error(
+    `Watching ${options.filePath}; press Ctrl-C to stop. Keep this process under tmux or another supervisor for long-running agent jobs.`,
+  );
 
   try {
     if (options.mode === "publish") {
@@ -1652,7 +1760,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
       }
     } else {
       updateOptions = {
-          ...(assets.length ? { assets } : {}),
+        ...(assets.length ? { assets } : {}),
         endpoint: options.endpoint,
         filePath: options.filePath,
         id: options.id,
@@ -1669,6 +1777,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
     }
   } catch (error) {
     watcher.close();
+
     for (const assetWatcher of assetWatchers) assetWatcher.close();
     throw error;
   }
@@ -1691,6 +1800,7 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
   await new Promise<void>((resolve) => {
     const stop = (): void => {
       watcher.close();
+
       for (const assetWatcher of assetWatchers) assetWatcher.close();
       resolve();
     };
@@ -1704,28 +1814,46 @@ async function watchArtifact(options: WatchOptions): Promise<void> {
   }
 }
 
-function emitWatchEvent(json: boolean, event: "published" | "updated", payload: object): void {
+function emitWatchEvent(
+  json: boolean,
+  event: "published" | "updated",
+  payload: PublishResponse | (UpdateResponse & { url: string | null | undefined }),
+): void {
   if (json) {
     console.log(JSON.stringify(withSchema({ event, ...payload })));
+
     return;
   }
 
-  if (event === "published" && "url" in payload && typeof payload.url === "string") {
+  if (event === "published" && payload.url !== null && payload.url !== undefined) {
     console.log(payload.url);
+
     return;
   }
 
   if (event === "updated" && "url" in payload) {
-    const value = typeof payload.url === "string" ? payload.url : "id" in payload ? String(payload.id) : "updated";
+    const value =
+      payload.url !== null && payload.url !== undefined
+        ? payload.url
+        : "id" in payload
+          ? String(payload.id)
+          : "updated";
+
     console.log(value);
   }
 }
 
-async function createHtmlUploadForm(filePath: string): Promise<{ form: FormData; hasMermaid: boolean; sourceKind: UploadSourceKind }> {
+async function createHtmlUploadForm(
+  filePath: string,
+): Promise<{ form: FormData; hasMermaid: boolean; sourceKind: UploadSourceKind }> {
   const upload = await readUploadFile(filePath);
   const form = new FormData();
 
-  form.set("file", new Blob([new Uint8Array(upload.bytes)], { type: "text/html; charset=utf-8" }), upload.uploadFilename);
+  form.set(
+    "file",
+    new Blob([new Uint8Array(upload.bytes)], { type: "text/html; charset=utf-8" }),
+    upload.uploadFilename,
+  );
   form.set("filename", upload.displayFilename);
 
   return { form, hasMermaid: upload.hasMermaid, sourceKind: upload.sourceKind };
@@ -1748,10 +1876,12 @@ async function resolveArtifactAttributes(
 
   const absolutePath = resolve(filePath);
   const repositoryRoot = runGit(dirname(absolutePath), ["rev-parse", "--show-toplevel"]);
+
   const inferred: ArtifactAttributes = {
     sourceHost: hostname(),
     artifactType: inferArtifactType(absolutePath),
   };
+
   const title = await inferArtifactTitle(absolutePath);
   const agent = inferAgent();
 
@@ -1800,6 +1930,7 @@ function runGit(directory: string, args: string[]): string | null {
   }
 
   const output = new TextDecoder().decode(result.stdout).trim();
+
   return output || null;
 }
 
@@ -1825,7 +1956,12 @@ async function inferArtifactTitle(filePath: string): Promise<string | undefined>
   const heading = source.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1];
   const candidate = title || heading;
 
-  return candidate ? candidate.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim() || undefined : undefined;
+  return candidate
+    ? candidate
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim() || undefined
+    : undefined;
 }
 
 function inferArtifactType(filePath: string): ArtifactType {
@@ -1886,7 +2022,10 @@ function inferAgent(): string | undefined {
 }
 
 function compactAttributes(attributes: ArtifactAttributes): ArtifactAttributes {
-  return Object.fromEntries(Object.entries(attributes).filter(([, value]) => value !== undefined && value !== "")) as ArtifactAttributes;
+  // SAFETY: This filter removes entries only; retained values come from the typed attributes input.
+  return Object.fromEntries(
+    Object.entries(attributes).filter(([, value]) => value !== undefined && value !== ""),
+  ) as ArtifactAttributes;
 }
 
 interface HtmlUpload {
@@ -1944,17 +2083,28 @@ async function readUploadFile(filePath: string): Promise<HtmlUpload> {
   };
 }
 
-function assertSandboxSupportsUpload(sourceKind: UploadSourceKind, hasMermaid: boolean, sandbox: SandboxMode): void {
+function assertSandboxSupportsUpload(
+  sourceKind: UploadSourceKind,
+  hasMermaid: boolean,
+  sandbox: SandboxMode,
+): void {
   if (sourceKind === "markdown" && hasMermaid && sandbox === "strict") {
-    throw new CliError("Mermaid diagrams require --sandbox standard because they use client-side scripts.");
+    throw new CliError(
+      "Mermaid diagrams require --sandbox standard because they use client-side scripts.",
+    );
   }
 }
 
-async function fetchArtifactDetail(endpoint: string, id: string, token: string): Promise<ArtifactDetailResponse> {
+async function fetchArtifactDetail(
+  endpoint: string,
+  id: string,
+  token: string,
+): Promise<ArtifactDetailResponse> {
   const response = await fetch(`${endpoint}/api/artifacts/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  return readJsonResponse<ArtifactDetailResponse>(response);
+
+  return readJsonResponse(response, parseArtifactDetailResponse);
 }
 
 function reportStage(json: boolean, message: string): void {
@@ -1981,41 +2131,53 @@ function decodeUtf8(bytes: Uint8Array, errorMessage: string): string {
 
 async function deleteArtifact(options: DeleteOptions): Promise<void> {
   const token = readPublishToken();
-  const response = await fetch(`${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}`, {
-    method: "DELETE",
-    headers: {
-      Authorization: `Bearer ${token}`,
+
+  const response = await fetch(
+    `${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
     },
-  });
+  );
 
   if (response.status === 404) {
     await removeReceipt(options.endpoint, options.id);
-    throw new CliError(`Artifact ${options.id} was not found; its stale local receipt was removed.`);
+    throw new CliError(
+      `Artifact ${options.id} was not found; its stale local receipt was removed.`,
+    );
   }
 
-  const payload = await readJsonResponse<DeleteResponse>(response);
+  const payload = await readJsonResponse(response, parseDeleteResponse);
   await removeReceipt(options.endpoint, options.id);
 
   if (options.json) {
     console.log(JSON.stringify(withSchema(payload), null, 2));
+
     return;
   }
 }
 
 async function reissueArtifact(options: ReissueOptions): Promise<void> {
   const token = readPublishToken();
-  const response = await fetch(`${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}/reissue`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
 
-  const payload = await readJsonResponse<ReissueResponse>(response);
+  const response = await fetch(
+    `${options.endpoint}/api/artifacts/${encodeURIComponent(options.id)}/reissue`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  );
+
+  const payload = await readJsonResponse(response, parseReissueResponse);
   await updateReceiptUrl(options.endpoint, options.id, payload.url, payload.revision);
 
   if (options.json) {
     console.log(JSON.stringify(withSchema(payload), null, 2));
+
     return;
   }
 
@@ -2024,16 +2186,18 @@ async function reissueArtifact(options: ReissueOptions): Promise<void> {
 
 async function listArtifacts(options: ListOptions): Promise<void> {
   const token = readPublishToken();
+
   const response = await fetch(`${options.endpoint}/api/artifacts`, {
     headers: {
       Authorization: `Bearer ${token}`,
     },
   });
 
-  const payload = await readJsonResponse<ListResponse>(response);
+  const payload = await readJsonResponse(response, parseListResponse);
 
   if (options.json) {
     console.log(JSON.stringify(withSchema(payload), null, 2));
+
     return;
   }
 
@@ -2047,12 +2211,19 @@ async function listArtifactVersions(options: VersionHistoryOptions): Promise<voi
   const url = resolved.url ? toViewerUrl(resolved.url) : null;
 
   if (options.json) {
-    console.log(JSON.stringify(withSchema({
-      id: artifact.id,
-      version: artifact.version,
-      versions: artifact.versions,
-      url,
-    }), null, 2));
+    console.log(
+      JSON.stringify(
+        withSchema({
+          id: artifact.id,
+          version: artifact.version,
+          versions: artifact.versions,
+          url,
+        }),
+        null,
+        2,
+      ),
+    );
+
     return;
   }
 
@@ -2068,27 +2239,31 @@ async function listArtifactVersions(options: VersionHistoryOptions): Promise<voi
 async function rollbackArtifact(options: RollbackOptions): Promise<void> {
   const resolved = await resolveVersionHistoryTarget(options);
   const token = readPublishToken();
-  const response = await fetch(`${resolved.endpoint}/api/artifacts/${encodeURIComponent(resolved.id)}/rollback`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
+
+  const response = await fetch(
+    `${resolved.endpoint}/api/artifacts/${encodeURIComponent(resolved.id)}/rollback`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ version: options.version }),
     },
-    body: JSON.stringify({ version: options.version }),
-  });
-  const payload = await readJsonResponse<UpdateResponse>(response);
+  );
+
+  const payload = await readJsonResponse(response, parseUpdateResponse);
 
   await updateReceiptAfterRollback(resolved.endpoint, resolved.id, payload);
 
   if (options.json) {
     console.log(JSON.stringify(withSchema(payload), null, 2));
+
     return;
   }
 
   const url = resolved.url ? toViewerUrl(resolved.url) : null;
-  console.log(
-    `Marked v${payload.version} as current for ${resolved.id}${url ? ` · ${url}` : ""}`,
-  );
+  console.log(`Marked v${payload.version} as current for ${resolved.id}${url ? ` · ${url}` : ""}`);
 }
 
 async function listReceipts(options: ReceiptListOptions): Promise<void> {
@@ -2096,26 +2271,40 @@ async function listReceipts(options: ReceiptListOptions): Promise<void> {
 
   if (options.json) {
     console.log(JSON.stringify(withSchema({ artifacts: store.artifacts }), null, 2));
+
     return;
   }
 
   if (store.artifacts.length === 0) {
     console.log("No local publication receipts.");
+
     return;
   }
 
-  for (const receipt of store.artifacts.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))) {
-    console.log(`${receipt.id}\t${receipt.attributes.title ?? basename(receipt.filePath)}\t${receipt.url ?? "URL unavailable"}`);
+  for (const receipt of store.artifacts.sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  )) {
+    console.log(
+      `${receipt.id}\t${receipt.attributes.title ?? basename(receipt.filePath)}\t${receipt.url ?? "URL unavailable"}`,
+    );
   }
 }
 
 async function showReceipt(options: ShowOptions): Promise<void> {
   const store = await readReceiptStore();
   const absoluteTarget = resolve(options.target);
-  const targetId = isArtifactTargetLike(options.target) ? parseArtifactTarget(options.target).id : options.target;
+
+  const targetId = isArtifactTargetLike(options.target)
+    ? parseArtifactTarget(options.target).id
+    : options.target;
+
   const receipt = store.artifacts
     .filter(
-      (candidate) => candidate.id === targetId || candidate.filePath === absoluteTarget || candidate.url === options.target || candidate.rawUrl === options.target,
+      (candidate) =>
+        candidate.id === targetId ||
+        candidate.filePath === absoluteTarget ||
+        candidate.url === options.target ||
+        candidate.rawUrl === options.target,
     )
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
 
@@ -2125,25 +2314,45 @@ async function showReceipt(options: ShowOptions): Promise<void> {
 
   if (options.json) {
     console.log(JSON.stringify(withSchema(receipt), null, 2));
+
     return;
   }
 
   console.log(receipt.url ?? `Artifact ${receipt.id} has no recoverable local URL.`);
 }
 
-async function findReceiptForArtifact(endpoint: string, id: string): Promise<ArtifactReceipt | null> {
+async function findReceiptForArtifact(
+  endpoint: string,
+  id: string,
+): Promise<ArtifactReceipt | null> {
   const store = await readReceiptStore();
-  return store.artifacts.find(receipt => receipt.id === id && (receipt.endpoint === endpoint || (receipt.url && new URL(receipt.url).origin === new URL(endpoint).origin))) ?? null;
+
+  return (
+    store.artifacts.find(
+      (receipt) =>
+        receipt.id === id &&
+        (receipt.endpoint === endpoint ||
+          (receipt.url && new URL(receipt.url).origin === new URL(endpoint).origin)),
+    ) ?? null
+  );
 }
 
-async function findReceiptByFile(endpoint: string, filePath: string): Promise<ArtifactReceipt | null> {
+async function findReceiptByFile(
+  endpoint: string,
+  filePath: string,
+): Promise<ArtifactReceipt | null> {
   const store = await readReceiptStore();
-  return store.artifacts
-    .filter((receipt) => receipt.endpoint === endpoint && receipt.filePath === filePath)
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+
+  return (
+    store.artifacts
+      .filter((receipt) => receipt.endpoint === endpoint && receipt.filePath === filePath)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null
+  );
 }
 
-async function resolveVersionHistoryTarget(options: VersionHistoryOptions): Promise<VersionHistoryOptions> {
+async function resolveVersionHistoryTarget(
+  options: VersionHistoryOptions,
+): Promise<VersionHistoryOptions> {
   if (options.receiptLookup) {
     if (!options.filePath) {
       throw new CliError("Receipt-based version commands require a file path.");
@@ -2152,7 +2361,9 @@ async function resolveVersionHistoryTarget(options: VersionHistoryOptions): Prom
     const receipt = await findReceiptByFile(options.endpoint, resolve(options.filePath));
 
     if (!receipt) {
-      throw new CliError(`No local PageBin receipt exists for ${options.filePath}. Publish it first or provide an artifact ID or viewer URL.`);
+      throw new CliError(
+        `No local PageBin receipt exists for ${options.filePath}. Publish it first or provide an artifact ID or viewer URL.`,
+      );
     }
 
     return {
@@ -2168,6 +2379,7 @@ async function resolveVersionHistoryTarget(options: VersionHistoryOptions): Prom
   }
 
   const store = await readReceiptStore();
+
   const receipt = store.artifacts
     .filter((candidate) => candidate.endpoint === options.endpoint && candidate.id === options.id)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
@@ -2186,7 +2398,9 @@ async function resolveUpdateReceipt(options: UpdateOptions): Promise<UpdateOptio
   const receipt = await findReceiptByFile(options.endpoint, resolve(options.filePath));
 
   if (!receipt) {
-    throw new CliError(`No local PageBin receipt exists for ${options.filePath}. Publish it first or provide an artifact ID or viewer URL.`);
+    throw new CliError(
+      `No local PageBin receipt exists for ${options.filePath}. Publish it first or provide an artifact ID or viewer URL.`,
+    );
   }
 
   return {
@@ -2212,7 +2426,9 @@ async function updateReceiptAfterContent(
   attributes: ArtifactAttributes,
 ): Promise<void> {
   await mutateReceiptStore((store) => {
-    const existing = store.artifacts.find((receipt) => receipt.endpoint === options.endpoint && receipt.id === options.id);
+    const existing = store.artifacts.find(
+      (receipt) => receipt.endpoint === options.endpoint && receipt.id === options.id,
+    );
 
     if (!options.filePath && !existing) {
       return;
@@ -2220,18 +2436,21 @@ async function updateReceiptAfterContent(
 
     const now = new Date().toISOString();
     const url = options.url ?? existing?.url ?? null;
+
     const receipt: ArtifactReceipt = {
       endpoint: options.endpoint,
       id: options.id,
       url,
       rawUrl: url ? toRawUrl(url) : null,
-      filePath: options.filePath ? resolve(options.filePath) : existing?.filePath ?? "",
+      filePath: options.filePath ? resolve(options.filePath) : (existing?.filePath ?? ""),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       revision: payload.revision ?? existing?.revision ?? 1,
       contentSha256: payload.contentSha256 ?? existing?.contentSha256 ?? null,
       attributes: payload.attributes ?? { ...existing?.attributes, ...attributes },
-      ...(options.bundle || existing?.bundle ? { bundle: true, assets: options.assets ?? existing?.assets ?? [] } : {}),
+      ...(options.bundle || existing?.bundle
+        ? { bundle: true, assets: options.assets ?? existing?.assets ?? [] }
+        : {}),
       ...(existing?.watch ? { watch: existing.watch } : {}),
     };
 
@@ -2242,9 +2461,16 @@ async function updateReceiptAfterContent(
   });
 }
 
-async function updateReceiptUrl(endpoint: string, id: string, url: string, revision: number): Promise<void> {
+async function updateReceiptUrl(
+  endpoint: string,
+  id: string,
+  url: string,
+  revision: number,
+): Promise<void> {
   await mutateReceiptStore((store) => {
-    const receipt = store.artifacts.find((candidate) => candidate.endpoint === endpoint && candidate.id === id);
+    const receipt = store.artifacts.find(
+      (candidate) => candidate.endpoint === endpoint && candidate.id === id,
+    );
 
     if (receipt) {
       receipt.url = url;
@@ -2255,9 +2481,15 @@ async function updateReceiptUrl(endpoint: string, id: string, url: string, revis
   });
 }
 
-async function updateReceiptAfterRollback(endpoint: string, id: string, payload: UpdateResponse): Promise<void> {
+async function updateReceiptAfterRollback(
+  endpoint: string,
+  id: string,
+  payload: UpdateResponse,
+): Promise<void> {
   await mutateReceiptStore((store) => {
-    const receipt = store.artifacts.find((candidate) => candidate.endpoint === endpoint && candidate.id === id);
+    const receipt = store.artifacts.find(
+      (candidate) => candidate.endpoint === endpoint && candidate.id === id,
+    );
 
     if (receipt) {
       receipt.updatedAt = new Date().toISOString();
@@ -2269,13 +2501,21 @@ async function updateReceiptAfterRollback(endpoint: string, id: string, payload:
 
 async function removeReceipt(endpoint: string, id: string): Promise<void> {
   await mutateReceiptStore((store) => {
-    store.artifacts = store.artifacts.filter((receipt) => receipt.endpoint !== endpoint || receipt.id !== id);
+    store.artifacts = store.artifacts.filter(
+      (receipt) => receipt.endpoint !== endpoint || receipt.id !== id,
+    );
   });
 }
 
-async function setWatchOwnership(endpoint: string, id: string, watch: WatchOwnership | null): Promise<void> {
+async function setWatchOwnership(
+  endpoint: string,
+  id: string,
+  watch: WatchOwnership | null,
+): Promise<void> {
   await mutateReceiptStore((store) => {
-    const receipt = store.artifacts.find((candidate) => candidate.endpoint === endpoint && candidate.id === id);
+    const receipt = store.artifacts.find(
+      (candidate) => candidate.endpoint === endpoint && candidate.id === id,
+    );
 
     if (!receipt) {
       return;
@@ -2300,6 +2540,7 @@ function describeActiveWatcher(receipt: ArtifactReceipt): string {
 
   try {
     process.kill(receipt.watch.pid, 0);
+
     return ` and is watched by PID ${receipt.watch.pid}`;
   } catch {
     return "";
@@ -2308,13 +2549,9 @@ function describeActiveWatcher(receipt: ArtifactReceipt): string {
 
 async function readReceiptStore(): Promise<ReceiptStore> {
   try {
-    const value = JSON.parse(await readFile(receiptStorePath(), "utf8")) as Partial<ReceiptStore>;
+    const serialized = await readFile(receiptStorePath(), "utf8");
 
-    if (value.schemaVersion !== 1 || !Array.isArray(value.artifacts)) {
-      throw new CliError(`Invalid pagebin receipt store at ${receiptStorePath()}.`);
-    }
-
-    return value as ReceiptStore;
+    return parseReceiptStore(JSON.parse(serialized));
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return { schemaVersion: 1, artifacts: [] };
@@ -2354,6 +2591,7 @@ async function acquireReceiptLock(lockPath: string): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
       await mkdir(lockPath, { mode: 0o700 });
+
       return;
     } catch (error) {
       if (!isNodeError(error) || error.code !== "EEXIST") {
@@ -2390,6 +2628,7 @@ function receiptStorePath(): string {
   }
 
   const stateHome = process.env.XDG_STATE_HOME?.trim() || resolve(homedir(), ".local/state");
+
   return resolve(stateHome, "pagebin/artifacts.json");
 }
 
@@ -2411,6 +2650,7 @@ function formatArtifactList(artifacts: ListedArtifact[]): string {
     sandbox: artifact.sandbox,
     size: formatBytes(artifact.size),
   }));
+
   const headers = {
     id: "ID",
     filename: "Filename",
@@ -2419,14 +2659,34 @@ function formatArtifactList(artifacts: ListedArtifact[]): string {
     sandbox: "Sandbox",
     size: "Size",
   };
+
   const widths = {
-    id: maxWidth(headers.id, rows.map((row) => row.id)),
-    filename: maxWidth(headers.filename, rows.map((row) => row.filename)),
-    created: maxWidth(headers.created, rows.map((row) => row.created)),
-    expires: maxWidth(headers.expires, rows.map((row) => row.expires)),
-    sandbox: maxWidth(headers.sandbox, rows.map((row) => row.sandbox)),
-    size: maxWidth(headers.size, rows.map((row) => row.size)),
+    id: maxWidth(
+      headers.id,
+      rows.map((row) => row.id),
+    ),
+    filename: maxWidth(
+      headers.filename,
+      rows.map((row) => row.filename),
+    ),
+    created: maxWidth(
+      headers.created,
+      rows.map((row) => row.created),
+    ),
+    expires: maxWidth(
+      headers.expires,
+      rows.map((row) => row.expires),
+    ),
+    sandbox: maxWidth(
+      headers.sandbox,
+      rows.map((row) => row.sandbox),
+    ),
+    size: maxWidth(
+      headers.size,
+      rows.map((row) => row.size),
+    ),
   };
+
   const lines = [
     [
       headers.id.padEnd(widths.id),
@@ -2490,7 +2750,9 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function readJsonResponse<T>(response: Response): Promise<T> {
+// This function parses response JSON before a dedicated contract validator receives it.
+// oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters
+async function readJsonResponse<T>(response: Response, parse: (value: unknown) => T): Promise<T> {
   const text = await response.text();
   let payload: unknown;
 
@@ -2501,12 +2763,16 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
   }
 
   if (!response.ok) {
-    const message = typeof payload === "object" && payload && "error" in payload ? String(payload.error) : text;
+    const message =
+      typeof payload === "object" && payload && "error" in payload ? String(payload.error) : text;
+
     throw new CliError(`Server returned ${response.status}: ${message}`);
   }
 
-  return payload as T;
+  return parse(payload);
 }
+
+// oxlint-enable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters
 
 function readPublishToken(): string {
   const token = process.env.PAGEBIN_PUBLISH_TOKEN?.trim();
@@ -2537,7 +2803,12 @@ function isArtifactTargetLike(value: string): boolean {
 
   try {
     const url = new URL(value);
-    return url.pathname.startsWith("/p/") || url.pathname.startsWith("/raw/") || url.pathname.startsWith("/download/");
+
+    return (
+      url.pathname.startsWith("/p/") ||
+      url.pathname.startsWith("/raw/") ||
+      url.pathname.startsWith("/download/")
+    );
   } catch {
     return false;
   }
@@ -2548,7 +2819,21 @@ function isHelpFlag(value: string | undefined): boolean {
 }
 
 function isHelpTopic(value: string): value is HelpTopic {
-  return value === "publish" || value === "list" || value === "reissue" || value === "update" || value === "watch" || value === "verify" || value === "versions" || value === "rollback" || value === "receipts" || value === "show" || value === "delete" || value === "skill" || value === "version";
+  return (
+    value === "publish" ||
+    value === "list" ||
+    value === "reissue" ||
+    value === "update" ||
+    value === "watch" ||
+    value === "verify" ||
+    value === "versions" ||
+    value === "rollback" ||
+    value === "receipts" ||
+    value === "show" ||
+    value === "delete" ||
+    value === "skill" ||
+    value === "version"
+  );
 }
 
 function helpText(topic: HelpTopic | null = null): string {

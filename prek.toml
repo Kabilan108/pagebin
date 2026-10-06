@@ -1,0 +1,36 @@
+default_stages = ["pre-commit"]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "format"
+name = "Oxfmt"
+entry = "direnv exec . bun run format:check"
+language = "system"
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "lint"
+name = "Oxlint and anti-slop"
+entry = "direnv exec . bun run lint"
+language = "system"
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "typecheck"
+name = "TypeScript"
+entry = "direnv exec . bun run typecheck"
+language = "system"
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "tests"
+name = "Bun tests"
+entry = "direnv exec . bun run test"
+language = "system"
+pass_filenames = false
+always_run = true

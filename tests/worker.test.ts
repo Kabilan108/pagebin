@@ -42,37 +42,51 @@ class MemoryR2Bucket {
       return null;
     }
 
-    if (options.onlyIf?.etagDoesNotMatch === '*' && this.objects.has(key)) return null;
+    if (options.onlyIf?.etagDoesNotMatch === "*" && this.objects.has(key)) return null;
+
     if (value instanceof ReadableStream) value = await new Response(value).arrayBuffer();
+
     if (options.sha256) {
-      const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
-      const hash = new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
-      if (hash !== options.sha256) throw new Error('Checksum mismatch');
+      const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
+      const hash = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+
+      if (hash !== options.sha256) throw new Error("Checksum mismatch");
     }
+
     const etag = this.nextEtag();
 
     if (typeof value === "string") {
-      this.objects.set(key, { bytes: copyArrayBuffer(new TextEncoder().encode(value)), etag, uploaded: new Date() });
+      this.objects.set(key, {
+        bytes: copyArrayBuffer(new TextEncoder().encode(value)),
+        etag,
+        uploaded: new Date(),
+      });
+
       return { etag };
     }
 
     if (ArrayBuffer.isView(value)) {
       this.objects.set(key, { bytes: copyArrayBuffer(value), etag, uploaded: new Date() });
+
       return { etag };
     }
 
     this.objects.set(key, { bytes: value, etag, uploaded: new Date() });
+
     return { etag };
   }
 
   async head(key: string) {
     const object = this.objects.get(key);
-    return object ? { size: object.bytes.byteLength, etag: object.etag, httpEtag: `"${object.etag}"` } : null;
+
+    return object
+      ? { size: object.bytes.byteLength, etag: object.etag, httpEtag: `"${object.etag}"` }
+      : null;
   }
 
   async get(
     key: string,
-    options?: {range?: {offset: number; length: number}},
+    options?: { range?: { offset: number; length: number } },
   ): Promise<{
     body: ReadableStream<Uint8Array> | null;
     text: () => Promise<string>;
@@ -102,7 +116,11 @@ class MemoryR2Bucket {
 
     return {
       arrayBuffer: async () => object.bytes,
-      body: new Response(options?.range ? object.bytes.slice(options.range.offset, options.range.offset + options.range.length) : object.bytes).body,
+      body: new Response(
+        options?.range
+          ? object.bytes.slice(options.range.offset, options.range.offset + options.range.length)
+          : object.bytes,
+      ).body,
       etag: object.etag,
       text: async () => new TextDecoder().decode(object.bytes),
     };
@@ -123,10 +141,12 @@ class MemoryR2Bucket {
   }> {
     this.listRequestCount += 1;
     const offset = Number(options.cursor ?? "0");
+
     const objects = [...this.objects.keys()]
       .filter((key) => !options.prefix || key.startsWith(options.prefix))
       .sort()
       .map((key) => ({ key, uploaded: this.objects.get(key)?.uploaded ?? new Date(0) }));
+
     const page = objects.slice(offset, offset + this.listPageSize);
     const nextOffset = offset + page.length;
     const truncated = nextOffset < objects.length;
@@ -140,6 +160,7 @@ class MemoryR2Bucket {
 
   private nextEtag(): string {
     this.etagSequence += 1;
+
     return `etag-${this.etagSequence}`;
   }
 }
@@ -156,6 +177,95 @@ interface TestEnv {
 }
 
 describe("worker", () => {
+  test("validates Access claim types and still requires the configured audience and RSA signature", async () => {
+    const env = createEnv({
+      PAGEBIN_ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
+      PAGEBIN_ACCESS_AUD: "pagebin-test",
+    });
+
+    const issuer = "https://team.cloudflareaccess.com";
+
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    );
+
+    const jwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+    const originalFetch = globalThis.fetch;
+    let keyRequests = 0;
+    // Provide a local key-discovery response; signature verification uses real Web Crypto.
+    globalThis.fetch = async (input) => {
+      expect(String(input)).toBe(`${issuer}/cdn-cgi/access/certs`);
+      keyRequests += 1;
+
+      return Response.json({ keys: [{ ...jwk, kid: "test-key" }] });
+    };
+
+    const baseClaims = {
+      aud: "pagebin-test",
+      iss: issuer,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    };
+
+    async function requestWithClaims(
+      claims: Record<string, string | string[] | number>,
+      signatureValid = true,
+      suffix = "",
+    ): Promise<Response> {
+      const header = base64UrlForTest(
+        new TextEncoder().encode(JSON.stringify({ alg: "RS256", kid: "test-key" })),
+      );
+
+      const payload = base64UrlForTest(new TextEncoder().encode(JSON.stringify(claims)));
+      const message = `${header}.${payload}`;
+
+      const signature = new Uint8Array(
+        await crypto.subtle.sign(
+          "RSASSA-PKCS1-v1_5",
+          keyPair.privateKey,
+          new TextEncoder().encode(message),
+        ),
+      );
+
+      if (!signatureValid) signature[0] = (signature[0] ?? 0) ^ 1;
+
+      return worker.fetch(
+        new Request("https://admin.page-bin.com/", {
+          headers: {
+            "Cf-Access-Jwt-Assertion": `${message}.${base64UrlForTest(signature)}${suffix}`,
+          },
+        }),
+        env as never,
+      );
+    }
+
+    try {
+      expect((await requestWithClaims(baseClaims)).status).toBe(200);
+      expect(
+        (await requestWithClaims({ ...baseClaims, aud: ["other", "pagebin-test"] })).status,
+      ).toBe(200);
+      expect((await requestWithClaims(baseClaims, false)).status).toBe(401);
+      expect((await requestWithClaims({ ...baseClaims, aud: "other" })).status).toBe(401);
+      expect((await requestWithClaims({ ...baseClaims, exp: 1 })).status).toBe(401);
+      const beforeMalformed = keyRequests;
+      expect((await requestWithClaims(baseClaims, true, ".junk")).status).toBe(401);
+      expect((await requestWithClaims({ ...baseClaims, exp: String(baseClaims.exp) })).status).toBe(
+        401,
+      );
+      expect((await requestWithClaims({ ...baseClaims, nbf: "not a timestamp" })).status).toBe(401);
+      expect((await requestWithClaims({ ...baseClaims, iat: "not a timestamp" })).status).toBe(401);
+      expect(keyRequests).toBe(beforeMalformed);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("publishes, serves, rejects wrong tokens, and deletes artifacts", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
@@ -163,7 +273,9 @@ describe("worker", () => {
     const viewerHtml = await viewerResponse.text();
 
     expect(viewerResponse.status).toBe(200);
-    expect(viewerHtml).toContain('sandbox="allow-scripts allow-forms allow-popups allow-downloads"');
+    expect(viewerHtml).toContain(
+      'sandbox="allow-scripts allow-forms allow-popups allow-downloads"',
+    );
     expect(viewerHtml).toContain('allow="clipboard-write"');
     expect(viewerHtml).toContain('class="pagebin-bar"');
     expect(viewerHtml).toContain('id="pagebin-vnum">1<');
@@ -181,9 +293,14 @@ describe("worker", () => {
     expect(rawResponse.status).toBe(200);
     expect(await rawResponse.text()).toContain("<script>");
     expect(rawResponse.headers.get("Cache-Control")).toContain("no-transform");
-    expect(rawResponse.headers.get("Content-Security-Policy")).toBe("sandbox allow-scripts allow-forms allow-popups allow-downloads");
+    expect(rawResponse.headers.get("Content-Security-Policy")).toBe(
+      "sandbox allow-scripts allow-forms allow-popups allow-downloads",
+    );
 
-    const wrongTokenResponse = await worker.fetch(new Request(`${published.url.slice(0, published.url.lastIndexOf("/") + 1)}wrong`), env as never);
+    const wrongTokenResponse = await worker.fetch(
+      new Request(`${published.url.slice(0, published.url.lastIndexOf("/") + 1)}wrong`),
+      env as never,
+    );
 
     expect(wrongTokenResponse.status).toBe(404);
 
@@ -201,18 +318,23 @@ describe("worker", () => {
 
   test("shows known agents as icons and falls back to an escaped name", async () => {
     const env = createEnv();
+
     const knownAgents = [
       ["amp", "amp"],
       ["claude-code", "claude"],
       ["codex", "codex"],
       ["opencode", "opencode"],
     ] as const;
+
     const customArtifact = await publishFixture(env, { attributes: { agent: "custom <agent>" } });
 
     for (const [agent, brand] of knownAgents) {
       const artifact = await publishFixture(env, { attributes: { agent } });
       const liveHtml = await (await worker.fetch(new Request(artifact.url), env as never)).text();
-      const pinnedHtml = await (await worker.fetch(new Request(`${artifact.url}/v/1`), env as never)).text();
+
+      const pinnedHtml = await (
+        await worker.fetch(new Request(`${artifact.url}/v/1`), env as never)
+      ).text();
 
       for (const html of [liveHtml, pinnedHtml]) {
         expect(html).toContain(`class="pb-agent pb-agent-${brand}"`);
@@ -221,17 +343,24 @@ describe("worker", () => {
       }
     }
 
-    const customHtml = await (await worker.fetch(new Request(customArtifact.url), env as never)).text();
-    expect(customHtml).toContain('<span class="pb-agent-name" title="Publishing agent">custom &lt;agent&gt;</span>');
+    const customHtml = await (
+      await worker.fetch(new Request(customArtifact.url), env as never)
+    ).text();
+
+    expect(customHtml).toContain(
+      '<span class="pb-agent-name" title="Publishing agent">custom &lt;agent&gt;</span>',
+    );
   });
 
   test("updates artifact content while preserving the existing viewer URL", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const updateResponse = await updateFixtureResponse(env, published.id, {
       contents: "<!doctype html><h1>updated</h1>",
       filename: "updated-plan.html",
     });
+
     const payload = (await updateResponse.json()) as {
       contentSha256: string;
       filename: string;
@@ -241,11 +370,19 @@ describe("worker", () => {
       updatedAt: string;
       size: number;
     };
-    const rawResponse = await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never);
-    const versionResponse = await worker.fetch(
-      new Request(published.url.replace("/p/", "/api/artifacts/").replace(/\/([^/]+)$/, "/version/$1")),
+
+    const rawResponse = await worker.fetch(
+      new Request(published.url.replace("/p/", "/raw/")),
       env as never,
     );
+
+    const versionResponse = await worker.fetch(
+      new Request(
+        published.url.replace("/p/", "/api/artifacts/").replace(/\/([^/]+)$/, "/version/$1"),
+      ),
+      env as never,
+    );
+
     const versionPayload = (await versionResponse.json()) as {
       id: string;
       contentSha256: string;
@@ -295,6 +432,7 @@ describe("worker", () => {
       contents: "<!doctype html><h1>second</h1>",
       filename: "second.html",
     });
+
     const payload = (await response.json()) as { version: number };
     const updated = await readMetadataFixture(env, published.id);
 
@@ -315,10 +453,12 @@ describe("worker", () => {
     const before = env.ARTIFACTS.objects.get(metadataKey);
     const objectCount = env.ARTIFACTS.objects.size;
     const contents = "<!doctype html><script>globalThis.ok = true</script>";
+
     const noOpResponse = await updateFixtureResponse(env, published.id, {
       contents,
       filename: "plan.html",
     });
+
     const noOp = (await noOpResponse.json()) as { revision: number; version: number };
 
     expect(noOpResponse.status).toBe(200);
@@ -335,11 +475,13 @@ describe("worker", () => {
         ttlSeconds: "604800",
       },
     );
+
     const metadataOnly = (await metadataOnlyResponse.json()) as {
       expiresAt: string | null;
       revision: number;
       version: number;
     };
+
     const stored = await readMetadataFixture(env, published.id);
 
     expect(metadataOnlyResponse.status).toBe(200);
@@ -381,10 +523,12 @@ describe("worker", () => {
     );
 
     const token = new URL(published.url).pathname.split("/").at(-1) ?? "";
+
     const versionsResponse = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${published.id}/versions/${token}`),
       env as never,
     );
+
     const versionsPayload = (await versionsResponse.json()) as {
       version: number;
       versions: Array<{ version: number; contentSha256: string | null; current: boolean }>;
@@ -405,11 +549,13 @@ describe("worker", () => {
       contents: "<!doctype html><script>globalThis.ok = true</script>",
       filename: "plan.html",
     });
+
     const updatePayload = (await updateResponse.json()) as {
       contentSha256: string;
       revision: number;
       version: number;
     };
+
     const reconciled = await readMetadataFixture(env, published.id);
 
     expect(updateResponse.status).toBe(200);
@@ -442,13 +588,16 @@ describe("worker", () => {
         contents: `<!doctype html><h1>version ${version}</h1>`,
         filename: "plan.html",
       });
+
       expect(response.status).toBe(200);
     }
 
     const metadata = await readMetadataFixture(env, published.id);
 
     expect(metadata.versions).toHaveLength(10);
-    expect(metadata.versions.map((entry) => entry.version)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(metadata.versions.map((entry) => entry.version)).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
     expect(metadata.versions.at(-1)).toMatchObject({
       version: 12,
       contentKey: metadata.contentKey,
@@ -475,12 +624,17 @@ describe("worker", () => {
     expect(after.contentKey).toBe(originalKey);
     expect(after.currentVersion).toBe(1);
     expect(after.versions.map((entry) => entry.version)).toEqual([1, 2]);
-    expect(await (await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never)).text()).toContain("globalThis.ok");
+    expect(
+      await (
+        await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never)
+      ).text(),
+    ).toContain("globalThis.ok");
 
     const updateAfterRollback = await updateFixtureResponse(env, published.id, {
       contents: "<!doctype html><h1>third</h1>",
       filename: "third.html",
     });
+
     const updatePayload = (await updateAfterRollback.json()) as { version: number };
     const resumed = await readMetadataFixture(env, published.id);
 
@@ -540,7 +694,12 @@ describe("worker", () => {
       contents: "<!doctype html><h1>second</h1>",
       filename: "second.html",
     });
-    const pinnedRaw = await worker.fetch(new Request(`${published.url.replace("/p/", "/raw/")}/v/1`), env as never);
+
+    const pinnedRaw = await worker.fetch(
+      new Request(`${published.url.replace("/p/", "/raw/")}/v/1`),
+      env as never,
+    );
+
     const pinnedViewer = await worker.fetch(new Request(`${published.url}/v/1`), env as never);
     const viewerHtml = await pinnedViewer.text();
 
@@ -553,8 +712,12 @@ describe("worker", () => {
     expect(viewerHtml).toContain('id="pagebin-dd"');
     expect(viewerHtml).not.toContain("pagebinPoll");
     expect(viewerHtml).not.toContain("/api/artifacts/");
-    expect((await worker.fetch(new Request(`${published.url}/v/0`), env as never)).status).toBe(404);
-    expect((await worker.fetch(new Request(`${published.url}/v/99`), env as never)).status).toBe(404);
+    expect((await worker.fetch(new Request(`${published.url}/v/0`), env as never)).status).toBe(
+      404,
+    );
+    expect((await worker.fetch(new Request(`${published.url}/v/99`), env as never)).status).toBe(
+      404,
+    );
 
     const wrongTokenUrl = `${published.url.slice(0, published.url.lastIndexOf("/") + 1)}wrong/v/1`;
     expect((await worker.fetch(new Request(wrongTokenUrl), env as never)).status).toBe(404);
@@ -564,8 +727,17 @@ describe("worker", () => {
 
     try {
       Date.now = () => originalDateNow() + 2000;
-      expect((await worker.fetch(new Request(`${expiring.url}/v/1`), env as never)).status).toBe(404);
-      expect((await worker.fetch(new Request(`${expiring.url.replace("/p/", "/raw/")}/v/1`), env as never)).status).toBe(404);
+      expect((await worker.fetch(new Request(`${expiring.url}/v/1`), env as never)).status).toBe(
+        404,
+      );
+      expect(
+        (
+          await worker.fetch(
+            new Request(`${expiring.url.replace("/p/", "/raw/")}/v/1`),
+            env as never,
+          )
+        ).status,
+      ).toBe(404);
     } finally {
       Date.now = originalDateNow;
     }
@@ -579,11 +751,14 @@ describe("worker", () => {
       filename: "second.html",
     });
     const token = new URL(published.url).pathname.split("/").at(-1) ?? "";
+
     const response = await worker.fetch(
       new Request(`https://page-bin.com/api/artifacts/${published.id}/versions/${token}`),
       env as never,
     );
+
     const responseBody = await response.text();
+
     const payload = JSON.parse(responseBody) as {
       id: string;
       version: number;
@@ -612,6 +787,7 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const detailBody = await detail.text();
 
     expect(detailBody).not.toContain("contentKey");
@@ -621,6 +797,7 @@ describe("worker", () => {
   test("changes or removes TTL without uploading content", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const expiringResponse = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
         method: "PATCH",
@@ -629,7 +806,11 @@ describe("worker", () => {
       }),
       env as never,
     );
-    const expiring = (await expiringResponse.json()) as { expiresAt: string | null; revision: number };
+
+    const expiring = (await expiringResponse.json()) as {
+      expiresAt: string | null;
+      revision: number;
+    };
 
     expect(expiringResponse.status).toBe(200);
     expect(expiring.expiresAt).not.toBeNull();
@@ -643,7 +824,11 @@ describe("worker", () => {
       }),
       env as never,
     );
-    const permanent = (await permanentResponse.json()) as { expiresAt: string | null; revision: number };
+
+    const permanent = (await permanentResponse.json()) as {
+      expiresAt: string | null;
+      revision: number;
+    };
 
     expect(permanentResponse.status).toBe(200);
     expect(permanent.expiresAt).toBeNull();
@@ -654,12 +839,14 @@ describe("worker", () => {
   test("commits content and TTL as one conditional metadata update", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const response = await updateFixtureResponse(
       env,
       published.id,
       { contents: "<!doctype html><h1>expiring update</h1>", filename: "updated.html" },
       { ttlSeconds: "604800" },
     );
+
     const payload = (await response.json()) as { expiresAt: string | null; revision: number };
 
     expect(response.status).toBe(200);
@@ -670,17 +857,21 @@ describe("worker", () => {
   test("preserves expiration when a content update omits TTL", async () => {
     const env = createEnv();
     const published = await publishFixture(env, { ttlSeconds: "604800" });
+
     const beforeResponse = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
         headers: { Authorization: "Bearer publish-secret" },
       }),
       env as never,
     );
+
     const before = (await beforeResponse.json()) as { expiresAt: string | null };
+
     const updateResponse = await updateFixtureResponse(env, published.id, {
       contents: "<!doctype html><h1>still expiring</h1>",
       filename: "updated.html",
     });
+
     const updated = (await updateResponse.json()) as { expiresAt: string | null };
 
     expect(updateResponse.status).toBe(200);
@@ -691,6 +882,7 @@ describe("worker", () => {
   test("requires publisher authorization to update artifacts", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const multipart = createMultipartBody({
       fields: {},
       file: {
@@ -698,6 +890,7 @@ describe("worker", () => {
         filename: "updated-plan.html",
       },
     });
+
     const response = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${published.id}/content`, {
         body: multipart.body,
@@ -734,12 +927,14 @@ describe("worker", () => {
   test("lists stored artifact metadata without view tokens", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const response = await worker.fetch(
       new Request("https://pagebin.test/api/artifacts", {
         headers: { Authorization: "Bearer publish-secret" },
       }),
       env as never,
     );
+
     const payload = (await response.json()) as {
       artifacts: Array<{
         createdAt: string;
@@ -752,6 +947,7 @@ describe("worker", () => {
         contentSha256: string;
       }>;
     };
+
     const token = new URL(published.url).pathname.split("/").at(-1);
 
     expect(response.status).toBe(200);
@@ -775,25 +971,36 @@ describe("worker", () => {
   test("returns one artifact's verification metadata to authorized clients", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const response = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
         headers: { Authorization: "Bearer publish-secret" },
       }),
       env as never,
     );
-    const payload = (await response.json()) as { id: string; revision: number; contentSha256: string };
+
+    const payload = (await response.json()) as {
+      id: string;
+      revision: number;
+      contentSha256: string;
+    };
 
     expect(response.status).toBe(200);
     expect(payload.id).toBe(published.id);
     expect(payload.revision).toBe(1);
     expect(payload.contentSha256).toMatch(/^[a-f0-9]{64}$/);
 
-    const unauthorized = await worker.fetch(new Request(`https://pagebin.test/api/artifacts/${published.id}`), env as never);
+    const unauthorized = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`),
+      env as never,
+    );
+
     expect(unauthorized.status).toBe(401);
   });
 
   test("uses the display filename multipart field for stored metadata", async () => {
     const env = createEnv();
+
     const multipart = createMultipartBody({
       fields: {
         filename: "agent-report.md",
@@ -804,6 +1011,7 @@ describe("worker", () => {
         filename: "agent-report.html",
       },
     });
+
     const publishResponse = await worker.fetch(
       new Request("https://pagebin.test/api/publish", {
         method: "POST",
@@ -816,12 +1024,14 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const listResponse = await worker.fetch(
       new Request("https://pagebin.test/api/artifacts", {
         headers: { Authorization: "Bearer publish-secret" },
       }),
       env as never,
     );
+
     const payload = (await listResponse.json()) as {
       artifacts: Array<{ filename: string }>;
     };
@@ -832,6 +1042,7 @@ describe("worker", () => {
 
   test("stores validated artifact attributes and merges them on update", async () => {
     const env = createEnv();
+
     const multipart = createMultipartBody({
       fields: {
         attributes: JSON.stringify({
@@ -843,6 +1054,7 @@ describe("worker", () => {
       },
       file: { contents: "<!doctype html><h1>plan</h1>", filename: "plan.html" },
     });
+
     const publishResponse = await worker.fetch(
       new Request("https://pagebin.test/api/publish", {
         method: "POST",
@@ -855,9 +1067,16 @@ describe("worker", () => {
       }),
       env as never,
     );
-    const published = (await publishResponse.json()) as PublishedArtifact & { attributes: Record<string, string> };
 
-    expect(published.attributes).toMatchObject({ title: "Dashboard plan", project: "pagebin", sourceHost: "sietch" });
+    const published = (await publishResponse.json()) as PublishedArtifact & {
+      attributes: Record<string, string>;
+    };
+
+    expect(published.attributes).toMatchObject({
+      title: "Dashboard plan",
+      project: "pagebin",
+      sourceHost: "sietch",
+    });
 
     const updateResponse = await updateFixtureResponse(
       env,
@@ -865,6 +1084,7 @@ describe("worker", () => {
       { contents: "<!doctype html><h1>done</h1>", filename: "plan.html" },
       { attributes: JSON.stringify({ gitCommit: "abc123" }) },
     );
+
     const updated = (await updateResponse.json()) as { attributes: Record<string, string> };
 
     expect(updated.attributes).toMatchObject({
@@ -877,6 +1097,7 @@ describe("worker", () => {
   test("rejects invalid artifact attributes on update with a client error", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const response = await updateFixtureResponse(
       env,
       published.id,
@@ -889,10 +1110,12 @@ describe("worker", () => {
 
   test("rejects unknown artifact attributes", async () => {
     const env = createEnv();
+
     const multipart = createMultipartBody({
       fields: { attributes: JSON.stringify({ secretViewerToken: "nope" }) },
       file: { contents: "<!doctype html><h1>plan</h1>", filename: "plan.html" },
     });
+
     const response = await worker.fetch(
       new Request("https://pagebin.test/api/publish", {
         method: "POST",
@@ -911,10 +1134,12 @@ describe("worker", () => {
 
   test("accepts and discards legacy status attributes", async () => {
     const env = createEnv();
+
     const multipart = createMultipartBody({
       fields: { attributes: JSON.stringify({ title: "Legacy client", status: "active" }) },
       file: { contents: "<!doctype html><h1>legacy</h1>", filename: "legacy.html" },
     });
+
     const response = await worker.fetch(
       new Request("https://pagebin.test/api/publish", {
         method: "POST",
@@ -927,6 +1152,7 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const payload = (await response.json()) as { attributes: Record<string, string> };
 
     expect(response.status).toBe(201);
@@ -936,6 +1162,7 @@ describe("worker", () => {
   test("uses the display filename multipart field when updating metadata", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const updateResponse = await updateFixtureResponse(
       env,
       published.id,
@@ -945,13 +1172,16 @@ describe("worker", () => {
       },
       { filename: "agent-report.md" },
     );
+
     const updatePayload = (await updateResponse.json()) as { filename: string };
+
     const listResponse = await worker.fetch(
       new Request("https://pagebin.test/api/artifacts", {
         headers: { Authorization: "Bearer publish-secret" },
       }),
       env as never,
     );
+
     const listPayload = (await listResponse.json()) as {
       artifacts: Array<{ filename: string }>;
     };
@@ -963,7 +1193,11 @@ describe("worker", () => {
 
   test("requires publisher authorization to list artifacts", async () => {
     const env = createEnv();
-    const response = await worker.fetch(new Request("https://pagebin.test/api/artifacts"), env as never);
+
+    const response = await worker.fetch(
+      new Request("https://pagebin.test/api/artifacts"),
+      env as never,
+    );
 
     expect(response.status).toBe(401);
   });
@@ -971,6 +1205,7 @@ describe("worker", () => {
   test("reissues a viewer URL and revokes the old token", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const response = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
         method: "POST",
@@ -978,6 +1213,7 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const payload = (await response.json()) as {
       expiresAt: string | null;
       id: string;
@@ -1000,6 +1236,7 @@ describe("worker", () => {
   test("requires publisher authorization to reissue artifacts", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
+
     const response = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
         method: "POST",
@@ -1037,7 +1274,11 @@ describe("worker", () => {
     const published = await publishFixture(env, { sandbox: "strict" });
     const viewerResponse = await worker.fetch(new Request(published.url), env as never);
     const viewerHtml = await viewerResponse.text();
-    const rawResponse = await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never);
+
+    const rawResponse = await worker.fetch(
+      new Request(published.url.replace("/p/", "/raw/")),
+      env as never,
+    );
 
     expect(viewerHtml).toContain(" sandbox ");
     expect(viewerHtml).not.toContain("allow-scripts");
@@ -1053,6 +1294,7 @@ describe("worker", () => {
     try {
       Date.now = () => originalDateNow() + 2000;
       const expiredResponse = await worker.fetch(new Request(published.url), env as never);
+
       const unknownResponse = await worker.fetch(
         new Request("https://pagebin.test/p/unknownunknownunknown/t"),
         env as never,
@@ -1060,7 +1302,9 @@ describe("worker", () => {
 
       expect(expiredResponse.status).toBe(404);
       expect(expiredResponse.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
-      expect(expiredResponse.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
+      expect(expiredResponse.headers.get("Content-Security-Policy")).toContain(
+        "default-src 'none'",
+      );
       expect(await expiredResponse.text()).toContain("Artifact not found");
       expect(unknownResponse.status).toBe(404);
       expect(await unknownResponse.text()).toContain("Artifact not found");
@@ -1071,8 +1315,16 @@ describe("worker", () => {
 
   test("site routes use the branded 404 while API routes keep plain errors", async () => {
     const env = createEnv();
-    const siteResponse = await worker.fetch(new Request("https://pagebin.test/missing"), env as never);
-    const apiResponse = await worker.fetch(new Request("https://pagebin.test/api/missing"), env as never);
+
+    const siteResponse = await worker.fetch(
+      new Request("https://pagebin.test/missing"),
+      env as never,
+    );
+
+    const apiResponse = await worker.fetch(
+      new Request("https://pagebin.test/api/missing"),
+      env as never,
+    );
 
     expect(siteResponse.status).toBe(404);
     expect(siteResponse.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
@@ -1113,7 +1365,9 @@ describe("worker", () => {
     try {
       Date.now = () => originalDateNow() + 2000;
 
-      await withSuppressedConsoleError(() => worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext));
+      await withSuppressedConsoleError(() =>
+        worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext),
+      );
 
       expect(await env.ARTIFACTS.get(`artifacts/${expired.id}/metadata.json`)).not.toBeNull();
       expect(await env.ARTIFACTS.get(`artifacts/${expired.id}/index.html`)).not.toBeNull();
@@ -1139,6 +1393,7 @@ describe("worker", () => {
       PAGEBIN_CAPABILITY_KEY_VERSION: "test-v1",
       PAGEBIN_PUBLIC_ORIGIN: "https://page-bin.com",
     });
+
     const published = await publishFixture(env);
     const token = new URL(published.url).pathname.split("/").at(-1) ?? "";
     const metadata = await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`);
@@ -1152,14 +1407,22 @@ describe("worker", () => {
     expect(dashboard.status).toBe(200);
     expect(await dashboard.text()).toContain("PageBin artifacts");
 
-    const listResponse = await worker.fetch(new Request("http://localhost/api/dashboard/artifacts"), env as never);
-    const list = (await listResponse.json()) as { artifacts: Array<{ id: string; linkRecoverable: boolean }> };
+    const listResponse = await worker.fetch(
+      new Request("http://localhost/api/dashboard/artifacts"),
+      env as never,
+    );
+
+    const list = (await listResponse.json()) as {
+      artifacts: Array<{ id: string; linkRecoverable: boolean }>;
+    };
+
     expect(list.artifacts[0]).toMatchObject({ id: published.id, linkRecoverable: true });
 
     const linkResponse = await worker.fetch(
       new Request(`http://localhost/api/dashboard/artifacts/${published.id}/link`),
       env as never,
     );
+
     const link = (await linkResponse.json()) as { url: string };
     expect(link.url).toBe(published.url);
 
@@ -1167,6 +1430,7 @@ describe("worker", () => {
       new Request(`http://localhost/api/dashboard/artifacts/${published.id}/open`),
       env as never,
     );
+
     expect(openResponse.status).toBe(303);
     expect(openResponse.headers.get("Location")).toBe(published.url);
 
@@ -1177,15 +1441,19 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const reissued = (await reissueResponse.json()) as { url: string };
     expect(reissued.url).not.toBe(published.url);
     expect((await worker.fetch(new Request(published.url), env as never)).status).toBe(404);
     expect((await worker.fetch(new Request(reissued.url), env as never)).status).toBe(200);
 
     const missingCsrf = await worker.fetch(
-      new Request(`http://localhost/api/dashboard/artifacts/${published.id}/reissue`, { method: "POST" }),
+      new Request(`http://localhost/api/dashboard/artifacts/${published.id}/reissue`, {
+        method: "POST",
+      }),
       env as never,
     );
+
     expect(missingCsrf.status).toBe(403);
   });
 
@@ -1197,7 +1465,12 @@ describe("worker", () => {
 
     try {
       Date.now = () => originalDateNow() + 2000;
-      const response = await worker.fetch(new Request("http://localhost/api/dashboard/artifacts"), env as never);
+
+      const response = await worker.fetch(
+        new Request("http://localhost/api/dashboard/artifacts"),
+        env as never,
+      );
+
       const payload = (await response.json()) as { artifacts: Array<{ id: string }> };
 
       expect(response.status).toBe(200);
@@ -1224,8 +1497,12 @@ describe("worker", () => {
     console.error = (...values: unknown[]) => errors.push(values);
 
     try {
-      const response = await worker.fetch(new Request("http://localhost/api/dashboard/artifacts"), env as never);
-      const payload = await response.json() as { artifacts: unknown[]; total: number };
+      const response = await worker.fetch(
+        new Request("http://localhost/api/dashboard/artifacts"),
+        env as never,
+      );
+
+      const payload = (await response.json()) as { artifacts: unknown[]; total: number };
 
       expect(response.status).toBe(200);
       expect(payload.total).toBe(8);
@@ -1259,7 +1536,8 @@ describe("worker", () => {
         }),
         env as never,
       );
-      const payload = await response.json() as { artifacts: unknown[] };
+
+      const payload = (await response.json()) as { artifacts: unknown[] };
 
       expect(response.status).toBe(200);
       expect(payload.artifacts).toHaveLength(4);
@@ -1273,7 +1551,9 @@ describe("worker", () => {
   test("keeps public, API, and admin origins isolated", async () => {
     const env = createEnv();
 
-    expect((await worker.fetch(new Request("https://page-bin.com/api/artifacts"), env as never)).status).toBe(421);
+    expect(
+      (await worker.fetch(new Request("https://page-bin.com/api/artifacts"), env as never)).status,
+    ).toBe(421);
     expect(
       (
         await worker.fetch(
@@ -1282,7 +1562,14 @@ describe("worker", () => {
         )
       ).status,
     ).toBe(404);
-    expect((await worker.fetch(new Request("https://api.page-bin.com/p/unknownunknownunknown/token"), env as never)).status).toBe(421);
+    expect(
+      (
+        await worker.fetch(
+          new Request("https://api.page-bin.com/p/unknownunknownunknown/token"),
+          env as never,
+        )
+      ).status,
+    ).toBe(421);
     expect(
       (
         await worker.fetch(
@@ -1294,11 +1581,14 @@ describe("worker", () => {
         )
       ).status,
     ).toBe(404);
-    expect((await worker.fetch(new Request("https://admin.page-bin.com/"), env as never)).status).toBe(401);
+    expect(
+      (await worker.fetch(new Request("https://admin.page-bin.com/"), env as never)).status,
+    ).toBe(401);
   });
 
   test("rejects invalid publish requests with client errors", async () => {
     const env = createEnv();
+
     const unsupportedResponse = await worker.fetch(
       new Request("https://pagebin.test/api/publish", {
         body: "{}",
@@ -1311,6 +1601,7 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const oversizedResponse = await worker.fetch(
       new Request("https://pagebin.test/api/publish", {
         body: "x",
@@ -1323,7 +1614,10 @@ describe("worker", () => {
       }),
       env as never,
     );
-    const invalidTtlResponse = await publishFixtureResponse(env, { ttlSeconds: "999999999999999999999999" });
+
+    const invalidTtlResponse = await publishFixtureResponse(env, {
+      ttlSeconds: "999999999999999999999999",
+    });
 
     expect(unsupportedResponse.status).toBe(415);
     expect(oversizedResponse.status).toBe(413);
@@ -1332,6 +1626,7 @@ describe("worker", () => {
 
   test("rejects direct markdown uploads at the worker boundary", async () => {
     const env = createEnv();
+
     const publishMultipart = createMultipartBody({
       fields: { sandbox: "standard" },
       file: {
@@ -1339,6 +1634,7 @@ describe("worker", () => {
         filename: "agent-report.md",
       },
     });
+
     const publishResponse = await worker.fetch(
       new Request("https://pagebin.test/api/publish", {
         body: publishMultipart.body,
@@ -1351,7 +1647,9 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const published = await publishFixture(env);
+
     const updateResponse = await updateFixtureResponse(env, published.id, {
       contents: "# Not pre-rendered",
       filename: "agent-report.md",
@@ -1363,6 +1661,7 @@ describe("worker", () => {
 
   test("rejects publish requests without a bounded content length", async () => {
     const env = createEnv();
+
     const request = new Request("https://pagebin.test/api/publish", {
       body: new ReadableStream({
         start(controller) {
@@ -1376,6 +1675,7 @@ describe("worker", () => {
       },
       method: "POST",
     });
+
     const response = await worker.fetch(request, env as never);
 
     expect(response.status).toBe(413);
@@ -1408,7 +1708,9 @@ describe("worker", () => {
     const response = await withSuppressedConsoleError(() => publishFixtureResponse(env));
 
     expect(response.status).toBe(500);
-    expect([...env.ARTIFACTS.objects.keys()].some((key) => key.endsWith("/index.html"))).toBe(false);
+    expect([...env.ARTIFACTS.objects.keys()].some((key) => key.endsWith("/index.html"))).toBe(
+      false,
+    );
   });
 
   test("rolls back updated HTML if update metadata persistence fails", async () => {
@@ -1423,7 +1725,11 @@ describe("worker", () => {
         filename: "updated-plan.html",
       }),
     );
-    const rawResponse = await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never);
+
+    const rawResponse = await worker.fetch(
+      new Request(published.url.replace("/p/", "/raw/")),
+      env as never,
+    );
 
     expect(response.status).toBe(500);
     expect(await rawResponse.text()).toContain("<script>globalThis.ok = true</script>");
@@ -1439,11 +1745,17 @@ describe("worker", () => {
       contents: "<!doctype html><h1>racing update</h1>",
       filename: "racing-update.html",
     });
-    const rawResponse = await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never);
+
+    const rawResponse = await worker.fetch(
+      new Request(published.url.replace("/p/", "/raw/")),
+      env as never,
+    );
 
     expect(response.status).toBe(409);
     expect(await rawResponse.text()).toContain("<script>globalThis.ok = true</script>");
-    expect([...env.ARTIFACTS.objects.keys()].filter((key) => key.includes("/content/"))).toHaveLength(0);
+    expect(
+      [...env.ARTIFACTS.objects.keys()].filter((key) => key.includes("/content/")),
+    ).toHaveLength(0);
   });
 
   test("rejects a concurrent TTL update without changing expiration", async () => {
@@ -1460,6 +1772,7 @@ describe("worker", () => {
       }),
       env as never,
     );
+
     const metadata = await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`);
     const stored = JSON.parse((await metadata?.text()) ?? "{}") as { expiresAt: string | null };
 
@@ -1526,11 +1839,17 @@ describe("worker", () => {
 
     const viewerUrl = `https://pagebin.test/p/${id}/${token}`;
     expect((await worker.fetch(new Request(viewerUrl), env as never)).status).toBe(200);
-    expect(await (await worker.fetch(new Request(viewerUrl.replace("/p/", "/raw/")), env as never)).text()).toContain("legacy");
+    expect(
+      await (
+        await worker.fetch(new Request(viewerUrl.replace("/p/", "/raw/")), env as never)
+      ).text(),
+    ).toContain("legacy");
+
     const legacyVersions = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${id}/versions/${token}`),
       env as never,
     );
+
     expect(await legacyVersions.json()).toMatchObject({
       version: 1,
       versions: [{ version: 1, contentSha256: null, current: true }],
@@ -1540,20 +1859,33 @@ describe("worker", () => {
       contents: "<!doctype html><h1>modernized</h1>",
       filename: "modernized.html",
     });
-    const updatePayload = (await updateResponse.json()) as { revision: number; version: number; contentSha256: string };
+
+    const updatePayload = (await updateResponse.json()) as {
+      revision: number;
+      version: number;
+      contentSha256: string;
+    };
 
     expect(updateResponse.status).toBe(200);
     expect(updatePayload.revision).toBe(2);
     expect(updatePayload.version).toBe(2);
     expect(updatePayload.contentSha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(await (await worker.fetch(new Request(viewerUrl.replace("/p/", "/raw/")), env as never)).text()).toContain("modernized");
-    expect((await readMetadataFixture(env, id)).versions.map((entry) => entry.version)).toEqual([1, 2]);
+    expect(
+      await (
+        await worker.fetch(new Request(viewerUrl.replace("/p/", "/raw/")), env as never)
+      ).text(),
+    ).toContain("modernized");
+    expect((await readMetadataFixture(env, id)).versions.map((entry) => entry.version)).toEqual([
+      1, 2,
+    ]);
+
     const detailResponse = await worker.fetch(
       new Request(`https://pagebin.test/api/artifacts/${id}`, {
         headers: { Authorization: "Bearer publish-secret" },
       }),
       env as never,
     );
+
     expect(await detailResponse.json()).toMatchObject({
       version: 2,
       versions: [
@@ -1571,7 +1903,9 @@ describe("worker", () => {
     );
 
     expect(deleteResponse.status).toBe(200);
-    expect([...env.ARTIFACTS.objects.keys()].filter((key) => key.startsWith(`artifacts/${id}/`))).toHaveLength(0);
+    expect(
+      [...env.ARTIFACTS.objects.keys()].filter((key) => key.startsWith(`artifacts/${id}/`)),
+    ).toHaveLength(0);
   });
 
   test("scheduled cleanup retains every referenced content object past the grace period", async () => {
@@ -1594,7 +1928,11 @@ describe("worker", () => {
     await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
 
     expect(await env.ARTIFACTS.get(legacyKey)).not.toBeNull();
-    expect(await (await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never)).text()).toContain("current");
+    expect(
+      await (
+        await worker.fetch(new Request(published.url.replace("/p/", "/raw/")), env as never)
+      ).text(),
+    ).toContain("current");
   });
 
   test("scheduled cleanup observes the grace period for pruned content", async () => {
@@ -1609,7 +1947,9 @@ describe("worker", () => {
     }
 
     const prunedKey = `artifacts/${published.id}/index.html`;
-    expect((await readMetadataFixture(env, published.id)).versions.map((entry) => entry.version)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(
+      (await readMetadataFixture(env, published.id)).versions.map((entry) => entry.version),
+    ).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
     await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
     expect(await env.ARTIFACTS.get(prunedKey)).not.toBeNull();
@@ -1640,7 +1980,9 @@ describe("worker", () => {
     const oldestKey = `artifacts/${published.id}/index.html`;
     const rolledBack = await readMetadataFixture(env, published.id);
 
-    expect(rolledBack.versions.map((entry) => entry.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(rolledBack.versions.map((entry) => entry.version)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
     expect(rolledBack.currentVersion).toBe(1);
     expect(rolledBack.contentKey).toBe(oldestKey);
 
@@ -1663,7 +2005,9 @@ describe("worker", () => {
 
     const resumed = await readMetadataFixture(env, published.id);
 
-    expect(resumed.versions.map((entry) => entry.version)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(resumed.versions.map((entry) => entry.version)).toEqual([
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+    ]);
     expect(resumed.currentVersion).toBe(11);
 
     ageObject(oldestKey);
@@ -1719,7 +2063,10 @@ function createEnv(overrides: Partial<TestEnv> = {}): TestEnv {
   };
 }
 
-async function publishFixture(env: TestEnv, options: PublishFixtureOptions = {}): Promise<PublishedArtifact> {
+async function publishFixture(
+  env: TestEnv,
+  options: PublishFixtureOptions = {},
+): Promise<PublishedArtifact> {
   const response = await publishFixtureResponse(env, options);
 
   expect(response.status).toBe(201);
@@ -1727,7 +2074,10 @@ async function publishFixture(env: TestEnv, options: PublishFixtureOptions = {})
   return (await response.json()) as PublishedArtifact;
 }
 
-async function publishFixtureResponse(env: TestEnv, options: PublishFixtureOptions = {}): Promise<Response> {
+async function publishFixtureResponse(
+  env: TestEnv,
+  options: PublishFixtureOptions = {},
+): Promise<Response> {
   const multipart = createMultipartBody({
     fields: {
       sandbox: options.sandbox ?? "standard",
@@ -1779,7 +2129,11 @@ async function updateFixtureResponse(
   );
 }
 
-async function rollbackFixtureResponse(env: TestEnv, id: string, version: number): Promise<Response> {
+async function rollbackFixtureResponse(
+  env: TestEnv,
+  id: string,
+  version: number,
+): Promise<Response> {
   return worker.fetch(
     new Request(`https://pagebin.test/api/artifacts/${id}/rollback`, {
       method: "POST",
@@ -1793,7 +2147,10 @@ async function rollbackFixtureResponse(env: TestEnv, id: string, version: number
   );
 }
 
-async function readMetadataFixture(env: TestEnv, id: string): Promise<{
+async function readMetadataFixture(
+  env: TestEnv,
+  id: string,
+): Promise<{
   attributes: Record<string, string>;
   contentKey: string;
   contentSha256: string | null;
@@ -1821,8 +2178,9 @@ async function readMetadataFixture(env: TestEnv, id: string): Promise<{
 function createMultipartBody(input: {
   fields: Record<string, string>;
   file: { contents: string; filename: string };
-}): { body: string; boundary: string; byteLength: number } {
+}) {
   const boundary = "pagebin-test-boundary";
+
   const chunks = [
     `--${boundary}`,
     `Content-Disposition: form-data; name="file"; filename="${input.file.filename}"`,
@@ -1878,167 +2236,380 @@ async function withSuppressedConsoleError<T>(callback: () => Promise<T>): Promis
   }
 }
 
-async function uploadRequest(env: TestEnv, path: string, body?: object, method = 'POST'): Promise<Response> {
+async function uploadRequest<T extends Record<string, unknown>>(
+  env: TestEnv,
+  path: string,
+  body?: T,
+  method = "POST",
+): Promise<Response> {
   const serialized = body === undefined ? undefined : JSON.stringify(body);
-  return worker.fetch(new Request(`https://pagebin.test${path}`, { method, headers: { Authorization: 'Bearer publish-secret', ...(serialized ? { 'Content-Type': 'application/json', 'Content-Length': String(new TextEncoder().encode(serialized).length) } : {}) }, ...(serialized ? {body: serialized} : {}) }), env as never);
+
+  return worker.fetch(
+    new Request(`https://pagebin.test${path}`, {
+      method,
+      headers: {
+        Authorization: "Bearer publish-secret",
+        ...(serialized
+          ? {
+              "Content-Type": "application/json",
+              "Content-Length": String(new TextEncoder().encode(serialized).length),
+            }
+          : {}),
+      },
+      ...(serialized ? { body: serialized } : {}),
+    }),
+    env as never,
+  );
 }
+
 async function beginBundle(env: TestEnv, files: Record<string, string | Uint8Array>, id?: string) {
-  const manifest = Object.entries(files).map(([path, data]) => ({ path, size: typeof data === 'string' ? new TextEncoder().encode(data).length : data.length, sha256: new Bun.CryptoHasher('sha256').update(data).digest('hex') }));
-  const response = await uploadRequest(env, '/api/uploads', { ...(id ? {id} : {}), entrypoint: Object.keys(files)[0], filename: Object.keys(files)[0], files: manifest });
+  const manifest = Object.entries(files).map(([path, data]) => ({
+    path,
+    size: typeof data === "string" ? new TextEncoder().encode(data).length : data.length,
+    sha256: new Bun.CryptoHasher("sha256").update(data).digest("hex"),
+  }));
+
+  const response = await uploadRequest(env, "/api/uploads", {
+    ...(id ? { id } : {}),
+    entrypoint: Object.keys(files)[0],
+    filename: Object.keys(files)[0],
+    files: manifest,
+  });
+
   expect(response.status).toBe(201);
-  const session = await response.json() as { id: string; sessionId: string; missing: string[] };
+  const session = (await response.json()) as { id: string; sessionId: string; missing: string[] };
   const base = `/api/uploads/${session.id}/${session.sessionId}`;
+
   for (const path of session.missing) {
     const data = files[path]!;
-    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    const result = await worker.fetch(new Request(`https://pagebin.test${base}/file?path=${encodeURIComponent(path)}`, { method: 'PUT', headers: { Authorization: 'Bearer publish-secret', 'Content-Length': String(bytes.length) }, body: bytes }), env as never);
+    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+
+    const result = await worker.fetch(
+      new Request(`https://pagebin.test${base}/file?path=${encodeURIComponent(path)}`, {
+        method: "PUT",
+        headers: { Authorization: "Bearer publish-secret", "Content-Length": String(bytes.length) },
+        body: bytes,
+      }),
+      env as never,
+    );
+
     expect(result.status).toBe(200);
   }
+
   return { ...session, commit: () => uploadRequest(env, `${base}/commit`) };
 }
-describe('file and bundle artifacts', () => {
-  test('reads PDFs inline with a local reader, pinned history, ranges, and revocation', async () => {
+
+describe("file and bundle artifacts", () => {
+  test("reads PDFs inline with a local reader, pinned history, ranges, and revocation", async () => {
     const env = createEnv();
-    const filename = 'Report & notes.pdf';
-    const original = '%PDF-1.7 first version';
-    const session = await beginBundle(env, {[filename]: original});
-    const published = await (await session.commit()).json() as {id: string; url: string; rawUrl: string; downloadUrl: string};
+    const filename = "Report & notes.pdf";
+    const original = "%PDF-1.7 first version";
+    const session = await beginBundle(env, { [filename]: original });
+
+    const published = (await (await session.commit()).json()) as {
+      id: string;
+      url: string;
+      rawUrl: string;
+      downloadUrl: string;
+    };
+
     for (const url of [published.url, `${published.url}/v/1`]) {
       const html = await (await worker.fetch(new Request(url), env as never)).text();
-      expect(html).toContain('/pdfjs/web/viewer.html?file=');
+      expect(html).toContain("/pdfjs/web/viewer.html?file=");
       expect(html).toContain(encodeURIComponent(new URL(published.rawUrl).pathname));
-      expect(html).toContain('#zoom=page-width');
-      expect(html).toContain('sandbox="allow-scripts allow-same-origin allow-downloads allow-modals allow-popups"');
+      expect(html).toContain("#zoom=page-width");
+      expect(html).toContain(
+        'sandbox="allow-scripts allow-same-origin allow-downloads allow-modals allow-popups"',
+      );
       expect(html).not.toContain('<main class="media-view">');
     }
+
     const raw = await worker.fetch(new Request(published.rawUrl), env as never);
-    expect(raw.headers.get('Content-Type')).toBe('application/pdf');
-    expect(raw.headers.get('Content-Disposition')).toStartWith('inline');
-    expect(raw.headers.get('Content-Security-Policy')).toContain("sandbox;");
+    expect(raw.headers.get("Content-Type")).toBe("application/pdf");
+    expect(raw.headers.get("Content-Disposition")).toStartWith("inline");
+    expect(raw.headers.get("Content-Security-Policy")).toContain("sandbox;");
     expect(await raw.text()).toBe(original);
-    const head = await worker.fetch(new Request(published.rawUrl, {method: 'HEAD'}), env as never);
-    expect(head.headers.get('Content-Type')).toBe('application/pdf');
-    expect(head.headers.get('Content-Length')).toBe(String(original.length));
-    expect(await head.text()).toBe('');
-    const partial = await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=0-4'}}), env as never);
+
+    const head = await worker.fetch(
+      new Request(published.rawUrl, { method: "HEAD" }),
+      env as never,
+    );
+
+    expect(head.headers.get("Content-Type")).toBe("application/pdf");
+    expect(head.headers.get("Content-Length")).toBe(String(original.length));
+    expect(await head.text()).toBe("");
+
+    const partial = await worker.fetch(
+      new Request(published.rawUrl, { headers: { Range: "bytes=0-4" } }),
+      env as never,
+    );
+
     expect(partial.status).toBe(206);
-    expect(await partial.text()).toBe('%PDF-');
-    expect((await worker.fetch(new Request(published.downloadUrl), env as never)).headers.get('Content-Disposition')).toStartWith('attachment');
-    const second = await beginBundle(env, {[filename]: '%PDF-1.7 second version'}, published.id);
+    expect(await partial.text()).toBe("%PDF-");
+    expect(
+      (await worker.fetch(new Request(published.downloadUrl), env as never)).headers.get(
+        "Content-Disposition",
+      ),
+    ).toStartWith("attachment");
+    const second = await beginBundle(env, { [filename]: "%PDF-1.7 second version" }, published.id);
     expect((await second.commit()).status).toBe(200);
-    expect(await (await worker.fetch(new Request(published.rawUrl), env as never)).text()).toBe(original);
-    expect(await (await worker.fetch(new Request(published.url), env as never)).text()).toContain('%2Fv%2F2%2F');
-    expect(await (await worker.fetch(new Request(`${published.url}/v/1`), env as never)).text()).toContain('%2Fv%2F1%2F');
+    expect(await (await worker.fetch(new Request(published.rawUrl), env as never)).text()).toBe(
+      original,
+    );
+    expect(await (await worker.fetch(new Request(published.url), env as never)).text()).toContain(
+      "%2Fv%2F2%2F",
+    );
+    expect(
+      await (await worker.fetch(new Request(`${published.url}/v/1`), env as never)).text(),
+    ).toContain("%2Fv%2F1%2F");
     await uploadRequest(env, `/api/artifacts/${published.id}/reissue`);
-    for (const url of [published.url, `${published.url}/v/1`, published.rawUrl, published.downloadUrl]) {
+
+    for (const url of [
+      published.url,
+      `${published.url}/v/1`,
+      published.rawUrl,
+      published.downloadUrl,
+    ]) {
       expect((await worker.fetch(new Request(url), env as never)).status).toBe(404);
     }
   });
-  test('serves trusted reader assets with restricted resource and embedding policies', async () => {
-    const env = {...createEnv(), ASSETS: {fetch: async () => new Response('reader', {headers: {'Content-Type': 'text/html'}})}};
-    const response = await worker.fetch(new Request('https://pagebin.test/pdfjs/web/viewer.html'), env as never);
+  test("serves trusted reader assets with restricted resource and embedding policies", async () => {
+    const env = {
+      ...createEnv(),
+      ASSETS: {
+        fetch: async () => new Response("reader", { headers: { "Content-Type": "text/html" } }),
+      },
+    };
+
+    const response = await worker.fetch(
+      new Request("https://pagebin.test/pdfjs/web/viewer.html"),
+      env as never,
+    );
+
     expect(response.status).toBe(200);
-    expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
-    expect(response.headers.get('Cache-Control')).toBe('public, max-age=0, must-revalidate');
-    expect(response.headers.get('Content-Security-Policy')).toContain("connect-src 'self'");
-    expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'self'");
-    expect(response.headers.get('Content-Security-Policy')).not.toContain("'unsafe-eval'");
-    expect((await worker.fetch(new Request('https://pagebin.test/pdfjs/web/viewer.html'), createEnv() as never)).status).toBe(404);
+    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+    expect(response.headers.get("Cache-Control")).toBe("public, max-age=0, must-revalidate");
+    expect(response.headers.get("Content-Security-Policy")).toContain("connect-src 'self'");
+    expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'self'");
+    expect(response.headers.get("Content-Security-Policy")).not.toContain("'unsafe-eval'");
+    expect(
+      (
+        await worker.fetch(
+          new Request("https://pagebin.test/pdfjs/web/viewer.html"),
+          createEnv() as never,
+        )
+      ).status,
+    ).toBe(404);
   });
 
-  test('streams binary files with ranges, download headers, and a native player', async () => {
+  test("streams binary files with ranges, download headers, and a native player", async () => {
     const env = createEnv();
     const bytes = new Uint8Array([0, 255, 128, 4, 5, 6]);
-    const session = await beginBundle(env, {'demo.webm': bytes});
-    const published = await (await session.commit()).json() as {url: string; rawUrl: string; downloadUrl: string};
+    const session = await beginBundle(env, { "demo.webm": bytes });
+
+    const published = (await (await session.commit()).json()) as {
+      url: string;
+      rawUrl: string;
+      downloadUrl: string;
+    };
+
     const raw = await worker.fetch(new Request(published.rawUrl), env as never);
     expect(new Uint8Array(await raw.arrayBuffer())).toEqual(bytes);
-    expect(raw.headers.get('Content-Type')).toBe('video/webm');
-    const range = await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=1-3'}}), env as never);
-    expect(range.status).toBe(206); expect(range.headers.get('Content-Range')).toBe('bytes 1-3/6');
-    expect(new Uint8Array(await range.arrayBuffer())).toEqual(bytes.slice(1,4));
-    const suffix = await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=-2'}}), env as never);
+    expect(raw.headers.get("Content-Type")).toBe("video/webm");
+
+    const range = await worker.fetch(
+      new Request(published.rawUrl, { headers: { Range: "bytes=1-3" } }),
+      env as never,
+    );
+
+    expect(range.status).toBe(206);
+    expect(range.headers.get("Content-Range")).toBe("bytes 1-3/6");
+    expect(new Uint8Array(await range.arrayBuffer())).toEqual(bytes.slice(1, 4));
+
+    const suffix = await worker.fetch(
+      new Request(published.rawUrl, { headers: { Range: "bytes=-2" } }),
+      env as never,
+    );
+
     expect(new Uint8Array(await suffix.arrayBuffer())).toEqual(bytes.slice(-2));
-    expect((await worker.fetch(new Request(published.rawUrl, {headers: {Range: 'bytes=99-'}}), env as never)).status).toBe(416);
-    const head = await worker.fetch(new Request(published.rawUrl, {method: 'HEAD'}), env as never);
-    expect(head.headers.get('Content-Length')).toBe('6'); expect(await head.text()).toBe('');
-    expect((await worker.fetch(new Request(published.downloadUrl), env as never)).headers.get('Content-Disposition')).toStartWith('attachment');
-    expect(await (await worker.fetch(new Request(published.url), env as never)).text()).toContain('<video controls');
+    expect(
+      (
+        await worker.fetch(
+          new Request(published.rawUrl, { headers: { Range: "bytes=99-" } }),
+          env as never,
+        )
+      ).status,
+    ).toBe(416);
+
+    const head = await worker.fetch(
+      new Request(published.rawUrl, { method: "HEAD" }),
+      env as never,
+    );
+
+    expect(head.headers.get("Content-Length")).toBe("6");
+    expect(await head.text()).toBe("");
+    expect(
+      (await worker.fetch(new Request(published.downloadUrl), env as never)).headers.get(
+        "Content-Disposition",
+      ),
+    ).toStartWith("attachment");
+    expect(await (await worker.fetch(new Request(published.url), env as never)).text()).toContain(
+      "<video controls",
+    );
   });
-  test('reuses unchanged attachments, pins versions, rolls back, and revokes all file routes', async () => {
+  test("reuses unchanged attachments, pins versions, rolls back, and revokes all file routes", async () => {
     const env = createEnv();
-    const files = {'index.html': '<img src="pictures/a.png">', 'pictures/a.png': 'first image'};
+    const files = { "index.html": '<img src="pictures/a.png">', "pictures/a.png": "first image" };
     const first = await beginBundle(env, files);
-    const pub = await (await first.commit()).json() as {url: string; id: string};
-    const second = await beginBundle(env, {...files, 'index.html': '<h1>v2</h1><img src="pictures/a.png">'}, pub.id);
-    expect(second.missing).toEqual(['index.html']);
+    const pub = (await (await first.commit()).json()) as { url: string; id: string };
+
+    const second = await beginBundle(
+      env,
+      { ...files, "index.html": '<h1>v2</h1><img src="pictures/a.png">' },
+      pub.id,
+    );
+
+    expect(second.missing).toEqual(["index.html"]);
     expect((await second.commit()).status).toBe(200);
-    const rawBase = pub.url.replace('/p/', '/raw/');
-    expect(await (await worker.fetch(new Request(`${rawBase}/v/1/index.html`), env as never)).text()).toBe(files['index.html']);
-    expect(await (await worker.fetch(new Request(pub.url), env as never)).text()).toContain('/v/2/index.html');
-    expect((await uploadRequest(env, `/api/artifacts/${pub.id}/rollback`, {version: 1})).status).toBe(200);
-    expect(await (await worker.fetch(new Request(pub.url), env as never)).text()).toContain('/v/1/index.html');
-    const rotated = await (await uploadRequest(env, `/api/artifacts/${pub.id}/reissue`)).json() as {url: string};
-    expect((await worker.fetch(new Request(`${rawBase}/v/1/pictures/a.png`), env as never)).status).toBe(404);
-    const fresh = rotated.url.replace('/p/', '/raw/') + '/v/2/pictures/a.png';
+    const rawBase = pub.url.replace("/p/", "/raw/");
+    expect(
+      await (await worker.fetch(new Request(`${rawBase}/v/1/index.html`), env as never)).text(),
+    ).toBe(files["index.html"]);
+    expect(await (await worker.fetch(new Request(pub.url), env as never)).text()).toContain(
+      "/v/2/index.html",
+    );
+    expect(
+      (await uploadRequest(env, `/api/artifacts/${pub.id}/rollback`, { version: 1 })).status,
+    ).toBe(200);
+    expect(await (await worker.fetch(new Request(pub.url), env as never)).text()).toContain(
+      "/v/1/index.html",
+    );
+
+    const rotated = (await (
+      await uploadRequest(env, `/api/artifacts/${pub.id}/reissue`)
+    ).json()) as { url: string };
+
+    expect(
+      (await worker.fetch(new Request(`${rawBase}/v/1/pictures/a.png`), env as never)).status,
+    ).toBe(404);
+    const fresh = rotated.url.replace("/p/", "/raw/") + "/v/2/pictures/a.png";
     expect((await worker.fetch(new Request(fresh), env as never)).status).toBe(200);
-    expect((await uploadRequest(env, `/api/artifacts/${pub.id}`, undefined, 'DELETE')).status).toBe(200);
+    expect((await uploadRequest(env, `/api/artifacts/${pub.id}`, undefined, "DELETE")).status).toBe(
+      200,
+    );
     expect((await worker.fetch(new Request(fresh), env as never)).status).toBe(404);
   });
-  test('does not publish incomplete uploads or overwrite a concurrent update', async () => {
+  test("does not publish incomplete uploads or overwrite a concurrent update", async () => {
     const env = createEnv();
-    const first = await beginBundle(env, {'index.html': 'initial'});
-    const pub = await (await first.commit()).json() as {id: string; url: string};
-    const a = await beginBundle(env, {'index.html': 'a'}, pub.id);
-    const b = await beginBundle(env, {'index.html': 'b'}, pub.id);
+    const first = await beginBundle(env, { "index.html": "initial" });
+    const pub = (await (await first.commit()).json()) as { id: string; url: string };
+    const a = await beginBundle(env, { "index.html": "a" }, pub.id);
+    const b = await beginBundle(env, { "index.html": "b" }, pub.id);
     expect((await a.commit()).status).toBe(200);
     expect((await b.commit()).status).toBe(409);
-    const incomplete = await beginBundle(env, {'index.html': 'missing'}, pub.id);
-    const sessionObject = await env.ARTIFACTS.get(`artifacts/${pub.id}/content/session-${incomplete.sessionId}.json`);
+    const incomplete = await beginBundle(env, { "index.html": "missing" }, pub.id);
+
+    const sessionObject = await env.ARTIFACTS.get(
+      `artifacts/${pub.id}/content/session-${incomplete.sessionId}.json`,
+    );
+
     const session = JSON.parse(await sessionObject!.text());
     await env.ARTIFACTS.delete(session.manifest.files[0].objectKey);
     expect((await incomplete.commit()).status).toBe(409);
-    const raw = await worker.fetch(new Request(pub.url.replace('/p/', '/raw/') + '/v/2/index.html'), env as never);
-    expect(await raw.text()).toBe('a');
+
+    const raw = await worker.fetch(
+      new Request(pub.url.replace("/p/", "/raw/") + "/v/2/index.html"),
+      env as never,
+    );
+
+    expect(await raw.text()).toBe("a");
   });
-  test('rejects unsafe paths and duplicates; SVG remains sandboxed', async () => {
+  test("rejects unsafe paths and duplicates; SVG remains sandboxed", async () => {
     const env = createEnv();
-    for (const path of ['../secret', '/absolute', 'a/../b', 'a\\b', '%2e%2e/secret']) {
-      const response = await uploadRequest(env, '/api/uploads', { filename: 'a', entrypoint: path, files: [{path, size: 1, sha256: 'a'.repeat(64)}] });
+
+    for (const path of ["../secret", "/absolute", "a/../b", "a\\b", "%2e%2e/secret"]) {
+      const response = await uploadRequest(env, "/api/uploads", {
+        filename: "a",
+        entrypoint: path,
+        files: [{ path, size: 1, sha256: "a".repeat(64) }],
+      });
+
       expect(response.status).toBe(400);
     }
-    const session = await beginBundle(env, {'drawing.svg': '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'});
-    const pub = await (await session.commit()).json() as {rawUrl: string};
+
+    const session = await beginBundle(env, {
+      "drawing.svg": '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+    });
+
+    const pub = (await (await session.commit()).json()) as { rawUrl: string };
     const response = await worker.fetch(new Request(pub.rawUrl), env as never);
-    expect(response.headers.get('Content-Security-Policy')).toStartWith('sandbox;');
-    expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(response.headers.get("Content-Security-Policy")).toStartWith("sandbox;");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
   });
 });
 
-test('bundle cleanup keeps shared objects until every referencing version is pruned', async () => {
+test("bundle cleanup keeps shared objects until every referencing version is pruned", async () => {
   const env = createEnv();
-  const first = await beginBundle(env, {'index.html': 'v1', 'pictures/old.png': 'old'});
-  const published = await (await first.commit()).json() as {id: string; url: string; revision: number};
-  const noOp = await beginBundle(env, {'index.html': 'v1', 'pictures/old.png': 'old'}, published.id);
+  const first = await beginBundle(env, { "index.html": "v1", "pictures/old.png": "old" });
+
+  const published = (await (await first.commit()).json()) as {
+    id: string;
+    url: string;
+    revision: number;
+  };
+
+  const noOp = await beginBundle(
+    env,
+    { "index.html": "v1", "pictures/old.png": "old" },
+    published.id,
+  );
+
   expect(noOp.missing).toEqual([]);
-  const unchanged = await (await noOp.commit()).json() as {revision: number};
+  const unchanged = (await (await noOp.commit()).json()) as { revision: number };
   expect(unchanged.revision).toBe(published.revision);
-  const stored = JSON.parse(await (await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`))!.text());
+
+  const stored = JSON.parse(
+    await (await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`))!.text(),
+  );
+
   const oldKey = stored.versions[0].manifest.files[1].objectKey;
-  const second = await beginBundle(env, {'index.html': 'v2', 'pictures/new.png': 'new'}, published.id);
+
+  const second = await beginBundle(
+    env,
+    { "index.html": "v2", "pictures/new.png": "new" },
+    published.id,
+  );
+
   await second.commit();
+
   for (const object of env.ARTIFACTS.objects.values()) object.uploaded = new Date(0);
   await worker.scheduled({} as never, env as never);
   expect(env.ARTIFACTS.objects.has(oldKey)).toBe(true);
+
   for (let n = 3; n <= 11; n++) {
-    const next = await beginBundle(env, {'index.html': `v${n}`, 'pictures/new.png': 'new'}, published.id);
+    const next = await beginBundle(
+      env,
+      { "index.html": `v${n}`, "pictures/new.png": "new" },
+      published.id,
+    );
+
     await next.commit();
   }
+
   await worker.scheduled({} as never, env as never);
   expect(env.ARTIFACTS.objects.has(oldKey)).toBe(false);
-  const manifest = await worker.fetch(new Request(published.url.replace('/p/', '/api/artifacts/').replace(`/${published.id}/`, `/${published.id}/manifest/`)), env as never);
+
+  const manifest = await worker.fetch(
+    new Request(
+      published.url
+        .replace("/p/", "/api/artifacts/")
+        .replace(`/${published.id}/`, `/${published.id}/manifest/`),
+    ),
+    env as never,
+  );
+
   const publicManifest = await manifest.text();
   expect(manifest.status).toBe(200);
-  expect(publicManifest).not.toContain('objectKey');
-  expect(publicManifest).toContain('pictures/new.png');
+  expect(publicManifest).not.toContain("objectKey");
+  expect(publicManifest).toContain("pictures/new.png");
 });

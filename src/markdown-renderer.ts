@@ -1,18 +1,16 @@
 import hljs from "highlight.js";
-import { load as loadYaml } from "js-yaml";
+import { parseFrontmatter, type FrontmatterValue, type FrontmatterAttributes } from "./frontmatter";
 import { Marked, Renderer, TextRenderer, type Tokens } from "marked";
 
 import { MARKDOWN_STYLES } from "./markdown-template.ts";
 
 const MAX_CODE_HIGHLIGHT_CHARS = 200_000;
-const MAX_LINE_NUMBER_COUNT = 5_000;
-const MERMAID_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js";
-const MERMAID_INTEGRITY = "sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV";
 
-interface FrontmatterResult {
-  attributes: Record<string, unknown>;
-  body: string;
-}
+const MAX_LINE_NUMBER_COUNT = 5_000;
+
+const MERMAID_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.min.js";
+
+const MERMAID_INTEGRITY = "sha384-zkWMJO4sgpPUzyuOgDx8HB/K55glbAwajEpk1Go2NWRuPkPA/wIhoEJTuSkmOYrV";
 
 export interface RenderedMarkdownArtifact {
   hasMermaid: boolean;
@@ -36,13 +34,16 @@ class PageBinRenderer extends Renderer {
 
     if (language === "mermaid") {
       this.hasMermaid = true;
+
       return `<figure class="mermaid-wrap"><figcaption class="mermaid-label"><span>mermaid</span><div class="mermaid-controls" aria-label="Mermaid controls"><button class="mermaid-control" type="button" data-mermaid-action="zoom-out" aria-label="Zoom out">-</button><button class="mermaid-control reset" type="button" data-mermaid-action="reset" aria-label="Reset diagram view">100%</button><button class="mermaid-control" type="button" data-mermaid-action="zoom-in" aria-label="Zoom in">+</button></div></figcaption><div class="mermaid-viewport" data-mermaid-viewport><div class="mermaid">${escapeHtml(text)}</div></div></figure>`;
     }
 
     const label = language || "text";
-    const highlighted = language && hljs.getLanguage(language) && text.length <= MAX_CODE_HIGHLIGHT_CHARS
-      ? hljs.highlight(text, { language, ignoreIllegals: true }).value
-      : escapeHtml(text);
+
+    const highlighted =
+      language && hljs.getLanguage(language) && text.length <= MAX_CODE_HIGHLIGHT_CHARS
+        ? hljs.highlight(text, { language, ignoreIllegals: true }).value
+        : escapeHtml(text);
 
     return `<figure class="code-frame"><figcaption><span class="code-language">${escapeHtml(label)}</span><button class="code-copy" type="button" data-copy-code="true">Copy</button></figcaption><div class="code-scroll"><div class="code-grid"><pre class="line-numbers" aria-hidden="true">${makeLineNumbers(text)}</pre><pre class="code-pre"><code class="hljs language-${escapeAttribute(label)}">${highlighted}</code></pre></div></div></figure>`;
   }
@@ -61,12 +62,17 @@ class PageBinRenderer extends Renderer {
 
   override listitem(item: Tokens.ListItem): string {
     const html = super.listitem(item);
+
     return item.task ? html.replace("<li>", '<li class="task-list-item">') : html;
   }
 
   override paragraph({ tokens }: Tokens.Paragraph): string {
     const inline = this.parser.parseInline(tokens);
-    const lines = inline.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+    const lines = inline
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
 
     if (lines.length < 2) {
       return `<p>${inline}</p>\n`;
@@ -100,21 +106,31 @@ export function renderMarkdownDocument(markdown: string, sourceName: string): st
   return renderMarkdownArtifact(markdown, sourceName).html;
 }
 
-export function renderMarkdownArtifact(markdown: string, sourceName: string): RenderedMarkdownArtifact {
+export function renderMarkdownArtifact(
+  markdown: string,
+  sourceName: string,
+): RenderedMarkdownArtifact {
   const parsed = parseFrontmatter(markdown);
   const renderer = new PageBinRenderer();
   const parser = new Marked();
   parser.setOptions({ gfm: true, breaks: false, renderer });
   const content = parser.parse(preprocessFootnotes(parsed.body), { async: false });
   const firstHeading = renderer.headings.find((heading) => heading.depth === 1)?.text ?? "";
-  const title = getString(parsed.attributes.title) || firstHeading || sourceName.replace(/\.[^.]+$/, "");
-  const description = getString(parsed.attributes.description) || getString(parsed.attributes.summary);
+
+  const title =
+    getString(parsed.attributes.title) || firstHeading || sourceName.replace(/\.[^.]+$/, "");
+
+  const description =
+    getString(parsed.attributes.description) || getString(parsed.attributes.summary);
+
   const hasProperties = Object.keys(parsed.attributes).length > 0;
   const titleHidden = Boolean(firstHeading && sameDisplayTitle(title, firstHeading));
   const toc = renderToc(renderer.headings);
+
   const csp = renderer.hasMermaid
     ? "default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src https: data:; media-src https: data:; connect-src 'none'; font-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
     : "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src https: data:; media-src https: data:; connect-src 'none'; font-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
+
   const mermaidScript = renderer.hasMermaid
     ? `<script src="${MERMAID_SCRIPT_URL}" integrity="${MERMAID_INTEGRITY}" crossorigin="anonymous" defer></script>`
     : "";
@@ -170,30 +186,6 @@ ${enhancementScript(renderer.hasMermaid)}
   return { hasMermaid: renderer.hasMermaid, html };
 }
 
-function parseFrontmatter(markdown: string): FrontmatterResult {
-  const normalized = markdown.replace(/^\uFEFF/, "");
-  const match = normalized.match(/^---[ \t]*\r?\n([\s\S]*?)^(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/m);
-
-  if (!match) {
-    return { attributes: {}, body: normalized };
-  }
-
-  const body = normalized.slice(match[0].length);
-
-  try {
-    const value = loadYaml(match[1] ?? "");
-    return {
-      attributes: value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {},
-      body,
-    };
-  } catch (error) {
-    return {
-      attributes: { frontmatter_error: error instanceof Error ? error.message : String(error) },
-      body,
-    };
-  }
-}
-
 function preprocessFootnotes(markdown: string): string {
   const lines = markdown.split(/\r?\n/);
   const body: string[] = [];
@@ -228,6 +220,7 @@ function preprocessFootnotes(markdown: string): string {
   }
 
   const used: Array<{ content: string; id: string }> = [];
+
   const rewritten = body.join("\n").replace(/\[\^([^\]]+)\]/g, (reference, id: string) => {
     const content = definitions.get(id);
 
@@ -244,6 +237,7 @@ function preprocessFootnotes(markdown: string): string {
 
     const number = index + 1;
     const safeId = slugify(`fn-${id}`);
+
     return `<sup id="${safeId}-ref"><a href="#${safeId}" aria-label="Footnote ${number}">${number}</a></sup>`;
   });
 
@@ -252,12 +246,16 @@ function preprocessFootnotes(markdown: string): string {
   }
 
   const inlineParser = new Marked({ gfm: true, breaks: false });
-  const items = used.map((entry, index) => {
-    const number = index + 1;
-    const safeId = slugify(`fn-${entry.id}`);
-    const rendered = inlineParser.parseInline(entry.content, { async: false });
-    return `<li id="${safeId}">${rendered} <a class="footnote-backref" href="#${safeId}-ref" aria-label="Back to reference ${number}">back</a></li>`;
-  }).join("");
+
+  const items = used
+    .map((entry, index) => {
+      const number = index + 1;
+      const safeId = slugify(`fn-${entry.id}`);
+      const rendered = inlineParser.parseInline(entry.content, { async: false });
+
+      return `<li id="${safeId}">${rendered} <a class="footnote-backref" href="#${safeId}-ref" aria-label="Back to reference ${number}">back</a></li>`;
+    })
+    .join("");
 
   return `${rewritten}\n\n<section class="footnotes" aria-labelledby="footnotes-label"><h2 id="footnotes-label">Footnotes</h2><ol>${items}</ol></section>`;
 }
@@ -269,47 +267,65 @@ function renderToc(headings: HeadingEntry[]): string {
     return '<div class="empty">No sections found.</div>';
   }
 
-  return entries.map((heading) => `<a href="#${heading.id}" class="depth-${heading.depth}">${escapeHtml(heading.text)}</a>`).join("");
+  return entries
+    .map(
+      (heading) =>
+        `<a href="#${heading.id}" class="depth-${heading.depth}">${escapeHtml(heading.text)}</a>`,
+    )
+    .join("");
 }
 
-function renderFrontmatter(attributes: Record<string, unknown>): string {
-  return Object.entries(attributes).map(([key, value]) => renderMetaEntry(key, value)).join("");
+function renderFrontmatter(attributes: FrontmatterAttributes): string {
+  return Object.entries(attributes)
+    .map(([key, value]) => renderMetaEntry(key, value))
+    .join("");
 }
 
-function renderMetaEntry(key: string, value: unknown): string {
-  if (value && typeof value === "object" && !(value instanceof Date) && !Array.isArray(value)) {
-    const body = Object.entries(value as Record<string, unknown>).map(([nestedKey, nestedValue]) => renderMetaEntry(nestedKey, nestedValue)).join("");
+function renderMetaEntry(key: string, value: FrontmatterValue | undefined): string {
+  if (isFrontmatterMapping(value)) {
+    const body = Object.entries(value)
+      .map(([nestedKey, nestedValue]) => renderMetaEntry(nestedKey, nestedValue))
+      .join("");
+
     return `<section class="meta-section"><div class="meta-section-title"><div class="meta-icon object" aria-hidden="true"></div><div>${escapeHtml(key)}</div></div><div class="meta-section-body">${body}</div></section>`;
   }
 
   const iconClass = Array.isArray(value) ? "meta-icon array" : "meta-icon";
+
   return `<div class="meta-item"><div class="${iconClass}" aria-hidden="true"></div><div class="meta-key">${escapeHtml(key)}</div>${renderMetaValue(value)}</div>`;
 }
 
-function renderMetaValue(value: unknown): string {
+function renderMetaValue(value: FrontmatterValue | undefined): string {
   if (Array.isArray(value)) {
-    return `<ul class="meta-value meta-array">${value.map((entry) => {
-      if (entry && typeof entry === "object") {
-        return `<li class="meta-token meta-token-complex">${renderMetaValue(entry)}</li>`;
-      }
-      return `<li class="meta-token">${escapeHtml(formatMetaPrimitive(entry))}</li>`;
-    }).join("")}</ul>`;
+    return `<ul class="meta-value meta-array">${value
+      .map((entry) => {
+        if ((entry && isFrontmatterMapping(entry)) || Array.isArray(entry)) {
+          return `<li class="meta-token meta-token-complex">${renderMetaValue(entry)}</li>`;
+        }
+
+        return `<li class="meta-token">${escapeHtml(formatMetaPrimitive(entry))}</li>`;
+      })
+      .join("")}</ul>`;
   }
 
-  if (value && typeof value === "object" && !(value instanceof Date)) {
-    return `<div class="meta-value">${Object.entries(value as Record<string, unknown>).map(([key, entry]) => renderMetaEntry(key, entry)).join("")}</div>`;
+  if (value && isFrontmatterMapping(value) && !(value instanceof Date)) {
+    return `<div class="meta-value">${Object.entries(value)
+      .map(([key, entry]) => renderMetaEntry(key, entry))
+      .join("")}</div>`;
   }
 
   return `<div class="meta-value">${escapeHtml(formatMetaPrimitive(value))}</div>`;
 }
 
 function enhancementScript(hasMermaid: boolean): string {
-  const mermaid = hasMermaid ? `
+  const mermaid = hasMermaid
+    ? `
 function clamp(value,min,max){return Math.min(Math.max(value,min),max)}
 function markMermaidError(node){const viewport=node.closest("[data-mermaid-viewport]");if(viewport)viewport.dataset.ready="true";node.className="mermaid-error";node.textContent="Mermaid render failed."}
 function setupMermaidViewport(viewport){if(!viewport||viewport.dataset.ready==="true")return;const canvas=viewport.querySelector(".mermaid");const figure=viewport.closest(".mermaid-wrap");if(!canvas||!figure)return;const state={scale:1,x:0,y:0};viewport.dataset.ready="true";const apply=()=>{canvas.style.transform="translate("+state.x+"px, "+state.y+"px) scale("+state.scale+")"};const zoomAt=(nextScale,clientX,clientY)=>{const rect=viewport.getBoundingClientRect();const pointX=clientX-rect.left;const pointY=clientY-rect.top;const previousScale=state.scale;state.scale=clamp(nextScale,.35,4);state.x=pointX-((pointX-state.x)/previousScale)*state.scale;state.y=pointY-((pointY-state.y)/previousScale)*state.scale;apply()};for(const control of figure.querySelectorAll("[data-mermaid-action]")){control.addEventListener("click",()=>{const rect=viewport.getBoundingClientRect();const centerX=rect.left+rect.width/2;const centerY=rect.top+rect.height/2;const action=control.dataset.mermaidAction;if(action==="zoom-in")zoomAt(state.scale*1.18,centerX,centerY);else if(action==="zoom-out")zoomAt(state.scale/1.18,centerX,centerY);else{state.scale=1;state.x=0;state.y=0;apply()}})}viewport.addEventListener("wheel",event=>{event.preventDefault();zoomAt(state.scale*(event.deltaY<0?1.1:1/1.1),event.clientX,event.clientY)},{passive:false});viewport.addEventListener("pointerdown",event=>{if(event.button!==0)return;const start={pointerId:event.pointerId,x:event.clientX,y:event.clientY,originX:state.x,originY:state.y};viewport.classList.add("dragging");viewport.setPointerCapture(event.pointerId);const move=moveEvent=>{if(moveEvent.pointerId!==start.pointerId)return;state.x=start.originX+moveEvent.clientX-start.x;state.y=start.originY+moveEvent.clientY-start.y;apply()};const stop=upEvent=>{if(upEvent.pointerId!==start.pointerId)return;viewport.classList.remove("dragging");viewport.releasePointerCapture(upEvent.pointerId);viewport.removeEventListener("pointermove",move);viewport.removeEventListener("pointerup",stop);viewport.removeEventListener("pointercancel",stop)};viewport.addEventListener("pointermove",move);viewport.addEventListener("pointerup",stop);viewport.addEventListener("pointercancel",stop)});apply()}
 function renderMermaid(){const nodes=[...document.querySelectorAll(".mermaid")];if(!globalThis.mermaid){for(const node of nodes)markMermaidError(node);return}mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:"base",themeVariables:{background:"#1d1a15",primaryColor:"#252017",primaryTextColor:"#f0e9db",primaryBorderColor:"#4a4335",lineColor:"#8a8172",secondaryColor:"#2a251d",tertiaryColor:"#191713",clusterBkg:"#211d17",clusterBorder:"#3d372d",edgeLabelBackground:"#252017",fontFamily:"ui-sans-serif,system-ui,sans-serif"}});for(const node of nodes){mermaid.run({nodes:[node]}).then(()=>setupMermaidViewport(node.closest("[data-mermaid-viewport]"))).catch(()=>markMermaidError(node))}}
-window.addEventListener("DOMContentLoaded",renderMermaid);` : "";
+window.addEventListener("DOMContentLoaded",renderMermaid);`
+    : "";
 
   return `const content=document.querySelector("#content");const propertiesPanel=document.querySelector("#properties-panel");const outlineTrigger=document.querySelector("#outline-trigger");const outlineDrawer=document.querySelector("#outline-drawer");const drawerBackdrop=document.querySelector("#drawer-backdrop");const drawerClose=document.querySelector("#drawer-close");const toast=document.querySelector("#toast");const mobileQuery=window.matchMedia("(max-width: 720px)");
 function showToast(message){if(!toast)return;toast.textContent=message;toast.classList.add("show");window.clearTimeout(showToast.timeout);showToast.timeout=window.setTimeout(()=>toast.classList.remove("show"),2200)}
@@ -352,33 +368,53 @@ function makeLineNumbers(text: string): string {
 
 function isMetadataLine(line: string): boolean {
   const text = line.replace(/<[^>]*>/g, "").trim();
+
   return /^[A-Z][A-Za-z0-9 /_.-]{1,48}:\s+/.test(text);
 }
 
-function formatMetaPrimitive(value: unknown): string {
+function formatMetaPrimitive(value: FrontmatterValue | undefined): string {
   if (value instanceof Date) {
     return value.toISOString().slice(0, 10);
   }
+
   if (value === null) {
     return "null";
   }
+
   return value === undefined ? "" : String(value);
 }
 
-function getString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
+function getString(value: FrontmatterValue | undefined): string {
+  return isString(value) ? value.trim() : "";
 }
 
 function sameDisplayTitle(left: string, right: string): boolean {
-  return left.trim().replace(/\s+/g, " ").toLowerCase() === right.trim().replace(/\s+/g, " ").toLowerCase();
+  return (
+    left.trim().replace(/\s+/g, " ").toLowerCase() ===
+    right.trim().replace(/\s+/g, " ").toLowerCase()
+  );
 }
 
 function slugify(value: string): string {
-  return value.toLowerCase().trim().replace(/#/g, "").replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "section";
+  return (
+    value
+      .toLowerCase()
+      .trim()
+      .replace(/#/g, "")
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "") || "section"
+  );
 }
 
 function escapeHtml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function escapeAttribute(value: string): string {
@@ -388,3 +424,16 @@ function escapeAttribute(value: string): string {
 function escapeAttributeValue(value: string): string {
   return escapeHtml(value).replaceAll("`", "&#096;");
 }
+
+// These predicates distinguish variants of the validated frontmatter value tree.
+// oxlint-disable anti-slop/no-runtime-typeof
+function isFrontmatterMapping(value: FrontmatterValue | undefined): value is FrontmatterAttributes {
+  return (
+    typeof value === "object" && value !== null && !(value instanceof Date) && !Array.isArray(value)
+  );
+}
+
+function isString(value: FrontmatterValue | undefined): value is string {
+  return typeof value === "string";
+}
+// oxlint-enable anti-slop/no-runtime-typeof

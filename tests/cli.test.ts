@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import packageJson from "../package.json" with { type: "json" };
-import { normalizeEndpoint, parseArgs, parseTtlSeconds, sanitizeRepositoryRemote } from "../src/cli";
+import {
+  normalizeEndpoint,
+  parseArgs,
+  parseTtlSeconds,
+  sanitizeRepositoryRemote,
+} from "../src/cli";
 
 interface CliRun {
   exitCode: number;
@@ -13,7 +18,10 @@ interface CliRun {
   stdout: string;
 }
 
-process.env.PAGEBIN_STATE_PATH = join(tmpdir(), `pagebin-cli-tests-${process.pid}-${Date.now()}.json`);
+process.env.PAGEBIN_STATE_PATH = join(
+  tmpdir(),
+  `pagebin-cli-tests-${process.pid}-${Date.now()}.json`,
+);
 
 describe("parseTtlSeconds", () => {
   test("parses supported units", () => {
@@ -34,14 +42,20 @@ describe("parseTtlSeconds", () => {
 
 describe("sanitizeRepositoryRemote", () => {
   test("removes credentials from URL-style Git remotes", () => {
-    expect(sanitizeRepositoryRemote("https://user:secret@example.com/org/repo.git")).toBe("https://example.com/org/repo.git");
-    expect(sanitizeRepositoryRemote("git@github.com:org/repo.git")).toBe("git@github.com:org/repo.git");
+    expect(sanitizeRepositoryRemote("https://user:secret@example.com/org/repo.git")).toBe(
+      "https://example.com/org/repo.git",
+    );
+    expect(sanitizeRepositoryRemote("git@github.com:org/repo.git")).toBe(
+      "git@github.com:org/repo.git",
+    );
   });
 });
 
 describe("parseArgs", () => {
   test("parses publish defaults", () => {
-    expect(parseArgs(["publish", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["publish", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toEqual({
       command: "publish",
       options: {
         attributes: {},
@@ -79,7 +93,9 @@ describe("parseArgs", () => {
   });
 
   test("parses publish verification", () => {
-    expect(parseArgs(["publish", "plan.html", "--verify"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+    expect(
+      parseArgs(["publish", "plan.html", "--verify"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toMatchObject({
       command: "publish",
       options: { verify: true },
     });
@@ -88,7 +104,17 @@ describe("parseArgs", () => {
   test("parses metadata overrides and disables inference", () => {
     expect(
       parseArgs(
-        ["publish", "plan.html", "--no-infer", "--title", "Dashboard plan", "--project", "dashboard", "--type", "plan"],
+        [
+          "publish",
+          "plan.html",
+          "--no-infer",
+          "--title",
+          "Dashboard plan",
+          "--project",
+          "dashboard",
+          "--type",
+          "plan",
+        ],
         { PAGEBIN_ENDPOINT: "https://example.com" },
       ),
     ).toMatchObject({
@@ -105,7 +131,9 @@ describe("parseArgs", () => {
   });
 
   test("parses delete", () => {
-    expect(parseArgs(["delete", "abc123", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["delete", "abc123", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toEqual({
       command: "delete",
       options: {
         endpoint: "https://example.com",
@@ -116,7 +144,11 @@ describe("parseArgs", () => {
   });
 
   test("parses delete IDs that begin with a dash", () => {
-    expect(parseArgs(["delete", "-abc123456789012", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["delete", "-abc123456789012", "--json"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
       command: "delete",
       options: {
         endpoint: "https://example.com",
@@ -137,7 +169,9 @@ describe("parseArgs", () => {
   });
 
   test("parses reissue", () => {
-    expect(parseArgs(["reissue", "abc123", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["reissue", "abc123", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toEqual({
       command: "reissue",
       options: {
         endpoint: "https://example.com",
@@ -148,7 +182,11 @@ describe("parseArgs", () => {
   });
 
   test("parses reissue IDs that begin with a dash", () => {
-    expect(parseArgs(["reissue", "-abc123456789012", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["reissue", "-abc123456789012", "--json"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
       command: "reissue",
       options: {
         endpoint: "https://example.com",
@@ -159,7 +197,11 @@ describe("parseArgs", () => {
   });
 
   test("parses update with an artifact ID", () => {
-    expect(parseArgs(["update", "abc1234567890123", "plan.html", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["update", "abc1234567890123", "plan.html", "--json"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
       command: "update",
       options: {
         attributes: {},
@@ -175,7 +217,9 @@ describe("parseArgs", () => {
   });
 
   test("parses update with a viewer URL and infers the endpoint", () => {
-    expect(parseArgs(["update", "https://pagebin.test/p/abc1234567890123/view-token", "plan.html"], {})).toEqual({
+    expect(
+      parseArgs(["update", "https://pagebin.test/p/abc1234567890123/view-token", "plan.html"], {}),
+    ).toEqual({
       command: "update",
       options: {
         attributes: {},
@@ -211,14 +255,18 @@ describe("parseArgs", () => {
   });
 
   test("maps the public custom domain to the management API by default", () => {
-    expect(parseArgs(["update", "https://page-bin.com/p/abc1234567890123/view-token", "plan.html"], {})).toMatchObject({
+    expect(
+      parseArgs(["update", "https://page-bin.com/p/abc1234567890123/view-token", "plan.html"], {}),
+    ).toMatchObject({
       command: "update",
       options: { endpoint: "https://api.page-bin.com" },
     });
   });
 
   test("parses update with a file for local receipt lookup", () => {
-    expect(parseArgs(["update", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+    expect(
+      parseArgs(["update", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toMatchObject({
       command: "update",
       options: {
         endpoint: "https://example.com",
@@ -229,11 +277,19 @@ describe("parseArgs", () => {
   });
 
   test("parses TTL-only and permanent updates", () => {
-    expect(parseArgs(["update", "artifact-id-1234", "--ttl", "7d"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+    expect(
+      parseArgs(["update", "artifact-id-1234", "--ttl", "7d"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toMatchObject({
       command: "update",
       options: { filePath: null, id: "artifact-id-1234", ttlSeconds: 604800 },
     });
-    expect(parseArgs(["update", "artifact-id-1234", "--ttl", "never"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+    expect(
+      parseArgs(["update", "artifact-id-1234", "--ttl", "never"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toMatchObject({
       command: "update",
       options: { filePath: null, id: "artifact-id-1234", ttlSeconds: null },
     });
@@ -253,7 +309,9 @@ describe("parseArgs", () => {
   });
 
   test("parses watch with a viewer URL", () => {
-    expect(parseArgs(["watch", "https://pagebin.test/p/abc1234567890123/view-token", "plan.html"], {})).toEqual({
+    expect(
+      parseArgs(["watch", "https://pagebin.test/p/abc1234567890123/view-token", "plan.html"], {}),
+    ).toEqual({
       command: "watch",
       options: {
         attributes: {},
@@ -310,40 +368,55 @@ describe("parseArgs", () => {
   });
 
   test("parses watch for markdown extension variants", () => {
-    expect(parseArgs(["watch", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }).options).toMatchObject({
+    expect(
+      parseArgs(["watch", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }).options,
+    ).toMatchObject({
       filePath: "plan.html",
       mode: "publish",
     });
-    expect(parseArgs(["watch", "plan.markdown"], { PAGEBIN_ENDPOINT: "https://example.com" }).options).toMatchObject({
+    expect(
+      parseArgs(["watch", "plan.markdown"], { PAGEBIN_ENDPOINT: "https://example.com" }).options,
+    ).toMatchObject({
       filePath: "plan.markdown",
       mode: "publish",
     });
   });
 
   test("rejects update-only options on watch with an artifact target", () => {
-    expect(() => parseArgs(["watch", "abc1234567890123", "plan.html", "--ttl", "7d"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
-      "--ttl can only be used with pagebin watch <file>.",
-    );
-    expect(() => parseArgs(["watch", "abc1234567890123", "plan.html", "--sandbox", "strict"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
-      "--sandbox can only be used with pagebin watch <file>.",
-    );
+    expect(() =>
+      parseArgs(["watch", "abc1234567890123", "plan.html", "--ttl", "7d"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("--ttl can only be used with pagebin watch <file>.");
+    expect(() =>
+      parseArgs(["watch", "abc1234567890123", "plan.html", "--sandbox", "strict"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("--sandbox can only be used with pagebin watch <file>.");
   });
 
   test("parses JSON Lines output for watch", () => {
-    expect(parseArgs(["watch", "plan.html", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" }).options).toMatchObject({
+    expect(
+      parseArgs(["watch", "plan.html", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })
+        .options,
+    ).toMatchObject({
       json: true,
       mode: "publish",
     });
   });
 
   test("reports watch errors for missing file path after artifact target", () => {
-    expect(() => parseArgs(["watch", "abc1234567890123"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
-      "watch with an artifact target also requires a file path.",
-    );
+    expect(() =>
+      parseArgs(["watch", "abc1234567890123"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toThrow("watch with an artifact target also requires a file path.");
   });
 
   test("parses verify with an ID or viewer URL", () => {
-    expect(parseArgs(["verify", "abc1234567890123", "plan.html", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["verify", "abc1234567890123", "plan.html", "--json"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
       command: "verify",
       options: {
         endpoint: "https://example.com",
@@ -353,7 +426,9 @@ describe("parseArgs", () => {
         url: null,
       },
     });
-    expect(parseArgs(["verify", "https://pagebin.test/p/abc1234567890123/view-token", "plan.md"], {})).toMatchObject({
+    expect(
+      parseArgs(["verify", "https://pagebin.test/p/abc1234567890123/view-token", "plan.md"], {}),
+    ).toMatchObject({
       command: "verify",
       options: {
         endpoint: "https://pagebin.test",
@@ -364,7 +439,11 @@ describe("parseArgs", () => {
   });
 
   test("parses versions and rollback targets", () => {
-    expect(parseArgs(["versions", "abc1234567890123", "--json"], { PAGEBIN_ENDPOINT: "https://example.com" })).toEqual({
+    expect(
+      parseArgs(["versions", "abc1234567890123", "--json"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
       command: "versions",
       options: {
         endpoint: "https://example.com",
@@ -375,7 +454,9 @@ describe("parseArgs", () => {
         url: null,
       },
     });
-    expect(parseArgs(["versions", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" })).toMatchObject({
+    expect(
+      parseArgs(["versions", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toMatchObject({
       command: "versions",
       options: {
         endpoint: "https://example.com",
@@ -383,7 +464,9 @@ describe("parseArgs", () => {
         receiptLookup: true,
       },
     });
-    expect(parseArgs(["rollback", "https://page-bin.com/p/abc1234567890123/view-token", "2"], {})).toEqual({
+    expect(
+      parseArgs(["rollback", "https://page-bin.com/p/abc1234567890123/view-token", "2"], {}),
+    ).toEqual({
       command: "rollback",
       options: {
         endpoint: "https://api.page-bin.com",
@@ -424,18 +507,41 @@ describe("parseArgs", () => {
         version: 1,
       },
     });
-    expect(() => parseArgs(["rollback", "abc1234567890123", "0"], { PAGEBIN_ENDPOINT: "https://example.com" })).toThrow(
-      "positive integer",
-    );
+    expect(() =>
+      parseArgs(["rollback", "abc1234567890123", "0"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toThrow("positive integer");
   });
 
   test("parses subcommand help without endpoint configuration", () => {
-    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "versions", "rollback", "receipts", "show", "delete", "skill", "version"] as const;
+    const commands = [
+      "publish",
+      "list",
+      "reissue",
+      "update",
+      "watch",
+      "verify",
+      "versions",
+      "rollback",
+      "receipts",
+      "show",
+      "delete",
+      "skill",
+      "version",
+    ] as const;
 
     for (const command of commands) {
-      expect(parseArgs([command, "--help"], {})).toEqual({ command: "help", options: { topic: command } });
-      expect(parseArgs([command, "-h"], {})).toEqual({ command: "help", options: { topic: command } });
-      expect(parseArgs(["help", command], {})).toEqual({ command: "help", options: { topic: command } });
+      expect(parseArgs([command, "--help"], {})).toEqual({
+        command: "help",
+        options: { topic: command },
+      });
+      expect(parseArgs([command, "-h"], {})).toEqual({
+        command: "help",
+        options: { topic: command },
+      });
+      expect(parseArgs(["help", command], {})).toEqual({
+        command: "help",
+        options: { topic: command },
+      });
     }
   });
 });
@@ -452,7 +558,21 @@ describe("normalizeEndpoint", () => {
 
 describe("help command", () => {
   test("prints subcommand help without endpoint configuration", async () => {
-    const commands = ["publish", "list", "reissue", "update", "watch", "verify", "versions", "rollback", "receipts", "show", "delete", "skill", "version"];
+    const commands = [
+      "publish",
+      "list",
+      "reissue",
+      "update",
+      "watch",
+      "verify",
+      "versions",
+      "rollback",
+      "receipts",
+      "show",
+      "delete",
+      "skill",
+      "version",
+    ];
 
     for (const command of commands) {
       const result = await runPagebin([command, "--help"], {});
@@ -496,6 +616,7 @@ describe("publish command", () => {
   test("prints only the URL by default and sends the expected multipart request", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>cli</h1>");
     let requestCount = 0;
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -516,8 +637,13 @@ describe("publish command", () => {
 
         return Response.json(
           {
-            id: "artifact-id",
-            url: "https://pagebin.test/p/artifact-id/view-token",
+            revision: 1,
+            contentSha256: "a".repeat(64),
+            attributes: {},
+            version: 1,
+
+            id: "artifact-id-1234",
+            url: "https://pagebin.test/p/artifact-id-1234/view-token",
             expiresAt: null,
             sandbox: "standard",
           },
@@ -533,7 +659,7 @@ describe("publish command", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
-      expect(result.stdout).toBe("https://pagebin.test/p/artifact-id/view-token\n");
+      expect(result.stdout).toBe("https://pagebin.test/p/artifact-id-1234/view-token\n");
       expect(requestCount).toBe(1);
     } finally {
       server.stop(true);
@@ -542,6 +668,7 @@ describe("publish command", () => {
 
   test("prints structured JSON and sends ttl/sandbox fields", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>cli</h1>");
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -554,8 +681,13 @@ describe("publish command", () => {
 
         return Response.json(
           {
-            id: "artifact-id",
-            url: "https://pagebin.test/p/artifact-id/view-token",
+            revision: 1,
+            contentSha256: "a".repeat(64),
+            attributes: {},
+            version: 1,
+
+            id: "artifact-id-1234",
+            url: "https://pagebin.test/p/artifact-id-1234/view-token",
             expiresAt: "2026-06-07T00:00:00.000Z",
             sandbox: "strict",
           },
@@ -565,15 +697,33 @@ describe("publish command", () => {
     });
 
     try {
-      const result = await runPagebin(["publish", filePath, "--endpoint", server.url.origin, "--ttl", "7d", "--sandbox", "strict", "--json"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        [
+          "publish",
+          filePath,
+          "--endpoint",
+          server.url.origin,
+          "--ttl",
+          "7d",
+          "--sandbox",
+          "strict",
+          "--json",
+        ],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
+        revision: 1,
+        contentSha256: "a".repeat(64),
+        attributes: {},
+        version: 1,
+
         schemaVersion: 1,
-        id: "artifact-id",
-        url: "https://pagebin.test/p/artifact-id/view-token",
+        id: "artifact-id-1234",
+        url: "https://pagebin.test/p/artifact-id-1234/view-token",
         expiresAt: "2026-06-07T00:00:00.000Z",
         sandbox: "strict",
       });
@@ -586,6 +736,7 @@ describe("publish command", () => {
     const contents = "<!doctype html><h1>publish verified</h1>";
     const filePath = await writeTempFile("cli-publish-verify.html", contents);
     let origin = "";
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
@@ -594,6 +745,9 @@ describe("publish command", () => {
         if (path === "/api/publish") {
           return Response.json(
             {
+              attributes: {},
+              version: 1,
+
               id: "artifact-id-1234",
               url: `${origin}/p/artifact-id-1234/view-token`,
               expiresAt: null,
@@ -606,16 +760,24 @@ describe("publish command", () => {
         }
 
         expect(path).toBe("/raw/artifact-id-1234/view-token");
+
         return new Response(contents);
       },
     });
+
     origin = server.url.origin;
 
     try {
-      const result = await runPagebin(["publish", filePath, "--endpoint", origin, "--verify", "--json"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
-      const payload = JSON.parse(result.stdout) as { verification: { verified: boolean; method: string } };
+      const result = await runPagebin(
+        ["publish", filePath, "--endpoint", origin, "--verify", "--json"],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
+
+      const payload = JSON.parse(result.stdout) as {
+        verification: { verified: boolean; method: string };
+      };
 
       expect(result.exitCode).toBe(0);
       expect(payload.verification).toMatchObject({ verified: true, method: "raw" });
@@ -625,7 +787,11 @@ describe("publish command", () => {
   });
 
   test("sends explicit artifact attributes without inference", async () => {
-    const filePath = await writeTempFile("cli-metadata-plan.html", "<!doctype html><title>Ignored</title>");
+    const filePath = await writeTempFile(
+      "cli-metadata-plan.html",
+      "<!doctype html><title>Ignored</title>",
+    );
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -635,10 +801,13 @@ describe("publish command", () => {
           project: "dashboard",
           artifactType: "plan",
         });
+
         return Response.json(
           {
-            id: "artifact-id",
-            url: "https://pagebin.test/p/artifact-id/view-token",
+            version: 1,
+
+            id: "artifact-id-1234",
+            url: "https://pagebin.test/p/artifact-id-1234/view-token",
             expiresAt: null,
             sandbox: "standard",
             revision: 1,
@@ -675,23 +844,34 @@ describe("publish command", () => {
   });
 
   test("infers Codex from CODEX_THREAD_ID and only --agent overrides it", async () => {
-    const filePath = await writeTempFile("cli-agent-plan.html", "<!doctype html><title>Agent plan</title>");
+    const filePath = await writeTempFile(
+      "cli-agent-plan.html",
+      "<!doctype html><title>Agent plan</title>",
+    );
+
     const agents: string[] = [];
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
         const form = await request.formData();
         const attributes = JSON.parse(String(form.get("attributes"))) as { agent?: string };
         agents.push(attributes.agent ?? "");
-        return Response.json({
-          id: `artifact-id-${agents.length}`,
-          url: `https://pagebin.test/p/artifact-id-${agents.length}/view-token`,
-          expiresAt: null,
-          sandbox: "standard",
-          revision: 1,
-          contentSha256: "a".repeat(64),
-          attributes,
-        }, { status: 201 });
+
+        return Response.json(
+          {
+            version: 1,
+
+            id: `artifact-id-123${agents.length}`,
+            url: `https://pagebin.test/p/artifact-id-123${agents.length}/view-token`,
+            expiresAt: null,
+            sandbox: "standard",
+            revision: 1,
+            contentSha256: "a".repeat(64),
+            attributes,
+          },
+          { status: 201 },
+        );
       },
     });
 
@@ -703,8 +883,13 @@ describe("publish command", () => {
         CODEX_THREAD_ID: "thread-id",
         PAGEBIN_STATE_PATH: join(tmpdir(), `pagebin-agent-test-${Date.now()}.json`),
       };
+
       const inferred = await runPagebin(["publish", filePath], env);
-      const overridden = await runPagebin(["publish", filePath, "--agent", "custom-agent", "--force-new"], env);
+
+      const overridden = await runPagebin(
+        ["publish", filePath, "--agent", "custom-agent", "--force-new"],
+        env,
+      );
 
       expect(inferred.exitCode).toBe(0);
       expect(overridden.exitCode).toBe(0);
@@ -732,7 +917,9 @@ flowchart LR
 \`\`\`
 `,
     );
+
     let requestCount = 0;
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -758,8 +945,13 @@ flowchart LR
 
         return Response.json(
           {
-            id: "artifact-id",
-            url: "https://pagebin.test/p/artifact-id/view-token",
+            revision: 1,
+            contentSha256: "a".repeat(64),
+            attributes: {},
+            version: 1,
+
+            id: "artifact-id-1234",
+            url: "https://pagebin.test/p/artifact-id-1234/view-token",
             expiresAt: null,
             sandbox: "standard",
           },
@@ -775,7 +967,7 @@ flowchart LR
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
-      expect(result.stdout).toBe("https://pagebin.test/p/artifact-id/view-token\n");
+      expect(result.stdout).toBe("https://pagebin.test/p/artifact-id-1234/view-token\n");
       expect(requestCount).toBe(1);
     } finally {
       server.stop(true);
@@ -783,20 +975,29 @@ flowchart LR
   });
 
   test("rejects publishing Mermaid markdown with the strict sandbox before sending a request", async () => {
-    const filePath = await writeTempFile("cli-plan.md", "# CLI Markdown\n\n```mermaid\nA --> B\n```\n");
+    const filePath = await writeTempFile(
+      "cli-plan.md",
+      "# CLI Markdown\n\n```mermaid\nA --> B\n```\n",
+    );
+
     let requestCount = 0;
+
     const server = Bun.serve({
       port: 0,
       fetch() {
         requestCount += 1;
+
         return Response.json({ error: "unexpected" }, { status: 500 });
       },
     });
 
     try {
-      const result = await runPagebin(["publish", filePath, "--endpoint", server.url.origin, "--sandbox", "strict"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["publish", filePath, "--endpoint", server.url.origin, "--sandbox", "strict"],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Mermaid diagrams require --sandbox standard");
@@ -807,7 +1008,11 @@ flowchart LR
   });
 
   test("publishes static markdown with the strict sandbox", async () => {
-    const filePath = await writeTempFile("strict-plan.md", "# Strict Markdown\n\nStatic content.\n");
+    const filePath = await writeTempFile(
+      "strict-plan.md",
+      "# Strict Markdown\n\nStatic content.\n",
+    );
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -818,19 +1023,30 @@ flowchart LR
         expect(file).toBeInstanceOf(File);
         expect(await (file as File).text()).toContain("Static content.");
 
-        return Response.json({
-          id: "artifact-id",
-          url: "https://pagebin.test/p/artifact-id/view-token",
-          expiresAt: null,
-          sandbox: "strict",
-        }, { status: 201 });
+        return Response.json(
+          {
+            revision: 1,
+            contentSha256: "a".repeat(64),
+            attributes: {},
+            version: 1,
+
+            id: "artifact-id-1234",
+            url: "https://pagebin.test/p/artifact-id-1234/view-token",
+            expiresAt: null,
+            sandbox: "strict",
+          },
+          { status: 201 },
+        );
       },
     });
 
     try {
-      const result = await runPagebin(["publish", filePath, "--endpoint", server.url.origin, "--sandbox", "strict"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["publish", filePath, "--endpoint", server.url.origin, "--sandbox", "strict"],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
@@ -841,6 +1057,7 @@ flowchart LR
 
   test("rejects oversized markdown before sending a request", async () => {
     const filePath = await writeTempFile("huge-report.md", "x".repeat(50 * 1024 * 1024 + 1));
+
     const result = await runPagebin(["publish", filePath, "--endpoint", "http://localhost:8787"], {
       PAGEBIN_PUBLISH_TOKEN: "publish-token",
     });
@@ -854,27 +1071,60 @@ flowchart LR
     const filePath = await writeTempFile("cli-binary.zip", "");
     await writeFile(filePath, bytes);
     let uploaded = false;
-    const server = Bun.serve({ port: 0, async fetch(request) {
-      const url = new URL(request.url);
-      if (url.pathname === '/api/uploads') {
-        const body = await request.json() as {files: {path: string; sha256: string}[]};
-        expect(body.files[0]?.sha256).toBe(createHash('sha256').update(bytes).digest('hex'));
-        return Response.json({id: 'abcdefghijklmnop', sessionId: 'session', missing: ['cli-binary.zip']});
-      }
-      if (url.pathname.endsWith('/file')) {
-        expect(new Uint8Array(await request.arrayBuffer())).toEqual(bytes);
-        uploaded = true;
-        return Response.json({uploaded: true});
-      }
-      expect(uploaded).toBe(true);
-      return Response.json({id: 'abcdefghijklmnop', url: url.origin + '/p/abcdefghijklmnop/token', rawUrl: url.origin + '/raw/abcdefghijklmnop/token/v/1/cli-binary.zip', downloadUrl: url.origin + '/download/abcdefghijklmnop/token/v/1/cli-binary.zip', revision: 1});
-    }});
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+
+        if (url.pathname === "/api/uploads") {
+          const body = (await request.json()) as { files: { path: string; sha256: string }[] };
+          expect(body.files[0]?.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+          return Response.json({
+            id: "abcdefghijklmnop",
+            sessionId: "session-id-12345",
+            missing: ["cli-binary.zip"],
+          });
+        }
+
+        if (url.pathname.endsWith("/file")) {
+          expect(new Uint8Array(await request.arrayBuffer())).toEqual(bytes);
+          uploaded = true;
+
+          return Response.json({ uploaded: true });
+        }
+
+        expect(uploaded).toBe(true);
+
+        return Response.json({
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          expiresAt: null,
+          sandbox: "standard",
+
+          id: "abcdefghijklmnop",
+          url: url.origin + "/p/abcdefghijklmnop/token",
+          rawUrl: url.origin + "/raw/abcdefghijklmnop/token/v/1/cli-binary.zip",
+          downloadUrl: url.origin + "/download/abcdefghijklmnop/token/v/1/cli-binary.zip",
+          revision: 1,
+        });
+      },
+    });
+
     try {
-      const result = await runPagebin(['publish', filePath, '--no-infer', '--json', '--endpoint', server.url.toString()], {PAGEBIN_PUBLISH_TOKEN: 'publish-token'});
+      const result = await runPagebin(
+        ["publish", filePath, "--no-infer", "--json", "--endpoint", server.url.toString()],
+        { PAGEBIN_PUBLISH_TOKEN: "publish-token" },
+      );
+
       expect(result.exitCode).toBe(0);
-      expect(JSON.parse(result.stdout).downloadUrl).toContain('/download/');
+      expect(JSON.parse(result.stdout).downloadUrl).toContain("/download/");
       expect(uploaded).toBe(true);
-    } finally { server.stop(true); }
+    } finally {
+      server.stop(true);
+    }
   });
 });
 
@@ -887,6 +1137,7 @@ describe("local receipt workflow", () => {
     let publishCount = 0;
     let updateCount = 0;
     let origin = "";
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
@@ -895,8 +1146,10 @@ describe("local receipt workflow", () => {
         if (request.method === "POST" && path === "/api/publish") {
           publishCount += 1;
           const id = `artifact-id-123${publishCount}`;
+
           return Response.json(
             {
+              version: 1,
               id,
               url: `${origin}/p/${id}/view-token`,
               expiresAt: null,
@@ -911,7 +1164,20 @@ describe("local receipt workflow", () => {
 
         expect(path).toBe("/api/artifacts/artifact-id-1232/content");
         updateCount += 1;
+
         return Response.json({
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1232",
           filename: "receipt-plan.html",
           updatedAt: "2026-07-12T00:00:00.000Z",
@@ -924,27 +1190,54 @@ describe("local receipt workflow", () => {
         });
       },
     });
+
     origin = server.url.origin;
     const env = { PAGEBIN_PUBLISH_TOKEN: "publish-token", PAGEBIN_STATE_PATH: statePath };
 
     try {
-      const published = await runPagebin(["publish", filePath, "--endpoint", server.url.origin], env);
+      const published = await runPagebin(
+        ["publish", filePath, "--endpoint", server.url.origin],
+        env,
+      );
+
       expect(published.exitCode).toBe(0);
 
       const receiptMode = (await stat(statePath)).mode & 0o777;
-      const store = JSON.parse(await readFile(statePath, "utf8")) as { artifacts: Array<{ id: string; url: string; filePath: string }> };
-      expect(receiptMode).toBe(0o600);
-      expect(store.artifacts[0]).toMatchObject({ id: "artifact-id-1231", filePath: resolve(filePath) });
 
-      const duplicate = await runPagebin(["publish", filePath, "--endpoint", server.url.origin], env);
+      const store = JSON.parse(await readFile(statePath, "utf8")) as {
+        artifacts: Array<{ id: string; url: string; filePath: string }>;
+      };
+
+      expect(receiptMode).toBe(0o600);
+      expect(store.artifacts[0]).toMatchObject({
+        id: "artifact-id-1231",
+        filePath: resolve(filePath),
+      });
+
+      const duplicate = await runPagebin(
+        ["publish", filePath, "--endpoint", server.url.origin],
+        env,
+      );
+
       expect(duplicate.exitCode).toBe(1);
       expect(duplicate.stderr).toContain("already published");
 
-      const forced = await runPagebin(["publish", filePath, "--endpoint", server.url.origin, "--force-new"], env);
+      const forced = await runPagebin(
+        ["publish", filePath, "--endpoint", server.url.origin, "--force-new"],
+        env,
+      );
+
       expect(forced.exitCode).toBe(0);
-      const forcedStore = JSON.parse(await readFile(statePath, "utf8")) as { artifacts: Array<{ id: string; filePath: string }> };
+
+      const forcedStore = JSON.parse(await readFile(statePath, "utf8")) as {
+        artifacts: Array<{ id: string; filePath: string }>;
+      };
+
       expect(forcedStore.artifacts).toHaveLength(2);
-      expect(forcedStore.artifacts[1]).toMatchObject({ id: "artifact-id-1232", filePath: resolve(filePath) });
+      expect(forcedStore.artifacts[1]).toMatchObject({
+        id: "artifact-id-1232",
+        filePath: resolve(filePath),
+      });
 
       const updated = await runPagebin(["update", filePath, "--endpoint", server.url.origin], env);
       expect(updated.exitCode).toBe(0);
@@ -960,6 +1253,7 @@ describe("local receipt workflow", () => {
 describe("list command", () => {
   test("prints a table of stored pages", async () => {
     let requestCount = 0;
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
@@ -971,7 +1265,22 @@ describe("list command", () => {
         return Response.json({
           artifacts: [
             {
-              id: "artifact-id",
+              revision: 1,
+              contentSha256: "a".repeat(64),
+              attributes: {},
+              version: 1,
+              updatedAt: "2026-07-12T00:00:00.000Z",
+              versions: [
+                {
+                  version: 1,
+                  size: 31,
+                  createdAt: "2026-07-12T00:00:00.000Z",
+                  contentSha256: "a".repeat(64),
+                  current: true,
+                },
+              ],
+
+              id: "artifact-id-1234",
               filename: "cli-plan.html",
               createdAt: "2026-06-01T12:00:00.000Z",
               expiresAt: null,
@@ -992,7 +1301,7 @@ describe("list command", () => {
       expect(result.stderr).toBe("");
       expect(result.stdout).toContain("ID");
       expect(result.stdout).toContain("Filename");
-      expect(result.stdout).toContain("artifact-id");
+      expect(result.stdout).toContain("artifact-id-1234");
       expect(result.stdout).toContain("cli-plan.html");
       expect(result.stdout).toContain("1.5 KB");
       expect(requestCount).toBe(1);
@@ -1008,7 +1317,22 @@ describe("list command", () => {
         return Response.json({
           artifacts: [
             {
-              id: "artifact-id",
+              revision: 1,
+              contentSha256: "a".repeat(64),
+              attributes: {},
+              version: 1,
+              updatedAt: "2026-07-12T00:00:00.000Z",
+              versions: [
+                {
+                  version: 1,
+                  size: 31,
+                  createdAt: "2026-07-12T00:00:00.000Z",
+                  contentSha256: "a".repeat(64),
+                  current: true,
+                },
+              ],
+
+              id: "artifact-id-1234",
               filename: "cli-plan.html",
               createdAt: "2026-06-01T12:00:00.000Z",
               expiresAt: null,
@@ -1030,7 +1354,22 @@ describe("list command", () => {
         schemaVersion: 1,
         artifacts: [
           {
-            id: "artifact-id",
+            revision: 1,
+            contentSha256: "a".repeat(64),
+            attributes: {},
+            version: 1,
+            updatedAt: "2026-07-12T00:00:00.000Z",
+            versions: [
+              {
+                version: 1,
+                size: 31,
+                createdAt: "2026-07-12T00:00:00.000Z",
+                contentSha256: "a".repeat(64),
+                current: true,
+              },
+            ],
+
+            id: "artifact-id-1234",
             filename: "cli-plan.html",
             createdAt: "2026-06-01T12:00:00.000Z",
             expiresAt: null,
@@ -1071,6 +1410,21 @@ describe("list command", () => {
         return Response.json({
           artifacts: [
             {
+              revision: 1,
+              contentSha256: "a".repeat(64),
+              attributes: {},
+              version: 1,
+              updatedAt: "2026-07-12T00:00:00.000Z",
+              versions: [
+                {
+                  version: 1,
+                  size: 31,
+                  createdAt: "2026-07-12T00:00:00.000Z",
+                  contentSha256: "a".repeat(64),
+                  current: true,
+                },
+              ],
+
               id: "expired-artifact",
               filename: "old-plan.html",
               createdAt: "2026-05-01T12:00:00.000Z",
@@ -1101,17 +1455,20 @@ describe("list command", () => {
 describe("reissue command", () => {
   test("prints only the new URL by default", async () => {
     let requestCount = 0;
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
         requestCount += 1;
         expect(request.method).toBe("POST");
-        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id/reissue");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/reissue");
         expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
 
         return Response.json({
-          id: "artifact-id",
-          url: "https://pagebin.test/p/artifact-id/new-token",
+          revision: 1,
+
+          id: "artifact-id-1234",
+          url: "https://pagebin.test/p/artifact-id-1234/new-token",
           expiresAt: null,
           sandbox: "standard",
         });
@@ -1119,13 +1476,16 @@ describe("reissue command", () => {
     });
 
     try {
-      const result = await runPagebin(["reissue", "artifact-id", "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["reissue", "artifact-id-1234", "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
-      expect(result.stdout).toBe("https://pagebin.test/p/artifact-id/new-token\n");
+      expect(result.stdout).toBe("https://pagebin.test/p/artifact-id-1234/new-token\n");
       expect(requestCount).toBe(1);
     } finally {
       server.stop(true);
@@ -1140,6 +1500,8 @@ describe("reissue command", () => {
         expect(new URL(request.url).pathname).toBe("/api/artifacts/-artifact-id-1234/reissue");
 
         return Response.json({
+          revision: 1,
+
           id: "-artifact-id-1234",
           url: "https://pagebin.test/p/-artifact-id-1234/new-token",
           expiresAt: null,
@@ -1149,9 +1511,12 @@ describe("reissue command", () => {
     });
 
     try {
-      const result = await runPagebin(["reissue", "-artifact-id-1234", "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["reissue", "-artifact-id-1234", "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("https://pagebin.test/p/-artifact-id-1234/new-token\n");
@@ -1165,8 +1530,10 @@ describe("reissue command", () => {
       port: 0,
       fetch() {
         return Response.json({
-          id: "artifact-id",
-          url: "https://pagebin.test/p/artifact-id/new-token",
+          revision: 1,
+
+          id: "artifact-id-1234",
+          url: "https://pagebin.test/p/artifact-id-1234/new-token",
           expiresAt: "2026-06-07T00:00:00.000Z",
           sandbox: "strict",
         });
@@ -1174,15 +1541,20 @@ describe("reissue command", () => {
     });
 
     try {
-      const result = await runPagebin(["reissue", "artifact-id", "--endpoint", server.url.origin, "--json"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["reissue", "artifact-id-1234", "--endpoint", server.url.origin, "--json"],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
+        revision: 1,
+
         schemaVersion: 1,
-        id: "artifact-id",
-        url: "https://pagebin.test/p/artifact-id/new-token",
+        id: "artifact-id-1234",
+        url: "https://pagebin.test/p/artifact-id-1234/new-token",
         expiresAt: "2026-06-07T00:00:00.000Z",
         sandbox: "strict",
       });
@@ -1202,6 +1574,16 @@ describe("version history commands", () => {
         expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          filename: "plan.html",
+          createdAt: "2026-07-12T00:00:00.000Z",
+          updatedAt: "2026-07-12T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          size: 31,
+
           id: "artifact-id-1234",
           version: 2,
           versions: [
@@ -1223,12 +1605,16 @@ describe("version history commands", () => {
         });
       },
     });
+
     const viewerUrl = `${server.url.origin}/p/artifact-id-1234/view-token`;
 
     try {
-      const textResult = await runPagebin(["versions", viewerUrl, "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const textResult = await runPagebin(
+        ["versions", viewerUrl, "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(textResult.exitCode).toBe(0);
       expect(textResult.stderr).toBe("");
@@ -1240,9 +1626,13 @@ describe("version history commands", () => {
       expect(lines[1]).toContain("v1");
       expect(lines[1]).toContain(`${viewerUrl}/v/1`);
 
-      const jsonResult = await runPagebin(["versions", viewerUrl, "--json", "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const jsonResult = await runPagebin(
+        ["versions", viewerUrl, "--json", "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
+
       expect(jsonResult.exitCode).toBe(0);
       expect(JSON.parse(jsonResult.stdout)).toEqual({
         schemaVersion: 1,
@@ -1277,6 +1667,7 @@ describe("version history commands", () => {
     const filePath = join(directory, "plan.html");
     await writeFile(filePath, "<!doctype html><h1>plan</h1>");
     let origin = "";
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -1286,6 +1677,17 @@ describe("version history commands", () => {
         expect(await request.json()).toEqual({ version: 1 });
 
         return Response.json({
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "plan.html",
           updatedAt: "2026-07-22T00:00:00.000Z",
@@ -1299,6 +1701,7 @@ describe("version history commands", () => {
         });
       },
     });
+
     origin = server.url.origin;
     const viewerUrl = `${origin}/p/artifact-id-1234/view-token`;
     await writeFile(
@@ -1327,6 +1730,7 @@ describe("version history commands", () => {
         PAGEBIN_PUBLISH_TOKEN: "publish-token",
         PAGEBIN_STATE_PATH: statePath,
       });
+
       const store = JSON.parse(await readFile(statePath, "utf8")) as {
         artifacts: Array<{ revision: number; updatedAt: string; contentSha256: string }>;
       };
@@ -1347,7 +1751,10 @@ describe("version history commands", () => {
     const server = Bun.serve({
       port: 0,
       fetch() {
-        return Response.json({ error: "Version 99 is not available for this artifact." }, { status: 400 });
+        return Response.json(
+          { error: "Version 99 is not available for this artifact." },
+          { status: 400 },
+        );
       },
     });
 
@@ -1376,6 +1783,18 @@ describe("update command", () => {
         expect(await request.json()).toEqual({ ttlSeconds: null });
 
         return Response.json({
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "plan.html",
           updatedAt: "2026-07-15T00:00:00.000Z",
@@ -1390,12 +1809,19 @@ describe("update command", () => {
     });
 
     try {
-      const result = await runPagebin(["update", "artifact-id-1234", "--ttl", "never", "--endpoint", server.url.origin, "--json"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["update", "artifact-id-1234", "--ttl", "never", "--endpoint", server.url.origin, "--json"],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
-      expect(JSON.parse(result.stdout)).toMatchObject({ id: "artifact-id-1234", expiresAt: null, revision: 2 });
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        id: "artifact-id-1234",
+        expiresAt: null,
+        revision: 2,
+      });
     } finally {
       server.stop(true);
     }
@@ -1403,13 +1829,27 @@ describe("update command", () => {
 
   test("sends content and TTL in one request", async () => {
     const filePath = await writeTempFile("cli-plan-ttl.html", "<!doctype html><h1>updated</h1>");
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
         expect(request.method).toBe("PUT");
         const form = await request.formData();
         expect(form.get("ttlSeconds")).toBe("604800");
+
         return Response.json({
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-plan-ttl.html",
           updatedAt: "2026-07-15T00:00:00.000Z",
@@ -1424,9 +1864,13 @@ describe("update command", () => {
     });
 
     try {
-      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--ttl", "7d", "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["update", "artifact-id-1234", filePath, "--ttl", "7d", "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
+
       expect(result.exitCode).toBe(0);
     } finally {
       server.stop(true);
@@ -1436,6 +1880,7 @@ describe("update command", () => {
   test("updates content and prints the target URL when a URL was provided", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>updated</h1>");
     let requestCount = 0;
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -1452,6 +1897,21 @@ describe("update command", () => {
         expect(await (file as File).text()).toBe("<!doctype html><h1>updated</h1>");
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-plan.html",
           updatedAt: "2026-06-18T00:00:00.000Z",
@@ -1461,6 +1921,7 @@ describe("update command", () => {
         });
       },
     });
+
     const url = `${server.url.origin}/p/artifact-id-1234/view-token`;
 
     try {
@@ -1480,6 +1941,7 @@ describe("update command", () => {
 
   test("updates content by ID and prints structured JSON", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>updated</h1>");
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
@@ -1487,6 +1949,21 @@ describe("update command", () => {
         expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/content");
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-plan.html",
           updatedAt: "2026-06-18T00:00:00.000Z",
@@ -1498,12 +1975,30 @@ describe("update command", () => {
     });
 
     try {
-      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin, "--json"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin, "--json"],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({
+        revision: 1,
+        contentSha256: "a".repeat(64),
+        attributes: {},
+        version: 1,
+        createdAt: "2026-07-12T00:00:00.000Z",
+        versions: [
+          {
+            version: 1,
+            size: 31,
+            createdAt: "2026-07-12T00:00:00.000Z",
+            contentSha256: "a".repeat(64),
+            current: true,
+          },
+        ],
+
         schemaVersion: 1,
         id: "artifact-id-1234",
         filename: "cli-plan.html",
@@ -1519,7 +2014,11 @@ describe("update command", () => {
   });
 
   test("renders markdown files to HTML before updating", async () => {
-    const filePath = await writeTempFile("cli-update.markdown", "# Updated\n\n```ts\nconst ok = true;\n```\n");
+    const filePath = await writeTempFile(
+      "cli-update.markdown",
+      "# Updated\n\n```ts\nconst ok = true;\n```\n",
+    );
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -1539,6 +2038,21 @@ describe("update command", () => {
         expect(html).toContain("data-copy-code");
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-update.markdown",
           updatedAt: "2026-06-18T00:00:00.000Z",
@@ -1550,9 +2064,13 @@ describe("update command", () => {
     });
 
     try {
-      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin, "--json"], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin, "--json"],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
+
       const payload = JSON.parse(result.stdout) as { filename: string; url: string | null };
 
       expect(result.exitCode).toBe(0);
@@ -1565,6 +2083,7 @@ describe("update command", () => {
 
   test("updates a strict-sandbox artifact with static markdown without a warning", async () => {
     const filePath = await writeTempFile("cli-update.md", "# Updated\n");
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -1578,6 +2097,21 @@ describe("update command", () => {
         expect((file as File).name).toBe("cli-update.html");
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-update.md",
           updatedAt: "2026-06-18T00:00:00.000Z",
@@ -1589,9 +2123,12 @@ describe("update command", () => {
     });
 
     try {
-      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("artifact-id-1234\n");
@@ -1602,13 +2139,29 @@ describe("update command", () => {
   });
 
   test("rejects a Mermaid update when the artifact uses the strict sandbox", async () => {
-    const filePath = await writeTempFile("strict-diagram.md", "# Diagram\n\n```mermaid\nflowchart LR\nA --> B\n```\n");
+    const filePath = await writeTempFile(
+      "strict-diagram.md",
+      "# Diagram\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+    );
+
     let putCount = 0;
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
         if (request.method === "GET") {
           return Response.json({
+            version: 1,
+            versions: [
+              {
+                version: 1,
+                size: 31,
+                createdAt: "2026-07-12T00:00:00.000Z",
+                contentSha256: "a".repeat(64),
+                current: true,
+              },
+            ],
+
             id: "artifact-id-1234",
             filename: "strict-diagram.md",
             createdAt: "2026-06-18T00:00:00.000Z",
@@ -1617,20 +2170,24 @@ describe("update command", () => {
             sandbox: "strict",
             size: 120,
             revision: 1,
-            contentSha256: "abc",
+            contentSha256: "a".repeat(64),
             attributes: {},
           });
         }
 
         putCount += 1;
+
         return Response.json({ error: "unexpected" }, { status: 500 });
       },
     });
 
     try {
-      const result = await runPagebin(["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["update", "artifact-id-1234", filePath, "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Mermaid diagrams require --sandbox standard");
@@ -1645,19 +2202,28 @@ describe("verify command", () => {
   test("verifies raw content from a viewer URL", async () => {
     const contents = "<!doctype html><h1>verified</h1>";
     const filePath = await writeTempFile("cli-verify.html", contents);
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
         expect(new URL(request.url).pathname).toBe("/raw/artifact-id-1234/view-token");
         expect(request.headers.get("Accept-Encoding")).toBe("identity");
+
         return new Response(contents, { headers: { "Content-Type": "text/html" } });
       },
     });
+
     const viewerUrl = `${server.url.origin}/p/artifact-id-1234/view-token`;
 
     try {
       const result = await runPagebin(["verify", viewerUrl, filePath, "--json"], {});
-      const payload = JSON.parse(result.stdout) as { verified: boolean; method: string; localSha256: string; remoteSha256: string };
+
+      const payload = JSON.parse(result.stdout) as {
+        verified: boolean;
+        method: string;
+        localSha256: string;
+        remoteSha256: string;
+      };
 
       expect(result.exitCode).toBe(0);
       expect(payload.verified).toBe(true);
@@ -1672,12 +2238,26 @@ describe("verify command", () => {
     const contents = "<!doctype html><h1>verified by id</h1>";
     const filePath = await writeTempFile("cli-verify-id.html", contents);
     const contentSha256 = createHash("sha256").update(contents).digest("hex");
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
         expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234");
         expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+
         return Response.json({
+          attributes: {},
+          version: 1,
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-verify-id.html",
           createdAt: "2026-07-12T00:00:00.000Z",
@@ -1692,9 +2272,12 @@ describe("verify command", () => {
     });
 
     try {
-      const result = await runPagebin(["verify", "artifact-id-1234", filePath, "--endpoint", server.url.origin], {
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
-      });
+      const result = await runPagebin(
+        ["verify", "artifact-id-1234", filePath, "--endpoint", server.url.origin],
+        {
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+      );
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Verified artifact-id-1234");
@@ -1704,8 +2287,16 @@ describe("verify command", () => {
   });
 
   test("fails when raw content does not match", async () => {
-    const filePath = await writeTempFile("cli-verify-mismatch.html", "<!doctype html><h1>local</h1>");
-    const server = Bun.serve({ port: 0, fetch: () => new Response("<!doctype html><h1>remote</h1>") });
+    const filePath = await writeTempFile(
+      "cli-verify-mismatch.html",
+      "<!doctype html><h1>local</h1>",
+    );
+
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response("<!doctype html><h1>remote</h1>"),
+    });
+
     const viewerUrl = `${server.url.origin}/p/artifact-id-1234/view-token`;
 
     try {
@@ -1724,9 +2315,11 @@ describe("watch command", () => {
     const filePath = await writeTempFile("cli-watch.md", "# First\n");
     const uploads: string[] = [];
     let resolveUpdateUpload: (() => void) | null = null;
+
     const updateUpload = new Promise<void>((resolve) => {
       resolveUpdateUpload = resolve;
     });
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -1752,6 +2345,11 @@ describe("watch command", () => {
 
           return Response.json(
             {
+              revision: 1,
+              contentSha256: "a".repeat(64),
+              attributes: {},
+              version: 1,
+
               id: "artifact-id-1234",
               url: `${origin}/p/artifact-id-1234/view-token`,
               expiresAt: null,
@@ -1769,6 +2367,21 @@ describe("watch command", () => {
         resolveUpdateUpload?.();
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-watch.md",
           updatedAt: "2026-06-18T00:00:00.000Z",
@@ -1778,15 +2391,20 @@ describe("watch command", () => {
         });
       },
     });
-    const proc = Bun.spawn([process.execPath, "src/cli.ts", "watch", filePath, "--endpoint", server.url.origin], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+
+    const proc = Bun.spawn(
+      [process.execPath, "src/cli.ts", "watch", filePath, "--endpoint", server.url.origin],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+        stderr: "pipe",
+        stdout: "pipe",
       },
-      stderr: "pipe",
-      stdout: "pipe",
-    });
+    );
+
     let stdout = "";
     let stderr = "";
 
@@ -1814,9 +2432,11 @@ describe("watch command", () => {
     const filePath = await writeTempFile("cli-watch.html", "<!doctype html><h1>first</h1>");
     const uploads: string[] = [];
     let resolveUpdateUpload: (() => void) | null = null;
+
     const updateUpload = new Promise<void>((resolve) => {
       resolveUpdateUpload = resolve;
     });
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -1840,6 +2460,11 @@ describe("watch command", () => {
 
           return Response.json(
             {
+              revision: 1,
+              contentSha256: "a".repeat(64),
+              attributes: {},
+              version: 1,
+
               id: "artifact-id-1234",
               url: `${origin}/p/artifact-id-1234/view-token`,
               expiresAt: "2026-06-25T00:00:00.000Z",
@@ -1857,6 +2482,21 @@ describe("watch command", () => {
         resolveUpdateUpload?.();
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-watch.html",
           updatedAt: "2026-06-18T00:00:00.000Z",
@@ -1866,15 +2506,31 @@ describe("watch command", () => {
         });
       },
     });
-    const proc = Bun.spawn([process.execPath, "src/cli.ts", "watch", filePath, "--endpoint", server.url.origin, "--ttl", "7d", "--sandbox", "strict"], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli.ts",
+        "watch",
+        filePath,
+        "--endpoint",
+        server.url.origin,
+        "--ttl",
+        "7d",
+        "--sandbox",
+        "strict",
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+        stderr: "pipe",
+        stdout: "pipe",
       },
-      stderr: "pipe",
-      stdout: "pipe",
-    });
+    );
+
     let stdout = "";
 
     try {
@@ -1900,9 +2556,11 @@ describe("watch command", () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>first</h1>");
     const uploads: string[] = [];
     let resolveSecondUpload: (() => void) | null = null;
+
     const secondUpload = new Promise<void>((resolve) => {
       resolveSecondUpload = resolve;
     });
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -1919,6 +2577,21 @@ describe("watch command", () => {
         }
 
         return Response.json({
+          revision: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+          version: 1,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          versions: [
+            {
+              version: 1,
+              size: 31,
+              createdAt: "2026-07-12T00:00:00.000Z",
+              contentSha256: "a".repeat(64),
+              current: true,
+            },
+          ],
+
           id: "artifact-id-1234",
           filename: "cli-plan.html",
           updatedAt: "2026-06-18T00:00:00.000Z",
@@ -1928,15 +2601,27 @@ describe("watch command", () => {
         });
       },
     });
-    const proc = Bun.spawn([process.execPath, "src/cli.ts", "watch", "artifact-id-1234", filePath, "--endpoint", server.url.origin], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "src/cli.ts",
+        "watch",
+        "artifact-id-1234",
+        filePath,
+        "--endpoint",
+        server.url.origin,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        },
+        stderr: "pipe",
+        stdout: "pipe",
       },
-      stderr: "pipe",
-      stdout: "pipe",
-    });
+    );
 
     try {
       await waitFor(() => uploads.length === 1);
@@ -1953,6 +2638,242 @@ describe("watch command", () => {
       server.stop(true);
       await new Response(proc.stdout).text();
       await new Response(proc.stderr).text();
+    }
+  });
+});
+
+describe("runtime contract validation", () => {
+  test("rejects malformed success responses before saving receipts or printing success", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-contracts-"));
+    const filePath = join(directory, "plan.html");
+    await writeFile(filePath, "<h1>contract</h1>");
+    const id = "artifact-id-1234";
+
+    const artifact = {
+      id,
+      url: `https://pagebin.test/p/${id}/token`,
+      filename: "plan.html",
+      createdAt: "2026-10-05T00:00:00.000Z",
+      updatedAt: "2026-10-05T00:00:00.000Z",
+      expiresAt: null,
+      sandbox: "standard",
+      size: 10,
+      revision: 1,
+      version: 1,
+      contentSha256: "a".repeat(64),
+      attributes: {},
+    };
+
+    const cases = [
+      {
+        name: "publish-short-id",
+        args: ["publish", filePath],
+        payload: { ...artifact, id: "x", url: "https://pagebin.test/p/x/token" },
+        error: "publish response",
+      },
+      {
+        name: "publish-date",
+        args: ["publish", filePath],
+        payload: { ...artifact, expiresAt: "1" },
+        error: "publish response",
+      },
+      {
+        name: "publish",
+        args: ["publish", filePath],
+        payload: { ...artifact, url: null },
+        error: "publish response",
+      },
+      {
+        name: "update",
+        args: ["update", id, filePath],
+        payload: { ...artifact, revision: "2" },
+        error: "update response",
+      },
+      {
+        name: "reissue",
+        args: ["reissue", id],
+        payload: { ...artifact, url: "javascript:alert(1)" },
+        error: "reissue response",
+      },
+      {
+        name: "list",
+        args: ["list"],
+        payload: { artifacts: [{ ...artifact, attributes: { title: 42 } }] },
+        error: "list response",
+      },
+      {
+        name: "versions",
+        args: ["versions", id],
+        payload: {
+          ...artifact,
+          versions: [
+            {
+              version: 1,
+              size: "ten",
+              createdAt: artifact.createdAt,
+              contentSha256: artifact.contentSha256,
+              current: true,
+            },
+          ],
+        },
+        error: "artifact detail response",
+      },
+      {
+        name: "rollback",
+        args: ["rollback", id, "1"],
+        payload: { ...artifact, version: -1 },
+        error: "update response",
+      },
+      {
+        name: "delete",
+        args: ["delete", id],
+        payload: { id, deleted: false },
+        error: "delete response",
+      },
+    ];
+
+    for (const item of cases) {
+      const statePath = join(directory, `${item.name}.json`);
+      const original = JSON.stringify({ schemaVersion: 1, artifacts: [] });
+      await writeFile(statePath, original);
+      const server = Bun.serve({ port: 0, fetch: () => Response.json(item.payload) });
+
+      try {
+        const result = await runPagebin([...item.args, "--json", "--endpoint", server.url.origin], {
+          PAGEBIN_PUBLISH_TOKEN: "test-publish-token",
+          PAGEBIN_STATE_PATH: statePath,
+        });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain(`Invalid ${item.error}`);
+        expect(result.stdout).toBe("");
+        expect(await readFile(statePath, "utf8")).toBe(original);
+      } finally {
+        server.stop(true);
+      }
+    }
+  });
+
+  test("validates nested receipt records without modifying the store or contacting the API", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-bad-receipts-"));
+    const statePath = join(directory, "artifacts.json");
+    let requests = 0;
+
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requests += 1;
+
+        return Response.json({});
+      },
+    });
+
+    const receipt = {
+      endpoint: server.url.origin,
+      id: "artifact-id-1234",
+      url: `${server.url.origin}/p/artifact-id-1234/token`,
+      rawUrl: `${server.url.origin}/raw/artifact-id-1234/token`,
+      filePath: join(directory, "plan.html"),
+      createdAt: "2026-10-05T00:00:00.000Z",
+      updatedAt: "2026-10-05T00:00:00.000Z",
+      revision: 1,
+      contentSha256: null,
+      attributes: {},
+    };
+
+    const cases = [
+      {
+        ...receipt,
+        id: "x",
+        url: `${server.url.origin}/p/x/token`,
+        rawUrl: `${server.url.origin}/raw/x/token`,
+      },
+      { ...receipt, createdAt: "1" },
+      { ...receipt, updatedAt: "2026-02-30T00:00:00.000Z" },
+      null,
+      { ...receipt, attributes: null },
+      { ...receipt, revision: "1" },
+      { ...receipt, url: "not a URL" },
+      { ...receipt, filePath: "relative.html" },
+      { ...receipt, watch: { pid: -1, host: "host", startedAt: "yesterday" } },
+      { ...receipt, assets: [42] },
+    ];
+
+    try {
+      for (const value of cases) {
+        const original = JSON.stringify({ schemaVersion: 1, artifacts: [value] });
+        await writeFile(statePath, original);
+        const env = { PAGEBIN_STATE_PATH: statePath, PAGEBIN_PUBLISH_TOKEN: "test-publish-token" };
+
+        for (const args of [
+          ["receipts", "--json"],
+          ["update", receipt.filePath, "--endpoint", server.url.origin],
+        ]) {
+          const result = await runPagebin(args, env);
+          expect(result.exitCode).toBe(1);
+          expect(result.stderr).toContain("Invalid PageBin receipt store");
+          expect(result.stdout).toBe("");
+          expect(await readFile(statePath, "utf8")).toBe(original);
+        }
+      }
+
+      expect(requests).toBe(0);
+      // Older schema-1 receipts legitimately have no bundle, assets, or watch fields.
+      await writeFile(statePath, JSON.stringify({ schemaVersion: 1, artifacts: [receipt] }));
+      const result = await runPagebin(["receipts", "--json"], { PAGEBIN_STATE_PATH: statePath });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout).artifacts).toEqual([receipt]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects malformed upload sessions before sending file bytes or committing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-bad-session-"));
+    const filePath = join(directory, "payload.zip");
+    await writeFile(filePath, "private test bytes");
+
+    const cases = [
+      null,
+      { id: "abcdefghijklmnop", sessionId: "session-id-12345", missing: "payload.zip" },
+      { id: "abcdefghijklmnop", sessionId: "session-id-12345", missing: ["other.zip"] },
+      {
+        id: "abcdefghijklmnop",
+        sessionId: "session-id-12345",
+        missing: ["payload.zip", "payload.zip"],
+      },
+      { id: "abcdefghijklmnop", sessionId: "../escape", missing: [] },
+    ];
+
+    for (const [index, payload] of cases.entries()) {
+      let requests = 0;
+
+      const server = Bun.serve({
+        port: 0,
+        fetch(request) {
+          requests += 1;
+          expect(new URL(request.url).pathname).toBe("/api/uploads");
+
+          return Response.json(payload);
+        },
+      });
+
+      try {
+        const result = await runPagebin(
+          ["publish", filePath, "--no-infer", "--endpoint", server.url.origin],
+          {
+            PAGEBIN_STATE_PATH: join(directory, `${index}.json`),
+            PAGEBIN_PUBLISH_TOKEN: "test-publish-token",
+          },
+        );
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("Invalid upload session response");
+        expect(result.stdout).toBe("");
+        expect(requests).toBe(1);
+      } finally {
+        server.stop(true);
+      }
     }
   });
 });
@@ -1976,6 +2897,7 @@ async function runPagebin(args: string[], env: Record<string, string>): Promise<
     stderr: "pipe",
     stdout: "pipe",
   });
+
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -2007,6 +2929,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 async function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
+
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(() => {
       reject(new Error(`Timed out after ${milliseconds}ms.`));

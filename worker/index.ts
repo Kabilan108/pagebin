@@ -1606,7 +1606,9 @@ async function cleanupRetiredReview(env: Env, key: string): Promise<void> {
 
   if (!id || reviewObjectKey(id) !== key) return;
 
-  if (await artifactRetired(env, id)) await env.ARTIFACTS.delete(key);
+  const stored = await readStoredMetadata(env, id);
+
+  if (!stored || stored.metadata.deletedAt) await env.ARTIFACTS.delete(key);
 }
 
 async function cleanupExpiredArtifact(env: Env, key: string): Promise<void> {

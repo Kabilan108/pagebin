@@ -29,7 +29,11 @@ interface StoredReview {
   binding: string | null;
   review: ReviewRecord;
   etag: string | null;
-  serialized: string;
+}
+
+interface StoredReviewEnvelope {
+  binding: string;
+  review: ReviewRecord;
 }
 
 interface ReviewMutation<T> {
@@ -78,16 +82,26 @@ export async function synchronizeReviewBinding(
 
     const stored = await readStoredReview(env, id);
 
-    if (stored.binding === binding || stored.etag === null) return bindingCurrent();
+    if (stored.binding === binding) return bindingCurrent();
 
-    const result = await env.ARTIFACTS.put(reviewObjectKey(id), stored.serialized, {
-      customMetadata: { artifactBinding: binding },
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-      onlyIf: { etagMatches: stored.etag },
-    });
+    const result = await env.ARTIFACTS.put(
+      reviewObjectKey(id),
+      serializeStoredReview(binding, stored.review),
+      {
+        customMetadata: { artifactBinding: binding },
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        onlyIf: stored.etag ? { etagMatches: stored.etag } : { etagDoesNotMatch: "*" },
+      },
+    );
 
     if (result) {
-      if (await bindingCurrent()) return true;
+      if (await bindingCurrent()) {
+        const confirmed = await readStoredReview(env, id);
+
+        if (confirmed.binding === binding) return true;
+
+        continue;
+      }
 
       if (await retired()) await env.ARTIFACTS.delete(reviewObjectKey(id));
 
@@ -416,9 +430,9 @@ async function mutateReview<T>(
       throw error;
     }
 
-    const serialized = JSON.stringify(mutation.review);
+    const serializedReview = JSON.stringify(mutation.review);
 
-    if (new TextEncoder().encode(serialized).byteLength > REVIEW_LIMITS.recordBytes) {
+    if (new TextEncoder().encode(serializedReview).byteLength > REVIEW_LIMITS.recordBytes) {
       return {
         response: tooLarge(
           `A review may use at most ${REVIEW_LIMITS.recordBytes} serialized bytes.`,
@@ -428,11 +442,15 @@ async function mutateReview<T>(
 
     if (!(await artifact.bindingCurrent())) return { response: reviewNotFound() };
 
-    const result = await env.ARTIFACTS.put(reviewObjectKey(artifact.id), serialized, {
-      customMetadata: { artifactBinding: artifact.binding },
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-      onlyIf: stored.etag ? { etagMatches: stored.etag } : { etagDoesNotMatch: "*" },
-    });
+    const result = await env.ARTIFACTS.put(
+      reviewObjectKey(artifact.id),
+      serializeStoredReview(artifact.binding, mutation.review),
+      {
+        customMetadata: { artifactBinding: artifact.binding },
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        onlyIf: stored.etag ? { etagMatches: stored.etag } : { etagDoesNotMatch: "*" },
+      },
+    );
 
     if (result !== null) {
       if (await artifact.bindingCurrent()) return { value: mutation.value };
@@ -454,24 +472,41 @@ async function readStoredReview(env: ReviewStorageEnv, id: string): Promise<Stor
   const object = await env.ARTIFACTS.get(reviewObjectKey(id));
 
   if (!object) {
-    const review = emptyReview();
-
-    return { binding: null, review, etag: null, serialized: JSON.stringify(review) };
+    return { binding: null, review: emptyReview(), etag: null };
   }
 
-  const serialized = await object.text();
-  const value: unknown = JSON.parse(serialized);
+  const value: unknown = JSON.parse(await object.text());
 
-  if (!isReviewRecord(value)) {
-    throw new Error(`Stored review for ${id} does not match schema version 1.`);
+  if (isStoredReviewEnvelope(value)) {
+    return {
+      binding: value.binding,
+      review: value.review,
+      etag: object.etag,
+    };
   }
 
-  return {
-    binding: object.customMetadata?.artifactBinding ?? null,
-    review: value,
-    etag: object.etag,
-    serialized,
-  };
+  if (isReviewRecord(value)) {
+    return {
+      binding: object.customMetadata?.artifactBinding ?? null,
+      review: value,
+      etag: object.etag,
+    };
+  }
+
+  throw new Error(`Stored review for ${id} does not match schema version 1.`);
+}
+
+function serializeStoredReview(binding: string, review: ReviewRecord): string {
+  return JSON.stringify({ binding, review } satisfies StoredReviewEnvelope);
+}
+
+function isStoredReviewEnvelope(value: unknown): value is StoredReviewEnvelope {
+  return (
+    isPlainObject(value) &&
+    hasExactKeys(value, ["binding", "review"]) &&
+    typeof value.binding === "string" &&
+    isReviewRecord(value.review)
+  );
 }
 
 function emptyReview(): ReviewRecord {

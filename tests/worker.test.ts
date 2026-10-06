@@ -10,6 +10,16 @@ interface StoredObject {
   uploaded: Date;
 }
 
+interface BucketPause {
+  release: Promise<void>;
+  started: () => void;
+}
+
+interface BucketPausePair {
+  bucketPause: BucketPause;
+  control: ReviewGetPause;
+}
+
 class MemoryR2Bucket {
   readonly objects = new Map<string, StoredObject>();
   failHtmlDelete = false;
@@ -18,8 +28,12 @@ class MemoryR2Bucket {
   invalidateConditionalPuts = 0;
   maxMetadataGets = 0;
   metadataGetDelayMs = 0;
-  pauseAfterNextReviewPut: { release: Promise<void>; started: () => void } | null = null;
-  pauseNextReviewGet: { release: Promise<void>; started: () => void } | null = null;
+  pauseAfterNextReviewPut: BucketPause | null = null;
+  pauseBeforeNextMetadataPut: BucketPause | null = null;
+  pauseBeforeNextReviewPut: BucketPause | null = null;
+  pauseNextMetadataGetAfterRead: BucketPause | null = null;
+  pauseNextReviewGet: BucketPause | null = null;
+  reviewObjectsFirstOnNextList = false;
   listPageSize = Number.POSITIVE_INFINITY;
   listRequestCount = 0;
   private activeMetadataGets = 0;
@@ -36,6 +50,20 @@ class MemoryR2Bucket {
   ): Promise<{ etag: string } | null> {
     if (this.failMetadataPut && key.endsWith("/metadata.json")) {
       throw new Error("metadata put failed");
+    }
+
+    if (options.onlyIf && key.endsWith("/review.json") && this.pauseBeforeNextReviewPut) {
+      const pause = this.pauseBeforeNextReviewPut;
+      this.pauseBeforeNextReviewPut = null;
+      pause.started();
+      await pause.release;
+    }
+
+    if (options.onlyIf && key.endsWith("/metadata.json") && this.pauseBeforeNextMetadataPut) {
+      const pause = this.pauseBeforeNextMetadataPut;
+      this.pauseBeforeNextMetadataPut = null;
+      pause.started();
+      await pause.release;
     }
 
     if (
@@ -67,11 +95,12 @@ class MemoryR2Bucket {
       if (hash !== options.sha256) throw new Error("Checksum mismatch");
     }
 
-    const etag = this.nextEtag();
-
     if (typeof value === "string") {
+      const bytes = copyArrayBuffer(new TextEncoder().encode(value));
+      const etag = contentEtag(bytes);
+
       this.objects.set(key, {
-        bytes: copyArrayBuffer(new TextEncoder().encode(value)),
+        bytes,
         ...(options.customMetadata ? { customMetadata: options.customMetadata } : {}),
         etag,
         uploaded: new Date(),
@@ -88,8 +117,11 @@ class MemoryR2Bucket {
     }
 
     if (ArrayBuffer.isView(value)) {
+      const bytes = copyArrayBuffer(value);
+      const etag = contentEtag(bytes);
+
       this.objects.set(key, {
-        bytes: copyArrayBuffer(value),
+        bytes,
         ...(options.customMetadata ? { customMetadata: options.customMetadata } : {}),
         etag,
         uploaded: new Date(),
@@ -97,6 +129,8 @@ class MemoryR2Bucket {
 
       return { etag };
     }
+
+    const etag = contentEtag(value);
 
     this.objects.set(key, {
       bytes: value,
@@ -146,6 +180,13 @@ class MemoryR2Bucket {
 
     const object = this.objects.get(key);
 
+    if (tracksConcurrency && this.pauseNextMetadataGetAfterRead) {
+      const pause = this.pauseNextMetadataGetAfterRead;
+      this.pauseNextMetadataGetAfterRead = null;
+      pause.started();
+      await pause.release;
+    }
+
     if (tracksConcurrency) {
       this.activeMetadataGets -= 1;
     }
@@ -183,9 +224,21 @@ class MemoryR2Bucket {
     this.listRequestCount += 1;
     const offset = Number(options.cursor ?? "0");
 
+    const reviewObjectsFirst = this.reviewObjectsFirstOnNextList;
+    this.reviewObjectsFirstOnNextList = false;
+
     const objects = [...this.objects.keys()]
       .filter((key) => !options.prefix || key.startsWith(options.prefix))
-      .sort()
+      .sort((left, right) => {
+        if (!reviewObjectsFirst) return left.localeCompare(right);
+
+        const leftReview = left.endsWith("/review.json");
+        const rightReview = right.endsWith("/review.json");
+
+        if (leftReview !== rightReview) return leftReview ? -1 : 1;
+
+        return left.localeCompare(right);
+      })
       .map((key) => ({ key, uploaded: this.objects.get(key)?.uploaded ?? new Date(0) }));
 
     const page = objects.slice(offset, offset + this.listPageSize);
@@ -2253,6 +2306,10 @@ function copyArrayBuffer(value: ArrayBufferView): ArrayBuffer {
   return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer;
 }
 
+function contentEtag(value: ArrayBuffer): string {
+  return new Bun.CryptoHasher("sha256").update(new Uint8Array(value)).digest("hex");
+}
+
 async function sha256ForTest(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
 
@@ -3316,6 +3373,97 @@ describe("review API", () => {
     expect(publisher.review.comments[0]?.body).toBe("Updated after one conflict");
   });
 
+  test("fences an in-flight old-token review update when reissue changes the binding", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const oldBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    const created = await reviewJsonRequest(
+      `${oldBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Before reissue",
+      },
+      env,
+    );
+
+    const commentId = ((await created.json()) as { comment: { id: string } }).comment.id;
+    const writePause = pauseBeforeReviewPut(env.ARTIFACTS);
+
+    const staleWrite = reviewJsonRequest(
+      `${oldBase}/comments/${commentId}`,
+      "PATCH",
+      { body: "Revoked mutation" },
+      env,
+    );
+
+    await writePause.started;
+
+    const reissue = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(reissue.status).toBe(200);
+    writePause.release();
+    expect((await staleWrite).status).toBe(404);
+    expect((await publisherReview(env, published.id)).review.comments[0]?.body).toBe(
+      "Before reissue",
+    );
+  });
+
+  test("initializes a reissue fence before an in-flight first comment can create the review", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const oldBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+    const writePause = pauseBeforeReviewPut(env.ARTIFACTS);
+
+    const staleCreate = reviewJsonRequest(
+      `${oldBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Revoked create",
+      },
+      env,
+    );
+
+    await writePause.started;
+
+    const reissue = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(reissue.status).toBe(200);
+    const reissued = (await reissue.json()) as { url: string };
+    writePause.release();
+    expect((await staleCreate).status).toBe(404);
+    expect((await publisherReview(env, published.id)).review.comments).toEqual([]);
+
+    const stored = await env.ARTIFACTS.get(`artifacts/${published.id}/review.json`);
+
+    const value = JSON.parse((await stored?.text()) ?? "null") as {
+      binding?: string;
+      review?: ReviewRecord;
+    };
+
+    expect(value.binding).toBe(await sha256ForTest(viewerToken(reissued.url)));
+    expect(value.review).toEqual({
+      schemaVersion: 1,
+      comments: [],
+      decisions: [],
+      updatedAt: null,
+    });
+  });
+
   test("rejects in-flight old-token writes across reissue and deletion", async () => {
     const env = createEnv();
     const reissuedArtifact = await publishFixture(env);
@@ -3649,6 +3797,75 @@ describe("review API", () => {
     expect(sizeResponse.status).toBe(413);
   });
 
+  test("keeps a review when a concurrent TTL extension wins the expiry sweep", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const reviewKey = `artifacts/${published.id}/review.json`;
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    await reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Keep after extension",
+      },
+      env,
+    );
+
+    const originalDateNow = Date.now;
+    const beforeExpiry = originalDateNow();
+    const metadataKey = `artifacts/${published.id}/metadata.json`;
+    const metadataObject = await env.ARTIFACTS.get(metadataKey);
+    const metadata = JSON.parse((await metadataObject?.text()) ?? "{}");
+    metadata.expiresAt = new Date(beforeExpiry + 1000).toISOString();
+    await env.ARTIFACTS.put(metadataKey, JSON.stringify(metadata));
+
+    const extensionPause = pauseBeforeMetadataPut(env.ARTIFACTS);
+    let releaseSweepRead = (): void => {};
+
+    try {
+      Date.now = () => beforeExpiry;
+
+      const extension = worker.fetch(
+        new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+          method: "PATCH",
+          headers: { Authorization: "Bearer publish-secret", "Content-Type": "application/json" },
+          body: JSON.stringify({ ttlSeconds: null }),
+        }),
+        env as never,
+      );
+
+      await extensionPause.started;
+      Date.now = () => beforeExpiry + 2000;
+
+      env.ARTIFACTS.reviewObjectsFirstOnNextList = true;
+      const sweepReadPause = pauseMetadataGetAfterRead(env.ARTIFACTS);
+      releaseSweepRead = sweepReadPause.release;
+
+      const sweep = worker.scheduled(
+        {} as ScheduledController,
+        env as never,
+        {} as ExecutionContext,
+      );
+
+      await sweepReadPause.started;
+      extensionPause.release();
+      expect((await extension).status).toBe(200);
+      sweepReadPause.release();
+      await sweep;
+    } finally {
+      extensionPause.release();
+      releaseSweepRead();
+      Date.now = originalDateNow;
+    }
+
+    expect(await env.ARTIFACTS.get(reviewKey)).not.toBeNull();
+    expect((await publisherReview(env, published.id)).review.comments[0]?.body).toBe(
+      "Keep after extension",
+    );
+  });
+
   test("keeps reviews across reissue and sweep, then removes them on delete and expiry", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
@@ -3821,6 +4038,49 @@ function pauseReviewPut(bucket: MemoryR2Bucket): ReviewGetPause {
   bucket.pauseAfterNextReviewPut = { release: releasePromise, started };
 
   return { release, started: startedPromise };
+}
+
+function pauseBeforeReviewPut(bucket: MemoryR2Bucket): ReviewGetPause {
+  const pause = makeBucketPause();
+
+  bucket.pauseBeforeNextReviewPut = pause.bucketPause;
+
+  return pause.control;
+}
+
+function pauseBeforeMetadataPut(bucket: MemoryR2Bucket): ReviewGetPause {
+  const pause = makeBucketPause();
+
+  bucket.pauseBeforeNextMetadataPut = pause.bucketPause;
+
+  return pause.control;
+}
+
+function pauseMetadataGetAfterRead(bucket: MemoryR2Bucket): ReviewGetPause {
+  const pause = makeBucketPause();
+
+  bucket.pauseNextMetadataGetAfterRead = pause.bucketPause;
+
+  return pause.control;
+}
+
+function makeBucketPause(): BucketPausePair {
+  let release: () => void = () => {};
+
+  let started: () => void = () => {};
+
+  const releasePromise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const startedPromise = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+
+  return {
+    bucketPause: { release: releasePromise, started },
+    control: { release, started: startedPromise },
+  };
 }
 
 async function publisherReview(

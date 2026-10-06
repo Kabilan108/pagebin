@@ -2806,28 +2806,42 @@ async function serveFrame(request: Request, env: Env, url: URL): Promise<Respons
 
 function usercontentHostSuffix(env: Env): string | null {
   const template = env.PAGEBIN_USERCONTENT_ORIGIN?.trim();
+  const viewerOrigin = configuredViewerOrigin(env);
 
-  if (!template || !configuredViewerOrigin(env) || !/^https?:\/\/\{label\}\./.test(template)) {
+  if (!template || !viewerOrigin || !/^https?:\/\/\{label\}\./.test(template)) {
     return null;
   }
 
   try {
     const url = new URL(template.replace(USERCONTENT_LABEL_PLACEHOLDER, "x"));
+    const suffix = url.hostname.slice(2);
+    const viewerHostname = new URL(viewerOrigin).hostname;
 
-    return url.pathname === "/" && !url.search && !url.hash ? url.hostname.slice(2) : null;
+    // The label must survive parsing, and the namespace must sit outside the viewer's own
+    // hosts, or every artifact would share the viewer's origin or capture its API hosts.
+    const isolated =
+      url.hostname.startsWith("x.") &&
+      !url.username &&
+      !url.password &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash &&
+      viewerHostname !== suffix &&
+      !viewerHostname.endsWith(`.${suffix}`);
+
+    return isolated ? suffix : null;
   } catch {
     return null;
   }
 }
 
+// Covers the whole namespace, including nested and trailing-dot hosts, so none of them reach
+// the main router. serveFrame then requires the artifact's exact canonical origin.
 function isUsercontentHostname(hostname: string, env: Env): boolean {
   const suffix = usercontentHostSuffix(env);
+  const host = hostname.replace(/\.+$/, "");
 
-  if (!suffix || !hostname.endsWith(`.${suffix}`)) return false;
-
-  const label = hostname.slice(0, -(suffix.length + 1));
-
-  return label.length > 0 && !label.includes(".");
+  return suffix !== null && (host === suffix || host.endsWith(`.${suffix}`));
 }
 
 async function usercontentOrigin(env: Env, id: string): Promise<string | null> {
@@ -2875,15 +2889,23 @@ function viewerCsp(frameOrigin: string | null): string {
 function withFrameScript(response: Response): Response {
   let injected = false;
 
-  // Inserting before the first element keeps any doctype first, so the document stays in
-  // standards mode, and runs the script before the artifact's own scripts.
+  // The script goes first inside an explicit <head>, or before the first element after <html>.
+  // Inserting before <html> or <head> would make the parser open an implicit head and drop the
+  // document's own <head> attributes; inserting before the doctype would force quirks mode.
   return new HTMLRewriter()
     .on("*", {
       element(element) {
-        if (injected) return;
+        const tagName = element.tagName.toLowerCase();
+
+        if (injected || tagName === "html") return;
 
         injected = true;
-        element.before(FRAME_SCRIPT, { html: true });
+
+        if (tagName === "head") {
+          element.prepend(FRAME_SCRIPT, { html: true });
+        } else {
+          element.before(FRAME_SCRIPT, { html: true });
+        }
       },
     })
     .onDocument({

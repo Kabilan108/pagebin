@@ -2618,6 +2618,88 @@ test("bundle cleanup keeps shared objects until every referencing version is pru
 });
 
 describe("document frames", () => {
+  const frameHtmlFor = async (contents: string): Promise<string> => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    const updated = await updateFixtureResponse(env, published.id, {
+      contents,
+      filename: "plan.html",
+    });
+
+    expect(updated.status).toBe(200);
+
+    const token = published.url.slice(published.url.lastIndexOf("/") + 1);
+
+    const frame = await worker.fetch(
+      new Request(`https://pagebin.test/frame/${published.id}/${token}/v/2`),
+      env as never,
+    );
+
+    return frame.text();
+  };
+
+  test("injects inside an explicit head and keeps its attributes", async () => {
+    expect(
+      await frameHtmlFor(
+        '<!DOCTYPE html>\n<html lang="en">\n<head id="settings" data-theme="dark"><title>t</title></head><body></body></html>',
+      ),
+    ).toStartWith(
+      '<!DOCTYPE html>\n<html lang="en">\n<head id="settings" data-theme="dark"><script data-pagebin="frame">',
+    );
+    expect(await frameHtmlFor('\uFEFF<html><body class="dark">x</body></html>')).toContain(
+      '<html><script data-pagebin="frame">',
+    );
+    expect(await frameHtmlFor("plain text only")).toEndWith("</script>");
+  });
+
+  test("routes every usercontent namespace host away from the main site", async () => {
+    const env = usercontentEnv();
+    const published = await publishFixture(env);
+    const origin = new URL(await usercontentOriginFor(published.id));
+    const framePathname = `/frame/${published.id}/${tokenOf(published.url)}/v/1`;
+
+    for (const host of [
+      `child.${origin.hostname}`,
+      `${origin.hostname}.`,
+      "usercontent.test",
+      "usercontent.test.",
+    ]) {
+      for (const path of ["/robots.txt", "/api/artifacts", framePathname]) {
+        const response = await worker.fetch(
+          new Request(`https://${host}${path}`, {
+            headers: { Authorization: "Bearer publish-secret" },
+          }),
+          env as never,
+        );
+
+        expect(response.status).toBe(404);
+      }
+    }
+  });
+
+  test("ignores usercontent templates that would share or capture the viewer origin", async () => {
+    for (const template of [
+      "https://{label}.usercontent.test@pagebin.test",
+      "https://{label}.pagebin.test",
+      "https://{label}.usercontent.test/path",
+    ]) {
+      const env = createEnv({
+        PAGEBIN_PUBLIC_ORIGIN: "https://pagebin.test",
+        PAGEBIN_USERCONTENT_ORIGIN: template,
+      });
+
+      const published = await publishFixture(env);
+
+      const viewerHtml = await (
+        await worker.fetch(new Request(published.url), env as never)
+      ).text();
+
+      expect(viewerHtml).toContain(`src="/frame/${published.id}/`);
+      expect(viewerHtml).not.toContain("allow-same-origin");
+    }
+  });
+
   const usercontentEnv = (): TestEnv =>
     createEnv({
       PAGEBIN_PUBLIC_ORIGIN: "https://pagebin.test",
@@ -2789,8 +2871,7 @@ describe("document frames", () => {
       await worker.fetch(new Request(`https://pagebin.test${src}`), env as never)
     ).text();
 
-    expect(entry).toStartWith('<!doctype html><script data-pagebin="frame">');
-    expect(entry).toContain('</script><html lang="en">');
+    expect(entry).toStartWith('<!doctype html><html lang="en"><script data-pagebin="frame">');
 
     const second = await (
       await worker.fetch(

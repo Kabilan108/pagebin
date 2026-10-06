@@ -274,9 +274,9 @@ describe("worker", () => {
 
     expect(viewerResponse.status).toBe(200);
     expect(viewerHtml).toContain(
-      'sandbox="allow-scripts allow-forms allow-popups allow-downloads"',
+      'sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"',
     );
-    expect(viewerHtml).toContain('allow="clipboard-write"');
+    expect(viewerHtml).toContain('allow="clipboard-write; fullscreen" allowfullscreen');
     expect(viewerHtml).toContain('class="pagebin-bar"');
     expect(viewerHtml).toContain('id="pagebin-vnum">1<');
     expect(viewerHtml).not.toContain('class="pb-agent ');
@@ -294,7 +294,7 @@ describe("worker", () => {
     expect(await rawResponse.text()).toContain("<script>");
     expect(rawResponse.headers.get("Cache-Control")).toContain("no-transform");
     expect(rawResponse.headers.get("Content-Security-Policy")).toBe(
-      "sandbox allow-scripts allow-forms allow-popups allow-downloads",
+      "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals",
     );
 
     const wrongTokenResponse = await worker.fetch(
@@ -706,7 +706,7 @@ describe("worker", () => {
     expect(pinnedRaw.status).toBe(200);
     expect(await pinnedRaw.text()).toContain("globalThis.ok");
     expect(pinnedViewer.status).toBe(200);
-    expect(viewerHtml).toContain('allow="clipboard-write"');
+    expect(viewerHtml).toContain('allow="clipboard-write; fullscreen" allowfullscreen');
     expect(viewerHtml).toContain('id="pagebin-vnum">1<');
     expect(viewerHtml).toContain(`href="/p/${published.id}/`);
     expect(viewerHtml).toContain('id="pagebin-dd"');
@@ -1283,6 +1283,8 @@ describe("worker", () => {
     expect(viewerHtml).toContain(" sandbox ");
     expect(viewerHtml).not.toContain("allow-scripts");
     expect(viewerHtml).not.toContain("clipboard-write");
+    expect(viewerHtml).not.toContain("fullscreen");
+    expect(viewerHtml).not.toContain("allow-modals");
     expect(rawResponse.headers.get("Content-Security-Policy")).toBe("sandbox");
   });
 

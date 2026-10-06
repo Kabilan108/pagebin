@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.0 - 2026-10-06
+
+- Added a review layer to standard documents. Readers comment on selected text and answer form-control decisions marked with `data-pb-decision`. Copy response and the new `pagebin review` command produce the same Markdown, and `pagebin review resolve` marks comments addressed. Comments and answers are stored per artifact and carry across versions.
+- Added `pagebin publish --no-review` and `pagebin update <target> --review on|off` to hide the review layer on artifacts shared with other people. Review is on by default; strict documents never get it.
+- Standard documents now load from a per-artifact origin on `pagebin-usercontent.com`, so `localStorage`, `sessionStorage`, IndexedDB and history work and persist across versions. Links to other sites open in a new tab.
+- Standard documents can enter fullscreen, show `alert`/`confirm`/`prompt`, and open popups that leave the sandbox.
+- `update`, `verify` and `watch` accept the file and the artifact target in either order. `--type` accepts common aliases such as `log` and `audit`, and unknown values fall back to `other` with a warning.
+- A publish racing `watch`'s first publish of the same file is refused instead of creating a second artifact. Commands print how to recover a viewer URL when none is recorded on the host.
+- Credentials can live in `~/.config/pagebin/env` (or `PAGEBIN_CONFIG`); environment variables still take precedence. Missing-credential errors name the host and the config path.
+- Added Oxlint, Oxfmt and prek checks.
+- Known limitation: a review write already in flight when a link is reissued may still land. Reads with a revoked link are always refused.
+- Operational note: the Worker changes deployed when each PR merged. Update the CLI to use `pagebin review`, `--no-review` and the credentials file.
+
 ## 0.13.0 - 2026-09-07
 
 - Added arbitrary file uploads up to 50 MiB, image viewers, native video/audio playback with byte-range seeking, and direct file and download links.

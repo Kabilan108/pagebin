@@ -29,6 +29,7 @@ class MemoryR2Bucket {
   maxMetadataGets = 0;
   metadataGetDelayMs = 0;
   pauseBeforeNextMetadataPut: BucketPause | null = null;
+  pauseBeforeNextReviewPut: BucketPause | null = null;
   pauseNextMetadataGetAfterRead: BucketPause | null = null;
   reviewObjectsFirstOnNextList = false;
   listPageSize = Number.POSITIVE_INFINITY;
@@ -52,6 +53,13 @@ class MemoryR2Bucket {
     if (options.onlyIf && key.endsWith("/metadata.json") && this.pauseBeforeNextMetadataPut) {
       const pause = this.pauseBeforeNextMetadataPut;
       this.pauseBeforeNextMetadataPut = null;
+      pause.started();
+      await pause.release;
+    }
+
+    if (options.onlyIf && key.endsWith("/review.json") && this.pauseBeforeNextReviewPut) {
+      const pause = this.pauseBeforeNextReviewPut;
+      this.pauseBeforeNextReviewPut = null;
       pause.started();
       await pause.release;
     }
@@ -831,7 +839,7 @@ describe("worker", () => {
     expect(env.ARTIFACTS.objects.get(metadataKey)?.etag).toBe(etagBeforeRetry);
   });
 
-  test("serves pinned raw content and a non-polling pinned viewer", async () => {
+  test("serves pinned raw content and polls revisions from the pinned viewer URL", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
     await updateFixtureResponse(env, published.id, {
@@ -854,8 +862,10 @@ describe("worker", () => {
     expect(viewerHtml).toContain('id="pagebin-vnum">1<');
     expect(viewerHtml).toContain(`href="/p/${published.id}/`);
     expect(viewerHtml).toContain('id="pagebin-dd"');
-    expect(viewerHtml).not.toContain("pagebinPoll");
-    expect(viewerHtml).not.toContain("/version/");
+    expect(viewerHtml).toContain("pagebinPoll");
+    expect(viewerHtml).toContain(`/api/artifacts/${published.id}/version/`);
+    expect(viewerHtml).toContain("location.reload()");
+    expect(viewerHtml).not.toContain("location.href = pagebinCopyPath");
     expect((await worker.fetch(new Request(`${published.url}/v/0`), env as never)).status).toBe(
       404,
     );
@@ -4035,6 +4045,93 @@ describe("review API", () => {
     await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
     expect(await env.ARTIFACTS.get(expiringKey)).toBeNull();
   });
+
+  test("does not recreate a review when a comment CAS retries after deletion", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const reviewKey = `artifacts/${published.id}/review.json`;
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    expect(
+      (
+        await reviewJsonRequest(
+          `${base}/comments`,
+          "POST",
+          {
+            anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+            body: "Existing comment",
+          },
+          env,
+        )
+      ).status,
+    ).toBe(201);
+
+    const pause = pauseBeforeReviewPut(env.ARTIFACTS);
+
+    const pending = reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Late comment",
+      },
+      env,
+    );
+
+    await pause.started;
+
+    try {
+      const deleted = await worker.fetch(
+        new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+          method: "DELETE",
+          headers: { Authorization: "Bearer publish-secret" },
+        }),
+        env as never,
+      );
+
+      expect(deleted.status).toBe(200);
+    } finally {
+      pause.release();
+    }
+
+    expect((await pending).status).toBe(404);
+    expect(await env.ARTIFACTS.get(reviewKey)).toBeNull();
+  });
+
+  test("removes a successful late review write after expiry cleanup", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const reviewKey = `artifacts/${published.id}/review.json`;
+    const metadataKey = `artifacts/${published.id}/metadata.json`;
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+    const pause = pauseBeforeReviewPut(env.ARTIFACTS);
+
+    const pending = reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Late comment",
+      },
+      env,
+    );
+
+    await pause.started;
+
+    try {
+      const object = await env.ARTIFACTS.get(metadataKey);
+      const metadata = JSON.parse((await object?.text()) ?? "{}");
+      metadata.expiresAt = "2020-01-01T00:00:00.000Z";
+      await env.ARTIFACTS.put(metadataKey, JSON.stringify(metadata));
+      await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    } finally {
+      pause.release();
+    }
+
+    expect((await pending).status).toBe(404);
+    expect(await env.ARTIFACTS.get(metadataKey)).toBeNull();
+    expect(await env.ARTIFACTS.get(reviewKey)).toBeNull();
+  });
 });
 
 async function reviewJsonRequest(
@@ -4082,6 +4179,14 @@ function pauseBeforeMetadataPut(bucket: MemoryR2Bucket): ReviewGetPause {
   const pause = makeBucketPause();
 
   bucket.pauseBeforeNextMetadataPut = pause.bucketPause;
+
+  return pause.control;
+}
+
+function pauseBeforeReviewPut(bucket: MemoryR2Bucket): ReviewGetPause {
+  const pause = makeBucketPause();
+
+  bucket.pauseBeforeNextReviewPut = pause.bucketPause;
 
   return pause.control;
 }

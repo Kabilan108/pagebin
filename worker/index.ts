@@ -1486,7 +1486,7 @@ async function routeReviewRequest(
 
     if (!stored || stored.metadata.deletedAt) return reviewNotFound();
 
-    const artifact = reviewArtifact(stored.metadata);
+    const artifact = reviewArtifact(env, stored.metadata);
 
     return publisherMatch
       ? getPublisherReview(env, artifact)
@@ -1511,7 +1511,7 @@ async function routeReviewRequest(
 
   if (!metadata || !metadata.review || metadata.sandbox !== "standard") return reviewNotFound();
 
-  const artifact = reviewArtifact(metadata);
+  const artifact = reviewArtifact(env, metadata);
 
   if (request.method === "GET" && !viewerMatch[3]) {
     return getViewerReview(env, artifact);
@@ -1536,13 +1536,22 @@ async function routeReviewRequest(
   return reviewNotFound();
 }
 
-function reviewArtifact(metadata: ArtifactMetadata): ReviewArtifact {
+function reviewArtifact(env: Env, metadata: ArtifactMetadata): ReviewArtifact {
   return {
     id: metadata.id,
     filename: metadata.filename,
     title: metadata.attributes.title ?? metadata.filename,
     version: artifactHead(metadata).version,
     versions: metadata.versions.map((version) => version.version),
+    isLive: async () => {
+      const stored = await readStoredMetadata(env, metadata.id);
+
+      return Boolean(
+        stored &&
+        !stored.metadata.deletedAt &&
+        (!stored.metadata.expiresAt || Date.now() < Date.parse(stored.metadata.expiresAt)),
+      );
+    },
   };
 }
 
@@ -1874,6 +1883,46 @@ if (pagebinDd) {
 `;
 }
 
+function viewerRevisionPollScript(id: string, token: string, revision: number): string {
+  const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
+
+  return `
+const pagebinMinDelayMs = 2000;
+const pagebinMaxDelayMs = 60000;
+let pagebinVersion = ${JSON.stringify(revision)};
+let pagebinDelayMs = pagebinMinDelayMs;
+let pagebinTimer = null;
+function pagebinSchedule() {
+  clearTimeout(pagebinTimer);
+  if (!document.hidden) {
+    pagebinTimer = setTimeout(pagebinPoll, pagebinDelayMs);
+  }
+}
+async function pagebinPoll() {
+  try {
+    const response = await fetch(${JSON.stringify(versionPath)}, { cache: "no-store" });
+    if (response.ok) {
+      const payload = await response.json();
+      if (payload.revision && payload.revision !== pagebinVersion) {
+        location.reload();
+        return;
+      }
+    }
+  } catch {}
+  pagebinDelayMs = Math.min(pagebinDelayMs * 1.5, pagebinMaxDelayMs);
+  pagebinSchedule();
+}
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(pagebinTimer);
+  if (!document.hidden) {
+    pagebinDelayMs = pagebinMinDelayMs;
+    pagebinPoll();
+  }
+});
+pagebinSchedule();
+`;
+}
+
 // Resizing the layout viewport for the soft keyboard keeps the docked composer above it.
 const VIEWER_VIEWPORT = "width=device-width, initial-scale=1, interactive-widget=resizes-content";
 
@@ -1918,10 +1967,8 @@ async function serveViewer(
     ? manifestRawPath(id, token, artifactHead(metadata))
     : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
 
-  const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
   const frameOrigin = await documentFrameOrigin(env, metadata);
   const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
-  const version = metadata.revision;
   const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, artifactHead(metadata))}`;
   const review = reviewViewerConfig(metadata, artifactHead(metadata), token, frameOrigin);
   const content = contentViewer(metadata, artifactHead(metadata), rawPath, sandbox, frameSrc);
@@ -1943,39 +1990,7 @@ ${VIEWER_BAR_CSS}${review ? REVIEW_CSS : ""}
 ${scrubberBarHtml(id, token, metadata, null, review !== null)}${review ? reviewStageHtml(content, review) : content}
 <script>
 ${scrubberBarScript(id, token, artifactHead(metadata).version)}
-const pagebinMinDelayMs = 2000;
-const pagebinMaxDelayMs = 60000;
-let pagebinVersion = ${JSON.stringify(version)};
-let pagebinDelayMs = pagebinMinDelayMs;
-let pagebinTimer = null;
-function pagebinSchedule() {
-  clearTimeout(pagebinTimer);
-  if (!document.hidden) {
-    pagebinTimer = setTimeout(pagebinPoll, pagebinDelayMs);
-  }
-}
-async function pagebinPoll() {
-  try {
-    const response = await fetch(${JSON.stringify(versionPath)}, { cache: "no-store" });
-    if (response.ok) {
-      const payload = await response.json();
-      if (payload.revision && payload.revision !== pagebinVersion) {
-        location.reload();
-        return;
-      }
-    }
-  } catch {}
-  pagebinDelayMs = Math.min(pagebinDelayMs * 1.5, pagebinMaxDelayMs);
-  pagebinSchedule();
-}
-document.addEventListener("visibilitychange", () => {
-  clearTimeout(pagebinTimer);
-  if (!document.hidden) {
-    pagebinDelayMs = pagebinMinDelayMs;
-    pagebinPoll();
-  }
-});
-pagebinSchedule();
+${viewerRevisionPollScript(id, token, metadata.revision)}
 </script>
 </body>
 </html>`;
@@ -2031,7 +2046,10 @@ ${VIEWER_BAR_CSS}${review ? REVIEW_CSS : ""}
 </head>
 <body>
 ${scrubberBarHtml(id, token, metadata, entry.version, review !== null)}${review ? reviewStageHtml(content, review) : content}
-<script>${scrubberBarScript(id, token, entry.version)}</script>
+<script>
+${scrubberBarScript(id, token, entry.version)}
+${viewerRevisionPollScript(id, token, metadata.revision)}
+</script>
 </body>
 </html>`;
 

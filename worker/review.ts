@@ -23,6 +23,7 @@ export interface ReviewArtifact {
   title: string;
   version: number;
   versions: number[];
+  isLive: () => Promise<boolean>;
 }
 
 interface StoredReview {
@@ -358,6 +359,10 @@ async function mutateReview<T>(
   mutate: (review: ReviewRecord) => ReviewMutation<T>,
 ): Promise<MutationResult<T>> {
   for (let attempt = 0; attempt < REVIEW_WRITE_ATTEMPTS; attempt += 1) {
+    if (attempt > 0 && !(await artifact.isLive())) {
+      return { response: reviewNotFound() };
+    }
+
     const stored = await readStoredReview(env, artifact.id);
 
     let mutation: ReviewMutation<T>;
@@ -387,7 +392,15 @@ async function mutateReview<T>(
       onlyIf: stored.etag ? { etagMatches: stored.etag } : { etagDoesNotMatch: "*" },
     });
 
-    if (result !== null) return { value: mutation.value };
+    if (result !== null) {
+      if (!(await artifact.isLive())) {
+        await env.ARTIFACTS.delete(reviewObjectKey(artifact.id));
+
+        return { response: reviewNotFound() };
+      }
+
+      return { value: mutation.value };
+    }
   }
 
   return {

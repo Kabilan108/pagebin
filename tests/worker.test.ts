@@ -2683,6 +2683,7 @@ describe("document frames", () => {
       "https://{label}.usercontent.test@pagebin.test",
       "https://{label}.pagebin.test",
       "https://{label}.usercontent.test/path",
+      "https://{label}.usercontent.test.",
     ]) {
       const env = createEnv({
         PAGEBIN_PUBLIC_ORIGIN: "https://pagebin.test",

@@ -2815,12 +2815,13 @@ function usercontentHostSuffix(env: Env): string | null {
   try {
     const url = new URL(template.replace(USERCONTENT_LABEL_PLACEHOLDER, "x"));
     const suffix = url.hostname.slice(2);
-    const viewerHostname = new URL(viewerOrigin).hostname;
+    const viewerHostname = new URL(viewerOrigin).hostname.replace(/\.+$/, "");
 
     // The label must survive parsing, and the namespace must sit outside the viewer's own
     // hosts, or every artifact would share the viewer's origin or capture its API hosts.
     const isolated =
       url.hostname.startsWith("x.") &&
+      !url.hostname.endsWith(".") &&
       !url.username &&
       !url.password &&
       url.pathname === "/" &&

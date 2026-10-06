@@ -106,6 +106,7 @@ export async function prepareBundle(
 interface BundleUploadOptions {
   id?: string;
   sandbox?: "standard" | "strict";
+  review?: boolean;
   ttlSeconds?: number | null | undefined;
   attributes: ArtifactAttributes;
 }

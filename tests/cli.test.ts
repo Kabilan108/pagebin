@@ -66,6 +66,7 @@ describe("parseArgs", () => {
         forceNew: false,
         inferMetadata: true,
         json: false,
+        review: true,
         sandbox: "standard",
         ttlSeconds: null,
         verify: false,
@@ -75,9 +76,10 @@ describe("parseArgs", () => {
 
   test("parses publish options", () => {
     expect(
-      parseArgs(["publish", "plan.html", "--ttl", "7d", "--sandbox", "strict", "--json"], {
-        PAGEBIN_ENDPOINT: "https://example.com/",
-      }),
+      parseArgs(
+        ["publish", "plan.html", "--ttl", "7d", "--sandbox", "strict", "--no-review", "--json"],
+        { PAGEBIN_ENDPOINT: "https://example.com/" },
+      ),
     ).toEqual({
       command: "publish",
       options: {
@@ -87,6 +89,7 @@ describe("parseArgs", () => {
         forceNew: false,
         inferMetadata: true,
         json: true,
+        review: false,
         sandbox: "strict",
         ttlSeconds: 604800,
         verify: false,
@@ -341,6 +344,27 @@ describe("parseArgs", () => {
     });
   });
 
+  test("parses review-only and content-plus-review updates", () => {
+    expect(
+      parseArgs(["update", "artifact-id-1234", "--review", "off"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toMatchObject({
+      command: "update",
+      options: { filePath: null, id: "artifact-id-1234", review: false },
+    });
+    expect(
+      parseArgs(["update", "artifact-id-1234", "plan.html", "--review", "on"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toMatchObject({ command: "update", options: { filePath: "plan.html", review: true } });
+    expect(() =>
+      parseArgs(["update", "artifact-id-1234", "--review", "maybe"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("Review must be on or off.");
+  });
+
   test("rejects metadata options on TTL-only updates", () => {
     expect(() =>
       parseArgs(["update", "artifact-id-1234", "--ttl", "7d", "--title", "Ignored"], {
@@ -384,6 +408,7 @@ describe("parseArgs", () => {
         inferMetadata: true,
         json: false,
         mode: "publish",
+        review: true,
         sandbox: "standard",
         ttlSeconds: null,
         verify: false,
@@ -393,7 +418,7 @@ describe("parseArgs", () => {
 
   test("parses watch publish options", () => {
     expect(
-      parseArgs(["watch", "plan.html", "--ttl", "7d", "--sandbox", "strict"], {
+      parseArgs(["watch", "plan.html", "--ttl", "7d", "--sandbox", "strict", "--no-review"], {
         PAGEBIN_ENDPOINT: "https://example.com",
       }),
     ).toEqual({
@@ -406,6 +431,7 @@ describe("parseArgs", () => {
         inferMetadata: true,
         json: false,
         mode: "publish",
+        review: false,
         sandbox: "strict",
         ttlSeconds: 604800,
         verify: false,
@@ -439,6 +465,11 @@ describe("parseArgs", () => {
         PAGEBIN_ENDPOINT: "https://example.com",
       }),
     ).toThrow("--sandbox can only be used with pagebin watch <file>.");
+    expect(() =>
+      parseArgs(["watch", "abc1234567890123", "plan.html", "--no-review"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("--no-review can only be used with pagebin watch <file>.");
   });
 
   test("parses JSON Lines output for watch", () => {
@@ -558,6 +589,67 @@ describe("parseArgs", () => {
     ).toThrow("positive integer");
   });
 
+  test("parses review read, resolve, and reopen targets", () => {
+    expect(
+      parseArgs(["review", "abc1234567890123", "--json"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
+      command: "review",
+      options: {
+        action: "show",
+        commentIds: [],
+        endpoint: "https://example.com",
+        filePath: null,
+        id: "abc1234567890123",
+        json: true,
+        receiptLookup: false,
+        reopen: false,
+        url: null,
+      },
+    });
+
+    expect(
+      parseArgs(
+        [
+          "review",
+          "resolve",
+          "https://page-bin.com/p/abc1234567890123/view-token",
+          "comment_one",
+          "comment-two",
+          "--reopen",
+        ],
+        {},
+      ),
+    ).toEqual({
+      command: "review",
+      options: {
+        action: "resolve",
+        commentIds: ["comment_one", "comment-two"],
+        endpoint: "https://api.page-bin.com",
+        filePath: null,
+        id: "abc1234567890123",
+        json: false,
+        receiptLookup: false,
+        reopen: true,
+        url: "https://page-bin.com/p/abc1234567890123/view-token",
+      },
+    });
+
+    expect(
+      parseArgs(["review", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toMatchObject({
+      command: "review",
+      options: { action: "show", filePath: "plan.html", receiptLookup: true },
+    });
+
+    expect(() =>
+      parseArgs(["review", "resolve", "abc1234567890123"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("at least one comment id");
+  });
+
   test("parses subcommand help without endpoint configuration", () => {
     const commands = [
       "publish",
@@ -568,6 +660,7 @@ describe("parseArgs", () => {
       "verify",
       "versions",
       "rollback",
+      "review",
       "receipts",
       "show",
       "delete",
@@ -613,6 +706,7 @@ describe("help command", () => {
       "verify",
       "versions",
       "rollback",
+      "review",
       "receipts",
       "show",
       "delete",
@@ -650,6 +744,14 @@ describe("skill command", () => {
     expect(result.stdout).toContain("pagebin publish /absolute/path/artifact.html --verify --json");
     expect(result.stdout).toContain("pagebin versions /absolute/path/artifact.html");
     expect(result.stdout).toContain("pagebin rollback /absolute/path/artifact.html <version>");
+    expect(result.stdout).toContain("pagebin review /absolute/path/artifact.html");
+    expect(result.stdout).toContain(
+      "Publish with `--no-review` when the artifact is meant for people other than the owner.",
+    );
+    expect(result.stdout).toContain("After the user says they reviewed an artifact");
+    expect(result.stdout).toContain("Decisions without an answer");
+    expect(result.stdout).toContain("per-artifact origin");
+    expect(result.stdout).toContain("Cookies are third-party");
     expect(result.stdout).toContain("Give users the returned viewer `url`");
     expect(result.stdout).toContain("Never give users a `/raw/.../v/<n>/...` URL");
     expect(result.stdout).toContain("take a screenshot before deciding that the artifact is blank");
@@ -681,6 +783,7 @@ describe("publish command", () => {
         const file = form.get("file");
 
         expect(form.get("sandbox")).toBe("standard");
+        expect(form.get("review")).toBe("true");
         expect(form.get("ttlSeconds")).toBeNull();
         expect(file).toBeInstanceOf(File);
         expect((file as File).name).toBe("cli-plan.html");
@@ -717,7 +820,7 @@ describe("publish command", () => {
     }
   });
 
-  test("prints structured JSON and sends ttl/sandbox fields", async () => {
+  test("prints structured JSON and sends ttl, sandbox, and review fields", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>cli</h1>");
 
     const server = Bun.serve({
@@ -728,6 +831,7 @@ describe("publish command", () => {
         const form = await request.formData();
 
         expect(form.get("sandbox")).toBe("strict");
+        expect(form.get("review")).toBe("false");
         expect(form.get("ttlSeconds")).toBe("604800");
 
         return Response.json(
@@ -741,6 +845,7 @@ describe("publish command", () => {
             url: "https://pagebin.test/p/artifact-id-1234/view-token",
             expiresAt: "2026-06-07T00:00:00.000Z",
             sandbox: "strict",
+            review: false,
           },
           { status: 201 },
         );
@@ -758,6 +863,7 @@ describe("publish command", () => {
           "7d",
           "--sandbox",
           "strict",
+          "--no-review",
           "--json",
         ],
         {
@@ -777,6 +883,7 @@ describe("publish command", () => {
         url: "https://pagebin.test/p/artifact-id-1234/view-token",
         expiresAt: "2026-06-07T00:00:00.000Z",
         sandbox: "strict",
+        review: false,
       });
     } finally {
       server.stop(true);
@@ -1129,8 +1236,13 @@ flowchart LR
         const url = new URL(request.url);
 
         if (url.pathname === "/api/uploads") {
-          const body = (await request.json()) as { files: { path: string; sha256: string }[] };
+          const body = (await request.json()) as {
+            files: { path: string; sha256: string }[];
+            review: boolean;
+          };
+
           expect(body.files[0]?.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+          expect(body.review).toBe(false);
 
           return Response.json({
             id: "abcdefghijklmnop",
@@ -1154,6 +1266,7 @@ flowchart LR
           version: 1,
           expiresAt: null,
           sandbox: "standard",
+          review: false,
 
           id: "abcdefghijklmnop",
           url: url.origin + "/p/abcdefghijklmnop/token",
@@ -1166,12 +1279,23 @@ flowchart LR
 
     try {
       const result = await runPagebin(
-        ["publish", filePath, "--no-infer", "--json", "--endpoint", server.url.toString()],
+        [
+          "publish",
+          filePath,
+          "--no-infer",
+          "--no-review",
+          "--json",
+          "--endpoint",
+          server.url.toString(),
+        ],
         { PAGEBIN_PUBLISH_TOKEN: "publish-token" },
       );
 
       expect(result.exitCode).toBe(0);
-      expect(JSON.parse(result.stdout).downloadUrl).toContain("/download/");
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        downloadUrl: expect.stringContaining("/download/"),
+        review: false,
+      });
       expect(uploaded).toBe(true);
     } finally {
       server.stop(true);
@@ -1419,6 +1543,39 @@ describe("configuration and type aliases", () => {
 });
 
 describe("local receipt workflow", () => {
+  test("includes review in show JSON", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-show-review-"));
+    const statePath = join(directory, "artifacts.json");
+    const id = "artifact-id-1234";
+
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        artifacts: [
+          {
+            endpoint: "https://pagebin.test",
+            id,
+            url: `https://pagebin.test/p/${id}/view-token`,
+            rawUrl: `https://pagebin.test/raw/${id}/view-token`,
+            filePath: join(directory, "plan.html"),
+            createdAt: "2026-10-06T00:00:00.000Z",
+            updatedAt: "2026-10-06T00:00:00.000Z",
+            revision: 1,
+            review: false,
+            contentSha256: null,
+            attributes: {},
+          },
+        ],
+      }),
+    );
+
+    const result = await runPagebin(["show", id, "--json"], { PAGEBIN_STATE_PATH: statePath });
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ id, review: false, schemaVersion: 1 });
+  });
+
   test("persists a protected receipt, prevents duplicates, and updates by file", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pagebin-receipt-test-"));
     const statePath = join(directory, "state", "artifacts.json");
@@ -1681,6 +1838,7 @@ describe("list command", () => {
               createdAt: "2026-06-01T12:00:00.000Z",
               expiresAt: null,
               sandbox: "standard",
+              review: false,
               size: 1536,
             },
           ],
@@ -1733,6 +1891,7 @@ describe("list command", () => {
               createdAt: "2026-06-01T12:00:00.000Z",
               expiresAt: null,
               sandbox: "standard",
+              review: false,
               size: 1536,
             },
           ],
@@ -1770,6 +1929,7 @@ describe("list command", () => {
             createdAt: "2026-06-01T12:00:00.000Z",
             expiresAt: null,
             sandbox: "standard",
+            review: false,
             size: 1536,
           },
         ],
@@ -2284,6 +2444,55 @@ describe("update command", () => {
     }
   });
 
+  test("updates only review metadata and prints it in JSON", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("PATCH");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234");
+        expect(await request.json()).toEqual({ review: false });
+
+        return Response.json({
+          id: "artifact-id-1234",
+          filename: "plan.html",
+          updatedAt: "2026-07-15T00:00:00.000Z",
+          expiresAt: null,
+          sandbox: "standard",
+          review: false,
+          size: 31,
+          revision: 2,
+          version: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+        });
+      },
+    });
+
+    try {
+      const result = await runPagebin(
+        [
+          "update",
+          "artifact-id-1234",
+          "--review",
+          "off",
+          "--endpoint",
+          server.url.origin,
+          "--json",
+        ],
+        { PAGEBIN_PUBLISH_TOKEN: "publish-token" },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        id: "artifact-id-1234",
+        review: false,
+        revision: 2,
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("sends content and TTL in one request", async () => {
     const filePath = await writeTempFile("cli-plan-ttl.html", "<!doctype html><h1>updated</h1>");
 
@@ -2293,6 +2502,7 @@ describe("update command", () => {
         expect(request.method).toBe("PUT");
         const form = await request.formData();
         expect(form.get("ttlSeconds")).toBe("604800");
+        expect(form.get("review")).toBe("false");
 
         return Response.json({
           version: 1,
@@ -2312,6 +2522,7 @@ describe("update command", () => {
           updatedAt: "2026-07-15T00:00:00.000Z",
           expiresAt: "2026-07-22T00:00:00.000Z",
           sandbox: "standard",
+          review: false,
           size: 31,
           revision: 2,
           contentSha256: "a".repeat(64),
@@ -2322,7 +2533,17 @@ describe("update command", () => {
 
     try {
       const result = await runPagebin(
-        ["update", "artifact-id-1234", filePath, "--ttl", "7d", "--endpoint", server.url.origin],
+        [
+          "update",
+          "artifact-id-1234",
+          filePath,
+          "--ttl",
+          "7d",
+          "--review",
+          "off",
+          "--endpoint",
+          server.url.origin,
+        ],
         {
           PAGEBIN_PUBLISH_TOKEN: "publish-token",
         },
@@ -2465,6 +2686,7 @@ describe("update command", () => {
         updatedAt: "2026-06-18T00:00:00.000Z",
         expiresAt: null,
         sandbox: "standard",
+        review: true,
         size: 31,
         url: null,
       });
@@ -2914,6 +3136,7 @@ describe("watch command", () => {
 
           expect(new URL(request.url).pathname).toBe("/api/publish");
           expect(form.get("sandbox")).toBe("strict");
+          expect(form.get("review")).toBe("false");
           expect(form.get("ttlSeconds")).toBe("604800");
           expect(form.get("filename")).toBe("cli-watch.html");
           expect((file as File).name).toBe("cli-watch.html");
@@ -2930,6 +3153,7 @@ describe("watch command", () => {
               url: `${origin}/p/artifact-id-1234/view-token`,
               expiresAt: "2026-06-25T00:00:00.000Z",
               sandbox: "strict",
+              review: false,
             },
             { status: 201 },
           );
@@ -2937,6 +3161,7 @@ describe("watch command", () => {
 
         expect(request.method).toBe("PUT");
         expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/content");
+        expect(form.get("review")).toBeNull();
         expect(form.get("filename")).toBe("cli-watch.html");
         expect((file as File).name).toBe("cli-watch.html");
         expect(html).toBe("<!doctype html><h1>second</h1>");
@@ -2980,6 +3205,7 @@ describe("watch command", () => {
         "7d",
         "--sandbox",
         "strict",
+        "--no-review",
       ],
       {
         cwd: process.cwd(),
@@ -3335,6 +3561,198 @@ describe("runtime contract validation", () => {
       } finally {
         server.stop(true);
       }
+    }
+  });
+});
+
+describe("review commands", () => {
+  test("prints review Markdown and complete structured JSON", async () => {
+    const now = "2026-10-05T12:00:00.000Z";
+
+    const review = {
+      schemaVersion: 1,
+      comments: [
+        {
+          id: "open-comment",
+          anchor: { quote: "selected text", prefix: "before", suffix: "after", version: 1 },
+          body: "Clarify this point.",
+          status: "open",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "addressed-comment",
+          anchor: { quote: "old text", prefix: "", suffix: "", version: 1 },
+          body: "Already fixed.",
+          status: "addressed",
+          createdAt: now,
+          updatedAt: now,
+          addressedAt: now,
+        },
+      ],
+      decisions: [
+        {
+          id: "theme",
+          question: "Which theme?",
+          controls: [{ name: "theme", type: "select", default: "system" }],
+          values: { theme: "dark" },
+          interacted: true,
+          answeredVersion: 1,
+          updatedAt: now,
+          lastWrite: { page: "internal-page", n: 3 },
+        },
+        {
+          id: "density",
+          question: "Which density?",
+          controls: [{ name: "density", type: "select", default: "comfortable" }],
+          values: { density: "comfortable" },
+          interacted: false,
+          answeredVersion: 2,
+          updatedAt: now,
+        },
+      ],
+      updatedAt: now,
+    };
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.method).toBe("GET");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/review");
+        expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+
+        return Response.json({
+          id: "artifact-id-1234",
+          version: 2,
+          title: "Review plan",
+          filename: "plan.html",
+          review,
+        });
+      },
+    });
+
+    const statePath = join(tmpdir(), `pagebin-review-read-${Date.now()}.json`);
+    const env = { PAGEBIN_PUBLISH_TOKEN: "publish-token", PAGEBIN_STATE_PATH: statePath };
+
+    try {
+      const markdown = await runPagebin(
+        ["review", "artifact-id-1234", "--endpoint", server.url.origin],
+        env,
+      );
+
+      expect(markdown.exitCode).toBe(0);
+      expect(markdown.stderr).toBe("");
+      expect(markdown.stdout).toContain("## Review: Review plan (plan.html, v2)");
+      expect(markdown.stdout).toContain("theme → dark");
+      expect(markdown.stdout).not.toContain("density →");
+      expect(markdown.stdout).toContain('> "selected text"');
+      expect(markdown.stdout).toContain("Clarify this point.");
+      expect(markdown.stdout).not.toContain("Already fixed.");
+      expect(markdown.stdout).toContain("1 addressed comment omitted");
+
+      const structured = await runPagebin(
+        ["review", "artifact-id-1234", "--json", "--endpoint", server.url.origin],
+        env,
+      );
+
+      expect(structured.exitCode).toBe(0);
+      const payload = JSON.parse(structured.stdout);
+      expect(payload).toMatchObject({
+        schemaVersion: 1,
+        id: "artifact-id-1234",
+        version: 2,
+        title: "Review plan",
+        filename: "plan.html",
+        review: { comments: [{ id: "open-comment" }, { id: "addressed-comment" }] },
+      });
+      expect(payload.review.decisions).toHaveLength(2);
+      expect(JSON.stringify(payload.review)).not.toContain("lastWrite");
+      expect(payload.markdown).toBe(markdown.stdout);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("resolves and reopens comments through the publisher route", async () => {
+    const now = "2026-10-05T12:00:00.000Z";
+    const bodies: Array<{ commentIds: string[]; status?: string }> = [];
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("POST");
+        expect(new URL(request.url).pathname).toBe(
+          "/api/artifacts/artifact-id-1234/review/resolve",
+        );
+        expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+        expect(request.headers.get("Content-Type")).toBe("application/json");
+        expect(Number(request.headers.get("Content-Length"))).toBeGreaterThan(0);
+
+        const body = (await request.json()) as { commentIds: string[]; status?: string };
+        bodies.push(body);
+        const status = body.status ?? "addressed";
+
+        return Response.json({
+          comments: body.commentIds.map((id) => ({
+            id,
+            anchor: { quote: "selected text", prefix: "", suffix: "", version: 1 },
+            body: "Fix this.",
+            status,
+            createdAt: now,
+            updatedAt: now,
+            ...(status === "addressed" ? { addressedAt: now } : {}),
+          })),
+        });
+      },
+    });
+
+    const env = {
+      PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      PAGEBIN_STATE_PATH: join(tmpdir(), `pagebin-review-resolve-${Date.now()}.json`),
+    };
+
+    try {
+      const resolved = await runPagebin(
+        [
+          "review",
+          "resolve",
+          "artifact-id-1234",
+          "comment-one",
+          "comment-two",
+          "--endpoint",
+          server.url.origin,
+        ],
+        env,
+      );
+
+      expect(resolved.exitCode).toBe(0);
+      expect(resolved.stdout).toBe("Addressed 2 comments.\n");
+
+      const reopened = await runPagebin(
+        [
+          "review",
+          "resolve",
+          "artifact-id-1234",
+          "comment-one",
+          "--reopen",
+          "--json",
+          "--endpoint",
+          server.url.origin,
+        ],
+        env,
+      );
+
+      expect(reopened.exitCode).toBe(0);
+      expect(JSON.parse(reopened.stdout)).toMatchObject({
+        schemaVersion: 1,
+        comments: [{ id: "comment-one", status: "open" }],
+      });
+      expect(bodies).toEqual([
+        { commentIds: ["comment-one", "comment-two"] },
+        { commentIds: ["comment-one"], status: "open" },
+      ]);
+    } finally {
+      server.stop(true);
     }
   });
 });

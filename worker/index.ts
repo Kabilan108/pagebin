@@ -13,6 +13,26 @@ import {
 } from "../shared/content";
 import { FAVICON_SVG, dashboardHtml } from "./dashboard";
 import { NOT_FOUND_HTML } from "./not-found";
+import {
+  createViewerComment,
+  deleteViewerComment,
+  getPublisherReview,
+  getViewerReview,
+  isReviewObjectKey,
+  patchViewerComment,
+  putViewerDecision,
+  resolvePublisherComments,
+  reviewNotFound,
+  reviewObjectKey,
+  type ReviewArtifact,
+} from "./review";
+import { frameScriptTag } from "./review-frame";
+import {
+  REVIEW_CSS,
+  type ReviewViewerConfig,
+  reviewCountButtonHtml,
+  reviewStageHtml,
+} from "./review-ui";
 
 interface Env {
   ARTIFACTS: R2Bucket;
@@ -37,6 +57,7 @@ interface ArtifactMetadata {
   updatedAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   contentKey: string;
@@ -89,6 +110,7 @@ interface PublishPayload {
   url: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   revision: number;
   version: number;
   contentSha256: string;
@@ -109,6 +131,7 @@ interface UpdatePayload {
   updatedAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   version: number;
@@ -131,6 +154,7 @@ interface ListedArtifact {
   createdAt: string;
   expiresAt: string | null;
   sandbox: SandboxMode;
+  review: boolean;
   size: number;
   revision: number;
   contentSha256: string | null;
@@ -181,21 +205,6 @@ const STANDARD_IFRAME_PERMISSIONS = "clipboard-write; fullscreen";
 const USERCONTENT_LABEL_PLACEHOLDER = "{label}";
 
 const FRAME_PATH = /^\/frame\/([^/]+)\/([^/]+)\/v\/([1-9]\d*)(?:\/(.+))?$/;
-
-// Runs inside every standard document frame. Links to other hosts open in a new tab because
-// the sandbox blocks top-level navigation and most sites refuse to be framed.
-const FRAME_SCRIPT = `<script data-pagebin="frame">(() => {
-  const navigatesFrame = (link) => ["", "_self", "_top", "_parent"].includes((link.getAttribute("target") || "").toLowerCase());
-  addEventListener("click", (event) => {
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const link = event.target instanceof Element ? event.target.closest("a[href], area[href]") : null;
-    if (!link || link.hasAttribute("download") || !navigatesFrame(link)) return;
-    const url = new URL(link.getAttribute("href"), document.baseURI);
-    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.host === location.host) return;
-    event.preventDefault();
-    window.open(url.href, "_blank", "noopener,noreferrer");
-  });
-})();</script>`;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -267,7 +276,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const publicVersionPath =
     /^\/api\/artifacts\/[^/]+\/version\/[^/]+$/.test(url.pathname) ||
     /^\/api\/artifacts\/[^/]+\/versions\/[^/]+$/.test(url.pathname) ||
-    /^\/api\/artifacts\/[^/]+\/manifest\/[^/]+(?:\/v\/[1-9]\d*)?$/.test(url.pathname);
+    /^\/api\/artifacts\/[^/]+\/manifest\/[^/]+(?:\/v\/[1-9]\d*)?$/.test(url.pathname) ||
+    isPublicReviewRequest(request, url.pathname);
 
   if (hostname === "page-bin.com" && url.pathname.startsWith("/api/") && !publicVersionPath) {
     return misdirected();
@@ -295,6 +305,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
     return routeUpload(request, env, url);
   }
+
+  const reviewResponse = await routeReviewRequest(request, env, url, hostname);
+
+  if (reviewResponse) return reviewResponse;
 
   const manifestMatch = /^\/api\/artifacts\/([^/]+)\/manifest\/([^/]+)(?:\/v\/([1-9]\d*))?$/.exec(
     url.pathname,
@@ -401,7 +415,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   if (request.method === "PATCH" && deleteMatch?.[1]) {
-    return updateArtifactTtl(request, env, deleteMatch[1]);
+    return updateArtifactMetadata(request, env, deleteMatch[1]);
   }
 
   if (request.method === "DELETE" && deleteMatch?.[1]) {
@@ -939,6 +953,7 @@ async function getArtifact(request: Request, env: Env, id: string): Promise<Resp
     updatedAt: metadata.updatedAt,
     expiresAt: metadata.expiresAt,
     sandbox: metadata.sandbox,
+    review: metadata.review,
     size: metadata.size,
     revision: metadata.revision,
     contentSha256: metadata.contentSha256,
@@ -989,6 +1004,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
     updatedAt: nowIso,
     expiresAt,
     sandbox: parsedOptions.sandbox,
+    review: parsedOptions.review,
     size: upload.file.size,
     revision: 1,
     contentKey: htmlKey(id),
@@ -1031,6 +1047,7 @@ async function publish(request: Request, env: Env): Promise<Response> {
     url: `${publicOrigin(request, env)}/p/${id}/${token}`,
     expiresAt,
     sandbox: parsedOptions.sandbox,
+    review: parsedOptions.review,
     revision: metadata.revision,
     version: 1,
     contentSha256,
@@ -1080,11 +1097,13 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   const contentSha256 = await sha256Hex(upload.html);
   let attributes: ArtifactAttributes;
   let ttlSeconds: number | null | undefined;
+  let review: boolean | undefined;
 
   try {
     attributes = parseArtifactAttributes(upload.form);
     const ttlValue = upload.form.get("ttlSeconds");
     ttlSeconds = ttlValue === null ? undefined : parseUpdateTtl(ttlValue);
+    review = parseOptionalReviewFormValue(upload.form.get("review"));
   } catch (error) {
     return json(
       { error: error instanceof Error ? error.message : "Invalid artifact attributes." },
@@ -1101,7 +1120,8 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     const isNoOp =
       upload.displayFilename === metadata.filename &&
       JSON.stringify(mergedAttributes) === JSON.stringify(metadata.attributes) &&
-      ttlSeconds === undefined;
+      ttlSeconds === undefined &&
+      review === undefined;
 
     if (isNoOp) {
       return json(updatePayload(metadata));
@@ -1116,6 +1136,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
       revision: metadata.revision + 1,
       attributes: mergedAttributes,
       expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
+      review: review ?? metadata.review,
     };
 
     if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
@@ -1149,6 +1170,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
     currentVersion: nextVersion.version,
     attributes: mergedAttributes,
     expiresAt: updatedExpiration(metadata.expiresAt, ttlSeconds, updatedAt),
+    review: review ?? metadata.review,
   };
 
   await env.ARTIFACTS.put(nextContentKey, upload.html, {
@@ -1177,7 +1199,7 @@ async function updateArtifactContent(request: Request, env: Env, id: string): Pr
   return json(updatePayload(nextMetadata));
 }
 
-async function updateArtifactTtl(request: Request, env: Env, id: string): Promise<Response> {
+async function updateArtifactMetadata(request: Request, env: Env, id: string): Promise<Response> {
   if (!(await isAuthorized(request, env))) {
     return json({ error: "Unauthorized." }, 401);
   }
@@ -1201,27 +1223,30 @@ async function updateArtifactTtl(request: Request, env: Env, id: string): Promis
   try {
     body = await request.json();
   } catch {
-    return json({ error: "TTL update body must be valid JSON." }, 400);
+    return json({ error: "Metadata update body must be valid JSON." }, 400);
   }
 
-  if (
-    !isPlainObject(body) ||
-    !Object.hasOwn(body, "ttlSeconds") ||
-    Object.keys(body).length !== 1
-  ) {
-    return json({ error: "TTL update body must contain only ttlSeconds." }, 400);
+  if (!isPlainObject(body)) {
+    return json({ error: "Metadata update body must be a JSON object." }, 400);
+  }
+
+  const keys = Object.keys(body);
+
+  if (keys.length === 0 || keys.some((key) => key !== "ttlSeconds" && key !== "review")) {
+    return json({ error: "Metadata update body may contain only ttlSeconds and review." }, 400);
   }
 
   let ttlSeconds: number | null | undefined;
+  let review: boolean | undefined;
 
   try {
-    ttlSeconds = parseUpdateTtl(body.ttlSeconds);
+    ttlSeconds = Object.hasOwn(body, "ttlSeconds") ? parseUpdateTtl(body.ttlSeconds) : undefined;
+    review = Object.hasOwn(body, "review") ? parseReviewBoolean(body.review) : undefined;
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "Invalid TTL." }, 400);
-  }
-
-  if (ttlSeconds === undefined) {
-    return json({ error: "ttlSeconds is required." }, 400);
+    return json(
+      { error: error instanceof Error ? error.message : "Invalid metadata update." },
+      400,
+    );
   }
 
   const updatedAt = new Date().toISOString();
@@ -1231,6 +1256,7 @@ async function updateArtifactTtl(request: Request, env: Env, id: string): Promis
     updatedAt,
     revision: stored.metadata.revision + 1,
     expiresAt: updatedExpiration(stored.metadata.expiresAt, ttlSeconds, updatedAt),
+    review: review ?? stored.metadata.review,
   };
 
   if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
@@ -1251,6 +1277,7 @@ async function listArtifacts(request: Request, env: Env): Promise<Response> {
     createdAt: artifact.createdAt,
     expiresAt: artifact.expiresAt,
     sandbox: artifact.sandbox,
+    review: artifact.review,
     size: artifact.size,
     revision: artifact.revision,
     contentSha256: artifact.contentSha256,
@@ -1416,6 +1443,133 @@ async function artifactVersions(env: Env, id: string, token: string): Promise<Re
   });
 }
 
+function isPublicReviewRequest(request: Request, pathname: string): boolean {
+  if (request.method === "GET") {
+    return /^\/api\/artifacts\/[^/]+\/review\/[^/]+$/.test(pathname);
+  }
+
+  if (request.method === "POST") {
+    return /^\/api\/artifacts\/[^/]+\/review\/[^/]+\/comments$/.test(pathname);
+  }
+
+  if (request.method === "PATCH" || request.method === "DELETE") {
+    return /^\/api\/artifacts\/[^/]+\/review\/[^/]+\/comments\/[^/]+$/.test(pathname);
+  }
+
+  return (
+    request.method === "PUT" &&
+    /^\/api\/artifacts\/[^/]+\/review\/[^/]+\/decisions\/[^/]+$/.test(pathname)
+  );
+}
+
+async function routeReviewRequest(
+  request: Request,
+  env: Env,
+  url: URL,
+  hostname: string,
+): Promise<Response | null> {
+  const publisherMatch = /^\/api\/artifacts\/([^/]+)\/review$/.exec(url.pathname);
+  const resolveMatch = /^\/api\/artifacts\/([^/]+)\/review\/resolve$/.exec(url.pathname);
+
+  if (
+    (request.method === "GET" && publisherMatch?.[1]) ||
+    (request.method === "POST" && resolveMatch?.[1])
+  ) {
+    if (!(await isAuthorized(request, env))) {
+      return json({ error: "Unauthorized." }, 401);
+    }
+
+    const id = decodePathSegment((publisherMatch ?? resolveMatch)?.[1]);
+
+    if (!id || !isValidId(id)) return reviewNotFound();
+    const stored = await readStoredMetadata(env, id);
+
+    if (!stored || stored.metadata.deletedAt) return reviewNotFound();
+
+    const artifact = reviewArtifact(env, stored.metadata);
+
+    return publisherMatch
+      ? getPublisherReview(env, artifact)
+      : resolvePublisherComments(request, env, artifact);
+  }
+
+  const viewerMatch =
+    /^\/api\/artifacts\/([^/]+)\/review\/([^/]+)(?:\/(comments|decisions)(?:\/([^/]+))?)?$/.exec(
+      url.pathname,
+    );
+
+  if (!viewerMatch) return null;
+
+  if (hostname === "api.page-bin.com") return misdirected();
+
+  const id = decodePathSegment(viewerMatch[1]);
+  const token = decodePathSegment(viewerMatch[2]);
+  const itemId = viewerMatch[4] ? decodePathSegment(viewerMatch[4]) : null;
+
+  if (!id || !token || (viewerMatch[4] && !itemId)) return reviewNotFound();
+  const metadata = await readAuthorizedMetadata(env, id, token);
+
+  if (!metadata || !metadata.review || metadata.sandbox !== "standard") return reviewNotFound();
+
+  const artifact = reviewArtifact(env, metadata);
+
+  if (request.method === "GET" && !viewerMatch[3]) {
+    return getViewerReview(env, artifact);
+  }
+
+  if (request.method === "POST" && viewerMatch[3] === "comments" && !itemId) {
+    return createViewerComment(request, env, artifact);
+  }
+
+  if (request.method === "PATCH" && viewerMatch[3] === "comments" && itemId) {
+    return patchViewerComment(request, env, artifact, itemId);
+  }
+
+  if (request.method === "DELETE" && viewerMatch[3] === "comments" && itemId) {
+    return deleteViewerComment(env, artifact, itemId);
+  }
+
+  if (request.method === "PUT" && viewerMatch[3] === "decisions" && itemId) {
+    return putViewerDecision(request, env, artifact, itemId);
+  }
+
+  return reviewNotFound();
+}
+
+function reviewArtifact(env: Env, metadata: ArtifactMetadata): ReviewArtifact {
+  return {
+    id: metadata.id,
+    filename: metadata.filename,
+    title: metadata.attributes.title ?? metadata.filename,
+    version: artifactHead(metadata).version,
+    versions: metadata.versions.map((version) => version.version),
+    isLive: async () => {
+      const stored = await readStoredMetadata(env, metadata.id);
+
+      return Boolean(
+        stored &&
+        !stored.metadata.deletedAt &&
+        (!stored.metadata.expiresAt || Date.now() < Date.parse(stored.metadata.expiresAt)),
+      );
+    },
+    isDeleted: async () => {
+      const stored = await readStoredMetadata(env, metadata.id);
+
+      return !stored || Boolean(stored.metadata.deletedAt);
+    },
+  };
+}
+
+function decodePathSegment(value: string | undefined): string | null {
+  if (!value) return null;
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 async function cleanupExpiredArtifacts(env: Env): Promise<void> {
   let cursor: string | undefined;
 
@@ -1432,6 +1586,8 @@ async function cleanupExpiredArtifacts(env: Env): Promise<void> {
       try {
         if (object.key.endsWith("/metadata.json")) {
           await cleanupExpiredArtifact(env, object.key);
+        } else if (isReviewObjectKey(object.key)) {
+          await cleanupRetiredReview(env, object.key);
         } else if (isArtifactContentKey(object.key)) {
           await cleanupOrphanedContent(env, object);
         }
@@ -1440,6 +1596,16 @@ async function cleanupExpiredArtifacts(env: Env): Promise<void> {
       }
     }
   } while (cursor);
+}
+
+async function cleanupRetiredReview(env: Env, key: string): Promise<void> {
+  const id = key.split("/").at(-2);
+
+  if (!id || reviewObjectKey(id) !== key) return;
+
+  const stored = await readStoredMetadata(env, id);
+
+  if (!stored || stored.metadata.deletedAt) await env.ARTIFACTS.delete(key);
 }
 
 async function cleanupExpiredArtifact(env: Env, key: string): Promise<void> {
@@ -1630,6 +1796,7 @@ function scrubberBarHtml(
   token: string,
   metadata: ArtifactMetadata,
   pinnedVersion: number | null,
+  reviewable: boolean,
 ): string {
   const current = artifactHead(metadata).version;
   const viewed = pinnedVersion ?? current;
@@ -1662,7 +1829,9 @@ function scrubberBarHtml(
   const agent = viewerAgentHtml(metadata.attributes.agent);
   const identity = `<span class="pb-identity"><span class="pb-name">${escapeHtml(metadata.filename)}</span>${agent ? `<span class="pb-agent-sep" aria-hidden="true">·</span>${agent}` : ""}</span>`;
 
-  return `<div class="pagebin-bar">${identity}${liveDot}${dropdown}${copy}</div>`;
+  const comments = reviewable ? reviewCountButtonHtml() : "";
+
+  return `<div class="pagebin-bar">${identity}${liveDot}${dropdown}${comments}${copy}</div>`;
 }
 
 function scrubberBarScript(id: string, token: string, viewedVersion: number): string {
@@ -1719,50 +1888,13 @@ if (pagebinDd) {
 `;
 }
 
-async function serveViewer(
-  env: Env,
-  requestUrl: string,
-  id: string,
-  token: string,
-): Promise<Response> {
-  const metadata = await readAuthorizedMetadata(env, id, token);
-
-  if (!metadata) {
-    return siteNotFound();
-  }
-
-  const url = new URL(requestUrl);
-
-  const rawPath = artifactHead(metadata).manifest
-    ? manifestRawPath(id, token, artifactHead(metadata))
-    : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
-
+function viewerRevisionPollScript(id: string, token: string, revision: number): string {
   const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
-  const frameOrigin = await documentFrameOrigin(env, metadata);
-  const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
-  const version = metadata.revision;
-  const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, artifactHead(metadata))}`;
 
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex,nofollow,noarchive">
-<title>${escapeHtml(metadata.filename)}</title>
-<style>
-html,body{height:100%;margin:0;background:#fff}
-iframe{display:block;width:100%;height:100%;border:0}
-${VIEWER_BAR_CSS}
-</style>
-</head>
-<body>
-${scrubberBarHtml(id, token, metadata, null)}${contentViewer(metadata, artifactHead(metadata), rawPath, sandbox, frameSrc)}
-<script>
-${scrubberBarScript(id, token, artifactHead(metadata).version)}
+  return `
 const pagebinMinDelayMs = 2000;
 const pagebinMaxDelayMs = 60000;
-let pagebinVersion = ${JSON.stringify(version)};
+let pagebinVersion = ${JSON.stringify(revision)};
 let pagebinDelayMs = pagebinMinDelayMs;
 let pagebinTimer = null;
 function pagebinSchedule() {
@@ -1793,6 +1925,77 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 pagebinSchedule();
+`;
+}
+
+// Resizing the layout viewport for the soft keyboard keeps the docked composer above it.
+const VIEWER_VIEWPORT = "width=device-width, initial-scale=1, interactive-widget=resizes-content";
+
+// Review needs the frame script, which only standard HTML documents receive.
+function reviewViewerConfig(
+  metadata: ArtifactMetadata,
+  entry: ArtifactVersion,
+  token: string,
+  frameOrigin: string | null,
+): ReviewViewerConfig | null {
+  const file = entry.manifest?.files.find((f) => f.path === entry.manifest?.entrypoint);
+  const isDocument = entry.manifest ? contentKind(file?.contentType ?? "") === "document" : true;
+
+  if (!metadata.review || metadata.sandbox !== "standard" || !isDocument) return null;
+
+  return {
+    id: metadata.id,
+    token,
+    title: metadata.attributes.title ?? metadata.filename,
+    filename: metadata.filename,
+    version: entry.version,
+    framePath: framePath(metadata.id, token, entry),
+    frameOrigin,
+  };
+}
+
+async function serveViewer(
+  env: Env,
+  requestUrl: string,
+  id: string,
+  token: string,
+): Promise<Response> {
+  const metadata = await readAuthorizedMetadata(env, id, token);
+
+  if (!metadata) {
+    return siteNotFound();
+  }
+
+  const url = new URL(requestUrl);
+
+  const rawPath = artifactHead(metadata).manifest
+    ? manifestRawPath(id, token, artifactHead(metadata))
+    : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
+
+  const frameOrigin = await documentFrameOrigin(env, metadata);
+  const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
+  const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, artifactHead(metadata))}`;
+  const review = reviewViewerConfig(metadata, artifactHead(metadata), token, frameOrigin);
+  const content = contentViewer(metadata, artifactHead(metadata), rawPath, sandbox, frameSrc);
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="${VIEWER_VIEWPORT}">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<title>${escapeHtml(metadata.filename)}</title>
+<style>
+html,body{height:100%;margin:0;background:#fff}
+iframe{display:block;width:100%;height:100%;border:0}
+${VIEWER_BAR_CSS}${review ? REVIEW_CSS : ""}
+</style>
+</head>
+<body>
+${scrubberBarHtml(id, token, metadata, null, review !== null)}${review ? reviewStageHtml(content, review) : content}
+<script>
+${scrubberBarScript(id, token, artifactHead(metadata).version)}
+${viewerRevisionPollScript(id, token, metadata.revision)}
 </script>
 </body>
 </html>`;
@@ -1830,23 +2033,28 @@ async function servePinnedViewer(
   const frameOrigin = await documentFrameOrigin(env, metadata);
   const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
   const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, entry)}`;
+  const review = reviewViewerConfig(metadata, entry, token, frameOrigin);
+  const content = contentViewer(metadata, entry, rawPath, sandbox, frameSrc);
 
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="${VIEWER_VIEWPORT}">
 <meta name="robots" content="noindex,nofollow,noarchive">
 <title>${escapeHtml(metadata.filename)} · Version ${entry.version}</title>
 <style>
 html,body{height:100%;margin:0;background:#fff}
 iframe{display:block;width:100%;height:100%;border:0}
-${VIEWER_BAR_CSS}
+${VIEWER_BAR_CSS}${review ? REVIEW_CSS : ""}
 </style>
 </head>
 <body>
-${scrubberBarHtml(id, token, metadata, entry.version)}${contentViewer(metadata, entry, rawPath, sandbox, frameSrc)}
-<script>${scrubberBarScript(id, token, entry.version)}</script>
+${scrubberBarHtml(id, token, metadata, entry.version, review !== null)}${review ? reviewStageHtml(content, review) : content}
+<script>
+${scrubberBarScript(id, token, entry.version)}
+${viewerRevisionPollScript(id, token, metadata.revision)}
+</script>
 </body>
 </html>`;
 
@@ -2053,14 +2261,18 @@ async function readMultipartForm(
   }
 }
 
-function parsePublishOptions(
-  form: FormData,
-):
-  | { ttlSeconds: number | null; sandbox: SandboxMode; attributes: ArtifactAttributes }
+function parsePublishOptions(form: FormData):
+  | {
+      ttlSeconds: number | null;
+      sandbox: SandboxMode;
+      review: boolean;
+      attributes: ArtifactAttributes;
+    }
   | { error: string } {
   try {
     return {
       sandbox: parseSandbox(form.get("sandbox")),
+      review: parsePublishReviewFormValue(form.get("review")),
       ttlSeconds: parseOptionalPositiveInt(form.get("ttlSeconds")),
       attributes: parseArtifactAttributes(form),
     };
@@ -2256,6 +2468,7 @@ function updatePayload(metadata: ArtifactMetadata): UpdatePayload {
     updatedAt: metadata.updatedAt,
     expiresAt: metadata.expiresAt,
     sandbox: metadata.sandbox,
+    review: metadata.review,
     size: metadata.size,
     revision: metadata.revision,
     version: artifactHead(metadata).version,
@@ -2274,6 +2487,26 @@ function parseSandbox(value: unknown): SandboxMode {
   }
 
   throw new Error("Invalid sandbox mode.");
+}
+
+function parseReviewBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+
+  throw new Error("Review must be a boolean.");
+}
+
+function parsePublishReviewFormValue(value: unknown): boolean {
+  return parseOptionalReviewFormValue(value) ?? true;
+}
+
+function parseOptionalReviewFormValue(value: unknown): boolean | undefined {
+  if (value === null) return undefined;
+
+  if (value === "true") return true;
+
+  if (value === "false") return false;
+
+  throw new Error("Review must be true or false.");
 }
 
 async function readUtf8File(file: UploadedFile): Promise<string | null> {
@@ -2588,6 +2821,7 @@ function normalizeMetadata(metadata: ArtifactMetadata): ArtifactMetadata {
     ...metadata,
     updatedAt,
     revision: metadata.revision ?? 1,
+    review: metadata.review ?? true,
     contentKey,
     contentSha256,
     versions,
@@ -2750,6 +2984,7 @@ interface UploadSession {
   filename: string;
   manifest: ContentManifest;
   sandbox: SandboxMode;
+  review?: boolean | undefined;
   ttlSeconds?: number | null | undefined;
   attributes: ArtifactAttributes;
 }
@@ -2887,7 +3122,18 @@ function viewerCsp(frameOrigin: string | null): string {
   return `default-src 'none'; connect-src 'self'; frame-src ${frameSources}; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
 }
 
-function withFrameScript(response: Response): Response {
+// The frame posts review messages to this origin. Without a usercontent origin the frame shares
+// the viewer's host with an opaque origin, so it must use "*"; its CSP's frame-ancestors 'self'
+// still guarantees that the parent is the viewer.
+function frameViewerOrigin(request: Request, env: Env): string {
+  const viewerOrigin = configuredViewerOrigin(env);
+
+  return viewerOrigin && isUsercontentHostname(new URL(request.url).hostname, env)
+    ? viewerOrigin
+    : "*";
+}
+
+function withFrameScript(response: Response, script: string): Response {
   let injected = false;
 
   // The script goes first inside an explicit <head>, or before the first element after <html>.
@@ -2903,15 +3149,15 @@ function withFrameScript(response: Response): Response {
         injected = true;
 
         if (tagName === "head") {
-          element.prepend(FRAME_SCRIPT, { html: true });
+          element.prepend(script, { html: true });
         } else {
-          element.before(FRAME_SCRIPT, { html: true });
+          element.before(script, { html: true });
         }
       },
     })
     .onDocument({
       end(end) {
-        if (!injected) end.append(FRAME_SCRIPT, { html: true });
+        if (!injected) end.append(script, { html: true });
       },
     })
     .transform(response);
@@ -3044,7 +3290,10 @@ async function serveFile(
 
     if (!object) return siteNotFound();
 
-    return withFrameScript(new Response(object.body, { status: 200, headers }));
+    return withFrameScript(
+      new Response(object.body, { status: 200, headers }),
+      frameScriptTag(frameViewerOrigin(request, env), metadata.review),
+    );
   }
 
   let range: { offset: number; length: number } | undefined;
@@ -3127,6 +3376,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
     let ttlSeconds: number | null | undefined;
     let attributes: ArtifactAttributes;
     let sandbox: SandboxMode;
+    let review: boolean | undefined;
 
     try {
       ttlSeconds =
@@ -3138,6 +3388,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
 
       if ("error" in parsed) throw new Error(parsed.error);
       sandbox = stored?.metadata.sandbox ?? parsed.sandbox;
+      review = body.review === undefined ? undefined : parseReviewBoolean(body.review);
     } catch (error) {
       return json({ error: String(error) }, 400);
     }
@@ -3220,6 +3471,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
         sha256: await sha256Hex(manifestSource(body.entrypoint, valid)),
       },
       sandbox,
+      review,
       ttlSeconds,
       attributes,
     };
@@ -3295,6 +3547,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
     previous &&
     session.filename === previous.filename &&
     session.ttlSeconds === undefined &&
+    session.review === undefined &&
     JSON.stringify({ ...previous.attributes, ...session.attributes }) ===
       JSON.stringify(previous.attributes)
   ) {
@@ -3343,6 +3596,7 @@ async function routeUpload(request: Request, env: Env, url: URL): Promise<Respon
     updatedAt: now,
     expiresAt: updatedExpiration(previous?.expiresAt ?? null, session.ttlSeconds, now),
     sandbox: session.sandbox,
+    review: session.review ?? previous?.review ?? true,
     size,
     revision: (previous?.revision ?? 0) + 1,
     contentKey,

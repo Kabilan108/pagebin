@@ -1201,7 +1201,8 @@ function readPagebinConfig(
   return config;
 }
 
-// A quoted value ends at its closing quote; an unquoted value ends before a whitespace-led `#`.
+// A quoted value ends at its closing quote; an unquoted value ends before a `#` that starts the
+// value or follows whitespace.
 function parseConfigValue(source: string): string {
   const value = source.trim();
   const quote = value[0];
@@ -1211,7 +1212,7 @@ function parseConfigValue(source: string): string {
     return value.slice(1, closingQuote);
   }
 
-  return value.replace(/\s+#.*$/, "");
+  return value.replace(/(?:^|\s+)#.*$/, "");
 }
 
 function isConfigKey(value: string): value is (typeof CONFIG_KEYS)[number] {

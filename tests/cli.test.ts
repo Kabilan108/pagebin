@@ -1239,6 +1239,19 @@ describe("configuration and type aliases", () => {
     }
   });
 
+  test("treats a commented empty config value as unset", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-empty-"));
+    const configPath = join(directory, "env");
+    await writeFile(configPath, "PAGEBIN_PUBLISH_TOKEN= # unset\n", { mode: 0o600 });
+
+    const result = await runPagebin(["list", "--json", "--endpoint", "http://localhost:1"], {
+      PAGEBIN_CONFIG: configPath,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("PAGEBIN_PUBLISH_TOKEN is not set on");
+  });
+
   test("runs credential-free commands when the config file is unreadable", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pagebin-config-unreadable-"));
 

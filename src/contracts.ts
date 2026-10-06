@@ -1,4 +1,14 @@
 import { type ContentFile, validPath, FILE_COUNT_LIMIT } from "../shared/content";
+import {
+  type DecisionControl,
+  type DecisionOption,
+  type DecisionValue,
+  type ReviewAnchor,
+  type ReviewComment,
+  type ReviewDecision,
+  type ReviewRecord,
+  REVIEW_LIMITS,
+} from "../shared/review";
 import { isAbsolute } from "node:path";
 
 export interface ClientManifest {
@@ -154,6 +164,18 @@ export interface UploadSessionResponse {
   id: string;
   sessionId: string;
   missing: string[];
+}
+
+export interface ReviewResponse {
+  id: string;
+  version: number;
+  title: string;
+  filename: string;
+  review: ReviewRecord;
+}
+
+export interface ResolveReviewResponse {
+  comments: ReviewComment[];
 }
 
 // This module validates untrusted JSON at the CLI's API and receipt boundaries.
@@ -443,6 +465,109 @@ function isUploadSessionResponse(value: unknown): value is UploadSessionResponse
   );
 }
 
+function isReviewAnchor(value: unknown): value is ReviewAnchor {
+  return (
+    isObject(value) &&
+    isString(value.quote) &&
+    value.quote.length <= REVIEW_LIMITS.quote &&
+    isString(value.prefix) &&
+    value.prefix.length <= REVIEW_LIMITS.anchorContext &&
+    isString(value.suffix) &&
+    value.suffix.length <= REVIEW_LIMITS.anchorContext &&
+    isRevision(value.version)
+  );
+}
+
+function isReviewComment(value: unknown): value is ReviewComment {
+  return (
+    isObject(value) &&
+    isString(value.id) &&
+    /^[A-Za-z0-9_-]+$/.test(value.id) &&
+    isReviewAnchor(value.anchor) &&
+    isString(value.body) &&
+    value.body.length <= REVIEW_LIMITS.commentBody &&
+    (value.status === "open" || value.status === "addressed") &&
+    isDate(value.createdAt) &&
+    isDate(value.updatedAt) &&
+    (value.addressedAt === undefined || isDate(value.addressedAt))
+  );
+}
+
+function isDecisionValue(value: unknown): value is DecisionValue {
+  return (
+    value === null ||
+    isString(value) ||
+    (Array.isArray(value) && value.every((item) => isString(item)))
+  );
+}
+
+function isDecisionOption(value: unknown): value is DecisionOption {
+  return isObject(value) && isString(value.value) && isString(value.label);
+}
+
+function isDecisionControl(value: unknown): value is DecisionControl {
+  return (
+    isObject(value) &&
+    isString(value.name) &&
+    (value.type === "radio" ||
+      value.type === "checkbox" ||
+      value.type === "range" ||
+      value.type === "select" ||
+      value.type === "text" ||
+      value.type === "textarea") &&
+    isDecisionValue(value.default) &&
+    (value.options === undefined ||
+      (Array.isArray(value.options) && value.options.every(isDecisionOption)))
+  );
+}
+
+function isReviewDecision(value: unknown): value is ReviewDecision {
+  return (
+    isObject(value) &&
+    isString(value.id) &&
+    /^[A-Za-z0-9_.:-]{1,64}$/.test(value.id) &&
+    isString(value.question) &&
+    Array.isArray(value.controls) &&
+    value.controls.every(isDecisionControl) &&
+    isObject(value.values) &&
+    Object.values(value.values).every(isDecisionValue) &&
+    typeof value.interacted === "boolean" &&
+    isRevision(value.answeredVersion) &&
+    isDate(value.updatedAt) &&
+    new TextEncoder().encode(JSON.stringify(value)).byteLength <= REVIEW_LIMITS.decisionBytes
+  );
+}
+
+function isReviewRecord(value: unknown): value is ReviewRecord {
+  return (
+    isObject(value) &&
+    value.schemaVersion === 1 &&
+    Array.isArray(value.comments) &&
+    value.comments.length <= REVIEW_LIMITS.comments &&
+    value.comments.every(isReviewComment) &&
+    Array.isArray(value.decisions) &&
+    value.decisions.length <= REVIEW_LIMITS.decisions &&
+    value.decisions.every(isReviewDecision) &&
+    (value.updatedAt === null || isDate(value.updatedAt)) &&
+    new TextEncoder().encode(JSON.stringify(value)).byteLength <= REVIEW_LIMITS.recordBytes
+  );
+}
+
+function isReviewResponse(value: unknown): value is ReviewResponse {
+  return (
+    isObject(value) &&
+    isId(value.id) &&
+    isRevision(value.version) &&
+    isString(value.title) &&
+    isString(value.filename) &&
+    isReviewRecord(value.review)
+  );
+}
+
+function isResolveReviewResponse(value: unknown): value is ResolveReviewResponse {
+  return isObject(value) && Array.isArray(value.comments) && value.comments.every(isReviewComment);
+}
+
 function parseContract<T>(value: unknown, guard: (value: unknown) => value is T, name: string): T {
   if (!guard(value))
     throw new Error(`Invalid ${name}: response fields do not match the expected contract.`);
@@ -484,5 +609,13 @@ export function parseReceiptStore(value: unknown): ReceiptStore {
 
 export function parseUploadSessionResponse(value: unknown): UploadSessionResponse {
   return parseContract(value, isUploadSessionResponse, "upload session response");
+}
+
+export function parseReviewResponse(value: unknown): ReviewResponse {
+  return parseContract(value, isReviewResponse, "review response");
+}
+
+export function parseResolveReviewResponse(value: unknown): ResolveReviewResponse {
+  return parseContract(value, isResolveReviewResponse, "review resolve response");
 }
 // oxlint-enable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type

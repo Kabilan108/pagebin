@@ -13,6 +13,20 @@ import {
 } from "../shared/content";
 import { FAVICON_SVG, dashboardHtml } from "./dashboard";
 import { NOT_FOUND_HTML } from "./not-found";
+import {
+  createViewerComment,
+  deleteViewerComment,
+  getPublisherReview,
+  getViewerReview,
+  isReviewObjectKey,
+  patchViewerComment,
+  putViewerDecision,
+  resolvePublisherComments,
+  reviewNotFound,
+  reviewObjectKey,
+  synchronizeReviewBinding,
+  type ReviewArtifact,
+} from "./review";
 
 interface Env {
   ARTIFACTS: R2Bucket;
@@ -267,7 +281,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const publicVersionPath =
     /^\/api\/artifacts\/[^/]+\/version\/[^/]+$/.test(url.pathname) ||
     /^\/api\/artifacts\/[^/]+\/versions\/[^/]+$/.test(url.pathname) ||
-    /^\/api\/artifacts\/[^/]+\/manifest\/[^/]+(?:\/v\/[1-9]\d*)?$/.test(url.pathname);
+    /^\/api\/artifacts\/[^/]+\/manifest\/[^/]+(?:\/v\/[1-9]\d*)?$/.test(url.pathname) ||
+    isPublicReviewRequest(request, url.pathname);
 
   if (hostname === "page-bin.com" && url.pathname.startsWith("/api/") && !publicVersionPath) {
     return misdirected();
@@ -295,6 +310,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
     return routeUpload(request, env, url);
   }
+
+  const reviewResponse = await routeReviewRequest(request, env, url, hostname);
+
+  if (reviewResponse) return reviewResponse;
 
   const manifestMatch = /^\/api\/artifacts\/([^/]+)\/manifest\/([^/]+)(?:\/v\/([1-9]\d*))?$/.exec(
     url.pathname,
@@ -1296,7 +1315,7 @@ async function reissueArtifact(request: Request, env: Env, id: string): Promise<
     ...(encryptedToken ? { encryptedToken } : {}),
   };
 
-  if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
+  if (!(await writeMetadataThenSynchronizeReview(env, stored, nextMetadata, tokenHash))) {
     return conflict();
   }
 
@@ -1416,6 +1435,152 @@ async function artifactVersions(env: Env, id: string, token: string): Promise<Re
   });
 }
 
+function isPublicReviewRequest(request: Request, pathname: string): boolean {
+  if (request.method === "GET") {
+    return /^\/api\/artifacts\/[^/]+\/review\/[^/]+$/.test(pathname);
+  }
+
+  if (request.method === "POST") {
+    return /^\/api\/artifacts\/[^/]+\/review\/[^/]+\/comments$/.test(pathname);
+  }
+
+  if (request.method === "PATCH" || request.method === "DELETE") {
+    return /^\/api\/artifacts\/[^/]+\/review\/[^/]+\/comments\/[^/]+$/.test(pathname);
+  }
+
+  return (
+    request.method === "PUT" &&
+    /^\/api\/artifacts\/[^/]+\/review\/[^/]+\/decisions\/[^/]+$/.test(pathname)
+  );
+}
+
+async function routeReviewRequest(
+  request: Request,
+  env: Env,
+  url: URL,
+  hostname: string,
+): Promise<Response | null> {
+  const publisherMatch = /^\/api\/artifacts\/([^/]+)\/review$/.exec(url.pathname);
+  const resolveMatch = /^\/api\/artifacts\/([^/]+)\/review\/resolve$/.exec(url.pathname);
+
+  if (
+    (request.method === "GET" && publisherMatch?.[1]) ||
+    (request.method === "POST" && resolveMatch?.[1])
+  ) {
+    if (!(await isAuthorized(request, env))) {
+      return json({ error: "Unauthorized." }, 401);
+    }
+
+    const id = decodePathSegment((publisherMatch ?? resolveMatch)?.[1]);
+
+    if (!id || !isValidId(id)) return reviewNotFound();
+    const stored = await readStoredMetadata(env, id);
+
+    if (!stored || stored.metadata.deletedAt) return reviewNotFound();
+
+    const artifact = reviewArtifact(
+      stored.metadata,
+      async () => {
+        const current = await readStoredMetadata(env, id);
+
+        return (
+          current !== null &&
+          !current.metadata.deletedAt &&
+          current.metadata.tokenHash === stored.metadata.tokenHash
+        );
+      },
+      async () => artifactRetired(env, id),
+    );
+
+    return publisherMatch
+      ? getPublisherReview(env, artifact)
+      : resolvePublisherComments(request, env, artifact);
+  }
+
+  const viewerMatch =
+    /^\/api\/artifacts\/([^/]+)\/review\/([^/]+)(?:\/(comments|decisions)(?:\/([^/]+))?)?$/.exec(
+      url.pathname,
+    );
+
+  if (!viewerMatch) return null;
+
+  if (hostname === "api.page-bin.com") return misdirected();
+
+  const id = decodePathSegment(viewerMatch[1]);
+  const token = decodePathSegment(viewerMatch[2]);
+  const itemId = viewerMatch[4] ? decodePathSegment(viewerMatch[4]) : null;
+
+  if (!id || !token || (viewerMatch[4] && !itemId)) return reviewNotFound();
+  const metadata = await readAuthorizedMetadata(env, id, token);
+
+  if (!metadata) return reviewNotFound();
+
+  const artifact = reviewArtifact(
+    metadata,
+    async () => (await readAuthorizedMetadata(env, id, token)) !== null,
+    async () => artifactRetired(env, id),
+  );
+
+  if (request.method === "GET" && !viewerMatch[3]) {
+    return getViewerReview(env, artifact);
+  }
+
+  if (request.method === "POST" && viewerMatch[3] === "comments" && !itemId) {
+    return createViewerComment(request, env, artifact);
+  }
+
+  if (request.method === "PATCH" && viewerMatch[3] === "comments" && itemId) {
+    return patchViewerComment(request, env, artifact, itemId);
+  }
+
+  if (request.method === "DELETE" && viewerMatch[3] === "comments" && itemId) {
+    return deleteViewerComment(env, artifact, itemId);
+  }
+
+  if (request.method === "PUT" && viewerMatch[3] === "decisions" && itemId) {
+    return putViewerDecision(request, env, artifact, itemId);
+  }
+
+  return reviewNotFound();
+}
+
+function reviewArtifact(
+  metadata: ArtifactMetadata,
+  bindingCurrent: () => Promise<boolean>,
+  retired: () => Promise<boolean>,
+): ReviewArtifact {
+  return {
+    binding: metadata.tokenHash,
+    bindingCurrent,
+    id: metadata.id,
+    filename: metadata.filename,
+    title: metadata.attributes.title ?? metadata.filename,
+    retired,
+    version: artifactHead(metadata).version,
+    versions: metadata.versions.map((version) => version.version),
+  };
+}
+
+async function artifactRetired(env: Env, id: string): Promise<boolean> {
+  const stored = await readStoredMetadata(env, id);
+
+  return (
+    stored === null ||
+    Boolean(stored.metadata.deletedAt) ||
+    Boolean(stored.metadata.expiresAt && Date.now() >= Date.parse(stored.metadata.expiresAt))
+  );
+}
+
+function decodePathSegment(value: string | undefined): string | null {
+  if (!value) return null;
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 async function cleanupExpiredArtifacts(env: Env): Promise<void> {
   let cursor: string | undefined;
 
@@ -1432,6 +1597,8 @@ async function cleanupExpiredArtifacts(env: Env): Promise<void> {
       try {
         if (object.key.endsWith("/metadata.json")) {
           await cleanupExpiredArtifact(env, object.key);
+        } else if (isReviewObjectKey(object.key)) {
+          await cleanupRetiredReview(env, object.key);
         } else if (isArtifactContentKey(object.key)) {
           await cleanupOrphanedContent(env, object);
         }
@@ -1440,6 +1607,14 @@ async function cleanupExpiredArtifacts(env: Env): Promise<void> {
       }
     }
   } while (cursor);
+}
+
+async function cleanupRetiredReview(env: Env, key: string): Promise<void> {
+  const id = key.split("/").at(-2);
+
+  if (!id || reviewObjectKey(id) !== key) return;
+
+  if (await artifactRetired(env, id)) await env.ARTIFACTS.delete(key);
 }
 
 async function cleanupExpiredArtifact(env: Env, key: string): Promise<void> {
@@ -2674,6 +2849,34 @@ async function writeMetadataIfMatch(
   });
 
   return result !== null;
+}
+
+async function writeMetadataThenSynchronizeReview(
+  env: Env,
+  stored: StoredArtifactMetadata,
+  metadata: ArtifactMetadata,
+  nextBinding: string,
+): Promise<boolean> {
+  const written = await writeMetadataIfMatch(env, metadata.id, metadata, stored.etag);
+
+  if (!written) return false;
+
+  const bindingCurrent = async (): Promise<boolean> => {
+    const current = await readStoredMetadata(env, metadata.id);
+
+    return (
+      current !== null &&
+      !current.metadata.deletedAt &&
+      (!current.metadata.expiresAt || Date.now() < Date.parse(current.metadata.expiresAt)) &&
+      current.metadata.tokenHash === nextBinding
+    );
+  };
+
+  await synchronizeReviewBinding(env, metadata.id, nextBinding, bindingCurrent, async () =>
+    artifactRetired(env, metadata.id),
+  );
+
+  return bindingCurrent();
 }
 
 function tombstoneMetadata(metadata: ArtifactMetadata): ArtifactMetadata {

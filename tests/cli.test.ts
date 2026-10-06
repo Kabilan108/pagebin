@@ -558,6 +558,67 @@ describe("parseArgs", () => {
     ).toThrow("positive integer");
   });
 
+  test("parses review read, resolve, and reopen targets", () => {
+    expect(
+      parseArgs(["review", "abc1234567890123", "--json"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toEqual({
+      command: "review",
+      options: {
+        action: "show",
+        commentIds: [],
+        endpoint: "https://example.com",
+        filePath: null,
+        id: "abc1234567890123",
+        json: true,
+        receiptLookup: false,
+        reopen: false,
+        url: null,
+      },
+    });
+
+    expect(
+      parseArgs(
+        [
+          "review",
+          "resolve",
+          "https://page-bin.com/p/abc1234567890123/view-token",
+          "comment_one",
+          "comment-two",
+          "--reopen",
+        ],
+        {},
+      ),
+    ).toEqual({
+      command: "review",
+      options: {
+        action: "resolve",
+        commentIds: ["comment_one", "comment-two"],
+        endpoint: "https://api.page-bin.com",
+        filePath: null,
+        id: "abc1234567890123",
+        json: false,
+        receiptLookup: false,
+        reopen: true,
+        url: "https://page-bin.com/p/abc1234567890123/view-token",
+      },
+    });
+
+    expect(
+      parseArgs(["review", "plan.html"], { PAGEBIN_ENDPOINT: "https://example.com" }),
+    ).toMatchObject({
+      command: "review",
+      options: { action: "show", filePath: "plan.html", receiptLookup: true },
+    });
+
+    expect(() =>
+      parseArgs(["review", "resolve", "abc1234567890123"], {
+        PAGEBIN_ENDPOINT: "https://example.com",
+      }),
+    ).toThrow("at least one comment id");
+  });
+
   test("parses subcommand help without endpoint configuration", () => {
     const commands = [
       "publish",
@@ -568,6 +629,7 @@ describe("parseArgs", () => {
       "verify",
       "versions",
       "rollback",
+      "review",
       "receipts",
       "show",
       "delete",
@@ -613,6 +675,7 @@ describe("help command", () => {
       "verify",
       "versions",
       "rollback",
+      "review",
       "receipts",
       "show",
       "delete",
@@ -650,6 +713,11 @@ describe("skill command", () => {
     expect(result.stdout).toContain("pagebin publish /absolute/path/artifact.html --verify --json");
     expect(result.stdout).toContain("pagebin versions /absolute/path/artifact.html");
     expect(result.stdout).toContain("pagebin rollback /absolute/path/artifact.html <version>");
+    expect(result.stdout).toContain("pagebin review /absolute/path/artifact.html");
+    expect(result.stdout).toContain("After the user says they reviewed an artifact");
+    expect(result.stdout).toContain("Decisions without an answer");
+    expect(result.stdout).toContain("per-artifact origin");
+    expect(result.stdout).toContain("Cookies are third-party");
     expect(result.stdout).toContain("Give users the returned viewer `url`");
     expect(result.stdout).toContain("Never give users a `/raw/.../v/<n>/...` URL");
     expect(result.stdout).toContain("take a screenshot before deciding that the artifact is blank");
@@ -3335,6 +3403,196 @@ describe("runtime contract validation", () => {
       } finally {
         server.stop(true);
       }
+    }
+  });
+});
+
+describe("review commands", () => {
+  test("prints review Markdown and complete structured JSON", async () => {
+    const now = "2026-10-05T12:00:00.000Z";
+
+    const review = {
+      schemaVersion: 1,
+      comments: [
+        {
+          id: "open-comment",
+          anchor: { quote: "selected text", prefix: "before", suffix: "after", version: 1 },
+          body: "Clarify this point.",
+          status: "open",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "addressed-comment",
+          anchor: { quote: "old text", prefix: "", suffix: "", version: 1 },
+          body: "Already fixed.",
+          status: "addressed",
+          createdAt: now,
+          updatedAt: now,
+          addressedAt: now,
+        },
+      ],
+      decisions: [
+        {
+          id: "theme",
+          question: "Which theme?",
+          controls: [{ name: "theme", type: "select", default: "system" }],
+          values: { theme: "dark" },
+          interacted: true,
+          answeredVersion: 1,
+          updatedAt: now,
+        },
+        {
+          id: "density",
+          question: "Which density?",
+          controls: [{ name: "density", type: "select", default: "comfortable" }],
+          values: { density: "comfortable" },
+          interacted: false,
+          answeredVersion: 2,
+          updatedAt: now,
+        },
+      ],
+      updatedAt: now,
+    };
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.method).toBe("GET");
+        expect(new URL(request.url).pathname).toBe("/api/artifacts/artifact-id-1234/review");
+        expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+
+        return Response.json({
+          id: "artifact-id-1234",
+          version: 2,
+          title: "Review plan",
+          filename: "plan.html",
+          review,
+        });
+      },
+    });
+
+    const statePath = join(tmpdir(), `pagebin-review-read-${Date.now()}.json`);
+    const env = { PAGEBIN_PUBLISH_TOKEN: "publish-token", PAGEBIN_STATE_PATH: statePath };
+
+    try {
+      const markdown = await runPagebin(
+        ["review", "artifact-id-1234", "--endpoint", server.url.origin],
+        env,
+      );
+
+      expect(markdown.exitCode).toBe(0);
+      expect(markdown.stderr).toBe("");
+      expect(markdown.stdout).toContain("## Review: Review plan (plan.html, v2)");
+      expect(markdown.stdout).toContain("theme → dark");
+      expect(markdown.stdout).not.toContain("density →");
+      expect(markdown.stdout).toContain('> "selected text"');
+      expect(markdown.stdout).toContain("Clarify this point.");
+      expect(markdown.stdout).not.toContain("Already fixed.");
+      expect(markdown.stdout).toContain("1 addressed comment omitted");
+
+      const structured = await runPagebin(
+        ["review", "artifact-id-1234", "--json", "--endpoint", server.url.origin],
+        env,
+      );
+
+      expect(structured.exitCode).toBe(0);
+      const payload = JSON.parse(structured.stdout);
+      expect(payload).toMatchObject({
+        schemaVersion: 1,
+        id: "artifact-id-1234",
+        version: 2,
+        title: "Review plan",
+        filename: "plan.html",
+        review: { comments: [{ id: "open-comment" }, { id: "addressed-comment" }] },
+      });
+      expect(payload.review.decisions).toHaveLength(2);
+      expect(payload.markdown).toBe(markdown.stdout);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("resolves and reopens comments through the publisher route", async () => {
+    const now = "2026-10-05T12:00:00.000Z";
+    const bodies: Array<{ commentIds: string[]; status?: string }> = [];
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("POST");
+        expect(new URL(request.url).pathname).toBe(
+          "/api/artifacts/artifact-id-1234/review/resolve",
+        );
+        expect(request.headers.get("Authorization")).toBe("Bearer publish-token");
+        expect(request.headers.get("Content-Type")).toBe("application/json");
+        expect(Number(request.headers.get("Content-Length"))).toBeGreaterThan(0);
+
+        const body = (await request.json()) as { commentIds: string[]; status?: string };
+        bodies.push(body);
+        const status = body.status ?? "addressed";
+
+        return Response.json({
+          comments: body.commentIds.map((id) => ({
+            id,
+            anchor: { quote: "selected text", prefix: "", suffix: "", version: 1 },
+            body: "Fix this.",
+            status,
+            createdAt: now,
+            updatedAt: now,
+            ...(status === "addressed" ? { addressedAt: now } : {}),
+          })),
+        });
+      },
+    });
+
+    const env = {
+      PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      PAGEBIN_STATE_PATH: join(tmpdir(), `pagebin-review-resolve-${Date.now()}.json`),
+    };
+
+    try {
+      const resolved = await runPagebin(
+        [
+          "review",
+          "resolve",
+          "artifact-id-1234",
+          "comment-one",
+          "comment-two",
+          "--endpoint",
+          server.url.origin,
+        ],
+        env,
+      );
+
+      expect(resolved.exitCode).toBe(0);
+      expect(resolved.stdout).toBe("Addressed 2 comments.\n");
+
+      const reopened = await runPagebin(
+        [
+          "review",
+          "resolve",
+          "artifact-id-1234",
+          "comment-one",
+          "--reopen",
+          "--json",
+          "--endpoint",
+          server.url.origin,
+        ],
+        env,
+      );
+
+      expect(reopened.exitCode).toBe(0);
+      expect(JSON.parse(reopened.stdout)).toMatchObject({
+        schemaVersion: 1,
+        comments: [{ id: "comment-one", status: "open" }],
+      });
+      expect(bodies).toEqual([
+        { commentIds: ["comment-one", "comment-two"] },
+        { commentIds: ["comment-one"], status: "open" },
+      ]);
+    } finally {
+      server.stop(true);
     }
   });
 });

@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import worker from "../worker/index";
+import { type ReviewRecord, REVIEW_LIMITS } from "../shared/review";
 
 interface StoredObject {
   bytes: ArrayBuffer;
+  customMetadata?: Record<string, string>;
   etag: string;
   uploaded: Date;
 }
@@ -13,8 +15,11 @@ class MemoryR2Bucket {
   failHtmlDelete = false;
   failMetadataPut = false;
   invalidateNextConditionalPut = false;
+  invalidateConditionalPuts = 0;
   maxMetadataGets = 0;
   metadataGetDelayMs = 0;
+  pauseAfterNextReviewPut: { release: Promise<void>; started: () => void } | null = null;
+  pauseNextReviewGet: { release: Promise<void>; started: () => void } | null = null;
   listPageSize = Number.POSITIVE_INFINITY;
   listRequestCount = 0;
   private activeMetadataGets = 0;
@@ -23,14 +28,23 @@ class MemoryR2Bucket {
   async put(
     key: string,
     value: string | ArrayBuffer | ArrayBufferView | ReadableStream,
-    options: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string }; sha256?: string } = {},
+    options: {
+      customMetadata?: Record<string, string>;
+      onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string };
+      sha256?: string;
+    } = {},
   ): Promise<{ etag: string } | null> {
     if (this.failMetadataPut && key.endsWith("/metadata.json")) {
       throw new Error("metadata put failed");
     }
 
-    if (this.invalidateNextConditionalPut && options.onlyIf?.etagMatches) {
+    if (
+      (this.invalidateNextConditionalPut || this.invalidateConditionalPuts > 0) &&
+      options.onlyIf?.etagMatches
+    ) {
       this.invalidateNextConditionalPut = false;
+
+      if (this.invalidateConditionalPuts > 0) this.invalidateConditionalPuts -= 1;
       const current = this.objects.get(key);
 
       if (current) {
@@ -58,6 +72,25 @@ class MemoryR2Bucket {
     if (typeof value === "string") {
       this.objects.set(key, {
         bytes: copyArrayBuffer(new TextEncoder().encode(value)),
+        ...(options.customMetadata ? { customMetadata: options.customMetadata } : {}),
+        etag,
+        uploaded: new Date(),
+      });
+
+      if (key.endsWith("/review.json") && this.pauseAfterNextReviewPut) {
+        const pause = this.pauseAfterNextReviewPut;
+        this.pauseAfterNextReviewPut = null;
+        pause.started();
+        await pause.release;
+      }
+
+      return { etag };
+    }
+
+    if (ArrayBuffer.isView(value)) {
+      this.objects.set(key, {
+        bytes: copyArrayBuffer(value),
+        ...(options.customMetadata ? { customMetadata: options.customMetadata } : {}),
         etag,
         uploaded: new Date(),
       });
@@ -65,13 +98,12 @@ class MemoryR2Bucket {
       return { etag };
     }
 
-    if (ArrayBuffer.isView(value)) {
-      this.objects.set(key, { bytes: copyArrayBuffer(value), etag, uploaded: new Date() });
-
-      return { etag };
-    }
-
-    this.objects.set(key, { bytes: value, etag, uploaded: new Date() });
+    this.objects.set(key, {
+      bytes: value,
+      ...(options.customMetadata ? { customMetadata: options.customMetadata } : {}),
+      etag,
+      uploaded: new Date(),
+    });
 
     return { etag };
   }
@@ -92,7 +124,15 @@ class MemoryR2Bucket {
     text: () => Promise<string>;
     arrayBuffer: () => Promise<ArrayBuffer>;
     etag: string;
+    customMetadata?: Record<string, string>;
   } | null> {
+    if (key.endsWith("/review.json") && this.pauseNextReviewGet) {
+      const pause = this.pauseNextReviewGet;
+      this.pauseNextReviewGet = null;
+      pause.started();
+      await pause.release;
+    }
+
     const tracksConcurrency = key.endsWith("/metadata.json");
 
     if (tracksConcurrency) {
@@ -121,6 +161,7 @@ class MemoryR2Bucket {
           ? object.bytes.slice(options.range.offset, options.range.offset + options.range.length)
           : object.bytes,
       ).body,
+      ...(object.customMetadata ? { customMetadata: object.customMetadata } : {}),
       etag: object.etag,
       text: async () => new TextDecoder().decode(object.bytes),
     };
@@ -1573,6 +1614,7 @@ describe("worker", () => {
         )
       ).status,
     ).toBe(421);
+
     expect(
       (
         await worker.fetch(
@@ -2918,3 +2960,887 @@ describe("document frames", () => {
     expect(frameSrc(viewerHtml)).toBe(path);
   });
 });
+
+describe("review API", () => {
+  test("binds reader routes to the artifact capability and keeps origin roles separate", async () => {
+    const env = createEnv({
+      PAGEBIN_PUBLIC_ORIGIN: "https://page-bin.com",
+      PAGEBIN_USERCONTENT_ORIGIN: "https://{label}.pagebin-usercontent.com",
+    });
+
+    const first = await publishFixture(env);
+    const second = await publishFixture(env);
+    const firstToken = viewerToken(first.url);
+    const secondToken = viewerToken(second.url);
+    const path = `/api/artifacts/${first.id}/review/${firstToken}`;
+
+    const response = await worker.fetch(new Request(`https://page-bin.com${path}`), env as never);
+    const payload = (await response.json()) as { review: ReviewRecord; version: number };
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      review: { schemaVersion: 1, comments: [], decisions: [], updatedAt: null },
+      version: 1,
+    });
+    expect(response.headers.get("Cache-Control")).toContain("no-store");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+
+    for (const unauthorizedPath of [
+      `/api/artifacts/${first.id}/review/wrong-token`,
+      `/api/artifacts/${second.id}/review/${firstToken}`,
+      `/api/artifacts/${first.id}/review/${secondToken}`,
+    ]) {
+      const denied = await worker.fetch(
+        new Request(`https://page-bin.com${unauthorizedPath}`),
+        env as never,
+      );
+
+      expect(denied.status).toBe(404);
+      expect(await denied.json()).toEqual({ error: "Artifact not found." });
+    }
+
+    expect(
+      (await worker.fetch(new Request(`https://api.page-bin.com${path}`), env as never)).status,
+    ).toBe(421);
+
+    expect(
+      (
+        await worker.fetch(
+          new Request(`https://anything.pagebin-usercontent.com${path}`),
+          env as never,
+        )
+      ).status,
+    ).toBe(404);
+
+    expect(
+      (
+        await worker.fetch(
+          new Request(`https://page-bin.com/api/artifacts/${first.id}/review`, {
+            headers: { Authorization: "Bearer publish-secret" },
+          }),
+          env as never,
+        )
+      ).status,
+    ).toBe(421);
+
+    expect(
+      (
+        await worker.fetch(
+          new Request(`https://pagebin.test/api/artifacts/${first.id}/review`),
+          env as never,
+        )
+      ).status,
+    ).toBe(401);
+  });
+
+  test("creates, edits, reopens, deletes, and validates reader review entries", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+    const anchor = { quote: "chosen text", prefix: "before ", suffix: " after", version: 1 };
+
+    const created = await reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      {
+        anchor,
+        body: "Please explain this.",
+      },
+      env,
+    );
+
+    const createdPayload = (await created.json()) as { comment: { id: string; status: string } };
+
+    expect(created.status).toBe(201);
+    expect(createdPayload.comment.id).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(createdPayload.comment.status).toBe("open");
+
+    const edited = await reviewJsonRequest(
+      `${base}/comments/${createdPayload.comment.id}`,
+      "PATCH",
+      { body: "Please explain this edge case." },
+      env,
+    );
+
+    expect(edited.status).toBe(200);
+    expect(await edited.json()).toMatchObject({
+      comment: { id: createdPayload.comment.id, body: "Please explain this edge case." },
+    });
+
+    const addressedByReader = await reviewJsonRequest(
+      `${base}/comments/${createdPayload.comment.id}`,
+      "PATCH",
+      { status: "addressed" },
+      env,
+    );
+
+    expect(addressedByReader.status).toBe(400);
+
+    const decision = {
+      id: "theme",
+      question: "Which theme?",
+      controls: [
+        {
+          name: "theme",
+          type: "select",
+          default: "system",
+          options: [
+            { value: "system", label: "System" },
+            { value: "dark", label: "Dark" },
+          ],
+        },
+        { name: "theme:note", type: "text", default: null },
+      ],
+      values: { theme: "dark", "theme:note": "Higher contrast" },
+      interacted: true,
+      answeredVersion: 1,
+    };
+
+    const putDecision = await reviewJsonRequest(`${base}/decisions/theme`, "PUT", decision, env);
+
+    expect(putDecision.status).toBe(200);
+    expect(await putDecision.json()).toMatchObject({
+      decision: { id: "theme", values: { theme: "dark" }, answeredVersion: 1 },
+    });
+
+    const badVersion = await reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      {
+        anchor: { ...anchor, version: 99 },
+        body: "No such version",
+      },
+      env,
+    );
+
+    expect(badVersion.status).toBe(400);
+
+    for (const oversized of [
+      { anchor, body: "b".repeat(REVIEW_LIMITS.commentBody + 1) },
+      {
+        anchor: { ...anchor, quote: "q".repeat(REVIEW_LIMITS.quote + 1) },
+        body: "body",
+      },
+      {
+        anchor: { ...anchor, prefix: "p".repeat(REVIEW_LIMITS.anchorContext + 1) },
+        body: "body",
+      },
+      {
+        anchor: { ...anchor, suffix: "s".repeat(REVIEW_LIMITS.anchorContext + 1) },
+        body: "body",
+      },
+    ]) {
+      expect((await reviewJsonRequest(`${base}/comments`, "POST", oversized, env)).status).toBe(
+        400,
+      );
+    }
+
+    const unknownControl = await reviewJsonRequest(
+      `${base}/decisions/theme`,
+      "PUT",
+      {
+        ...decision,
+        controls: [{ name: "theme", type: "button", default: null }],
+        values: { theme: null },
+      },
+      env,
+    );
+
+    expect(unknownControl.status).toBe(400);
+
+    const wrongName = await reviewJsonRequest(
+      `${base}/decisions/theme`,
+      "PUT",
+      {
+        ...decision,
+        controls: [{ name: "another", type: "text", default: null }],
+        values: { another: null },
+      },
+      env,
+    );
+
+    expect(wrongName.status).toBe(400);
+
+    const missingValue = await reviewJsonRequest(
+      `${base}/decisions/theme`,
+      "PUT",
+      { ...decision, values: { theme: "dark" } },
+      env,
+    );
+
+    expect(missingValue.status).toBe(400);
+
+    const oversizedDecision = await reviewJsonRequest(
+      `${base}/decisions/theme`,
+      "PUT",
+      {
+        ...decision,
+        question: "q".repeat(REVIEW_LIMITS.decisionBytes),
+      },
+      env,
+    );
+
+    expect(oversizedDecision.status).toBe(413);
+
+    const missingLength = await worker.fetch(
+      new Request(`${base}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ anchor, body: "missing length" }),
+      }),
+      env as never,
+    );
+
+    expect(missingLength.status).toBe(413);
+
+    const wrongContentType = await reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      { anchor, body: "wrong type" },
+      env,
+      "text/plain",
+    );
+
+    expect(wrongContentType.status).toBe(400);
+
+    const removed = await worker.fetch(
+      new Request(`${base}/comments/${createdPayload.comment.id}`, { method: "DELETE" }),
+      env as never,
+    );
+
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ deleted: true });
+  });
+
+  test("resolves comments atomically and retries review CAS conflicts", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env, { attributes: { title: "Review plan" } });
+    const token = viewerToken(published.url);
+    const readerBase = `https://pagebin.test/api/artifacts/${published.id}/review/${token}`;
+    const ids: string[] = [];
+
+    for (const quote of ["first", "second"]) {
+      const response = await reviewJsonRequest(
+        `${readerBase}/comments`,
+        "POST",
+        {
+          anchor: { quote, prefix: "", suffix: "", version: 1 },
+          body: `Comment on ${quote}`,
+        },
+        env,
+      );
+
+      ids.push(((await response.json()) as { comment: { id: string } }).comment.id);
+    }
+
+    env.ARTIFACTS.invalidateNextConditionalPut = true;
+
+    const retried = await reviewJsonRequest(
+      `${readerBase}/comments/${ids[0]}`,
+      "PATCH",
+      { body: "Updated after one conflict" },
+      env,
+    );
+
+    expect(retried.status).toBe(200);
+
+    env.ARTIFACTS.invalidateConditionalPuts = 4;
+
+    const conflicted = await reviewJsonRequest(
+      `${readerBase}/comments/${ids[0]}`,
+      "PATCH",
+      { body: "Never committed" },
+      env,
+    );
+
+    expect(conflicted.status).toBe(409);
+
+    const resolveUrl = `https://pagebin.test/api/artifacts/${published.id}/review/resolve`;
+
+    const missing = await reviewJsonRequest(
+      resolveUrl,
+      "POST",
+      { commentIds: [ids[0], "unknown-comment"] },
+      env,
+      "application/json",
+      { Authorization: "Bearer publish-secret" },
+    );
+
+    expect(missing.status).toBe(404);
+    expect((await missing.json()) as { error: string }).toMatchObject({
+      error: expect.stringContaining("unknown-comment"),
+    });
+
+    const beforeResolve = await publisherReview(env, published.id);
+    expect(beforeResolve.review.comments.every((comment) => comment.status === "open")).toBe(true);
+
+    const resolved = await reviewJsonRequest(
+      resolveUrl,
+      "POST",
+      { commentIds: ids },
+      env,
+      "application/json",
+      { Authorization: "Bearer publish-secret" },
+    );
+
+    expect(resolved.status).toBe(200);
+    expect(
+      ((await resolved.json()) as { comments: Array<{ status: string; addressedAt?: string }> })
+        .comments,
+    ).toEqual([
+      expect.objectContaining({ status: "addressed", addressedAt: expect.any(String) }),
+      expect.objectContaining({ status: "addressed", addressedAt: expect.any(String) }),
+    ]);
+
+    const reopened = await reviewJsonRequest(
+      resolveUrl,
+      "POST",
+      { commentIds: [ids[0]], status: "open" },
+      env,
+      "application/json",
+      { Authorization: "Bearer publish-secret" },
+    );
+
+    expect(reopened.status).toBe(200);
+    expect(await reopened.json()).toMatchObject({
+      comments: [{ id: ids[0], status: "open" }],
+    });
+
+    const publisher = await publisherReview(env, published.id);
+    expect(publisher).toMatchObject({
+      id: published.id,
+      version: 1,
+      title: "Review plan",
+      filename: "plan.html",
+    });
+    expect(publisher.review.comments[0]?.body).toBe("Updated after one conflict");
+  });
+
+  test("rejects in-flight old-token writes across reissue and deletion", async () => {
+    const env = createEnv();
+    const reissuedArtifact = await publishFixture(env);
+    const oldBase = `https://pagebin.test/api/artifacts/${reissuedArtifact.id}/review/${viewerToken(reissuedArtifact.url)}`;
+
+    const created = await reviewJsonRequest(
+      `${oldBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Original",
+      },
+      env,
+    );
+
+    const commentId = ((await created.json()) as { comment: { id: string } }).comment.id;
+    const reissuePause = pauseReviewGet(env.ARTIFACTS);
+
+    const oldWrite = reviewJsonRequest(
+      `${oldBase}/comments/${commentId}`,
+      "PATCH",
+      { body: "Stale writer" },
+      env,
+    );
+
+    await reissuePause.started;
+
+    const reissue = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${reissuedArtifact.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(reissue.status).toBe(200);
+    reissuePause.release();
+    expect((await oldWrite).status).toBe(404);
+    expect((await publisherReview(env, reissuedArtifact.id)).review.comments[0]?.body).toBe(
+      "Original",
+    );
+
+    const postPutArtifact = await publishFixture(env);
+    const postPutBase = `https://pagebin.test/api/artifacts/${postPutArtifact.id}/review/${viewerToken(postPutArtifact.url)}`;
+
+    const postPutComment = await reviewJsonRequest(
+      `${postPutBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Before race",
+      },
+      env,
+    );
+
+    const postPutCommentId = ((await postPutComment.json()) as { comment: { id: string } }).comment
+      .id;
+
+    const postPutPause = pauseReviewPut(env.ARTIFACTS);
+
+    const committedWrite = reviewJsonRequest(
+      `${postPutBase}/comments/${postPutCommentId}`,
+      "PATCH",
+      { body: "Committed before reissue" },
+      env,
+    );
+
+    await postPutPause.started;
+
+    const postPutReissue = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${postPutArtifact.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(postPutReissue.status).toBe(200);
+    postPutPause.release();
+    expect((await committedWrite).status).toBe(404);
+    expect((await publisherReview(env, postPutArtifact.id)).review.comments[0]?.body).toBe(
+      "Committed before reissue",
+    );
+
+    const deletedArtifact = await publishFixture(env);
+    const deletedBase = `https://pagebin.test/api/artifacts/${deletedArtifact.id}/review/${viewerToken(deletedArtifact.url)}`;
+
+    const deletedComment = await reviewJsonRequest(
+      `${deletedBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Delete me",
+      },
+      env,
+    );
+
+    const deletedCommentId = ((await deletedComment.json()) as { comment: { id: string } }).comment
+      .id;
+
+    const deletePause = pauseReviewGet(env.ARTIFACTS);
+
+    const deletedWrite = reviewJsonRequest(
+      `${deletedBase}/comments/${deletedCommentId}`,
+      "PATCH",
+      { body: "Orphan attempt" },
+      env,
+    );
+
+    await deletePause.started;
+
+    const deletion = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${deletedArtifact.id}`, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(deletion.status).toBe(200);
+    deletePause.release();
+    expect((await deletedWrite).status).toBe(404);
+    expect(await env.ARTIFACTS.get(`artifacts/${deletedArtifact.id}/review.json`)).toBeNull();
+  });
+
+  test("does not recreate a review when deletion overtakes reissue synchronization", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const reviewBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    expect(
+      (
+        await reviewJsonRequest(
+          `${reviewBase}/comments`,
+          "POST",
+          {
+            anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+            body: "Delete during reissue",
+          },
+          env,
+        )
+      ).status,
+    ).toBe(201);
+
+    const synchronizationPause = pauseReviewGet(env.ARTIFACTS);
+
+    const reissue = worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    await synchronizationPause.started;
+
+    const deletion = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(deletion.status).toBe(200);
+    synchronizationPause.release();
+    expect((await reissue).status).toBe(409);
+    expect(await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`)).toBeNull();
+    expect(await env.ARTIFACTS.get(`artifacts/${published.id}/review.json`)).toBeNull();
+  });
+
+  test("repairs review binding after an interrupted metadata-first reissue", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const oldBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    const created = await reviewJsonRequest(
+      `${oldBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Before interruption",
+      },
+      env,
+    );
+
+    const commentId = ((await created.json()) as { comment: { id: string } }).comment.id;
+    const newToken = "replacement-viewer-token";
+    const metadataKey = `artifacts/${published.id}/metadata.json`;
+    const metadataObject = await env.ARTIFACTS.get(metadataKey);
+    const metadata = JSON.parse((await metadataObject?.text()) ?? "{}");
+    metadata.tokenHash = await sha256ForTest(newToken);
+    metadata.revision += 1;
+    await env.ARTIFACTS.put(metadataKey, JSON.stringify(metadata));
+
+    const repaired = await reviewJsonRequest(
+      `https://pagebin.test/api/artifacts/${published.id}/review/${newToken}/comments/${commentId}`,
+      "PATCH",
+      { body: "Recovered" },
+      env,
+    );
+
+    expect(repaired.status).toBe(200);
+    expect((await publisherReview(env, published.id)).review.comments[0]?.body).toBe("Recovered");
+
+    const reissue = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(reissue.status).toBe(200);
+    expect((await publisherReview(env, published.id)).review.comments[0]?.body).toBe("Recovered");
+  });
+
+  test("enforces comment count and total review size limits", async () => {
+    const countEnv = createEnv();
+    const countArtifact = await publishFixture(countEnv);
+    const now = new Date().toISOString();
+
+    const comments = Array.from({ length: REVIEW_LIMITS.comments }, (_, index) => ({
+      id: `comment-${index}`,
+      anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+      body: "body",
+      status: "open" as const,
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    await countEnv.ARTIFACTS.put(
+      `artifacts/${countArtifact.id}/review.json`,
+      JSON.stringify({ schemaVersion: 1, comments, decisions: [], updatedAt: now }),
+    );
+
+    const countResponse = await reviewJsonRequest(
+      `https://pagebin.test/api/artifacts/${countArtifact.id}/review/${viewerToken(countArtifact.url)}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "one too many",
+      },
+      countEnv,
+    );
+
+    expect(countResponse.status).toBe(413);
+
+    const decisions = Array.from({ length: REVIEW_LIMITS.decisions }, (_, index) => ({
+      id: `decision-${index}`,
+      question: "Question?",
+      controls: [{ name: `decision-${index}`, type: "text" as const, default: null }],
+      values: { [`decision-${index}`]: null },
+      interacted: false,
+      answeredVersion: 1,
+      updatedAt: now,
+    }));
+
+    await countEnv.ARTIFACTS.put(
+      `artifacts/${countArtifact.id}/review.json`,
+      JSON.stringify({ schemaVersion: 1, comments: [], decisions, updatedAt: now }),
+    );
+
+    const decisionCountResponse = await reviewJsonRequest(
+      `https://pagebin.test/api/artifacts/${countArtifact.id}/review/${viewerToken(countArtifact.url)}/decisions/extra`,
+      "PUT",
+      {
+        id: "extra",
+        question: "One too many?",
+        controls: [{ name: "extra", type: "text", default: null }],
+        values: { extra: null },
+        interacted: false,
+        answeredVersion: 1,
+      },
+      countEnv,
+    );
+
+    expect(decisionCountResponse.status).toBe(413);
+
+    const sizeEnv = createEnv();
+    const sizeArtifact = await publishFixture(sizeEnv);
+
+    let saturated: ReviewRecord = {
+      schemaVersion: 1,
+      comments: [],
+      decisions: [],
+      updatedAt: now,
+    };
+
+    for (let index = 0; index < REVIEW_LIMITS.comments; index += 1) {
+      const candidate: ReviewRecord = {
+        ...saturated,
+        comments: [
+          ...saturated.comments,
+          {
+            id: `large-${index}`,
+            anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+            body: "x".repeat(REVIEW_LIMITS.commentBody),
+            status: "open",
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      };
+
+      if (
+        new TextEncoder().encode(JSON.stringify(candidate)).byteLength > REVIEW_LIMITS.recordBytes
+      ) {
+        break;
+      }
+
+      saturated = candidate;
+    }
+
+    expect(saturated.comments.length).toBeGreaterThan(1);
+    await sizeEnv.ARTIFACTS.put(
+      `artifacts/${sizeArtifact.id}/review.json`,
+      JSON.stringify(saturated),
+    );
+
+    const sizeResponse = await reviewJsonRequest(
+      `https://pagebin.test/api/artifacts/${sizeArtifact.id}/review/${viewerToken(sizeArtifact.url)}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "x".repeat(REVIEW_LIMITS.commentBody),
+      },
+      sizeEnv,
+    );
+
+    expect(sizeResponse.status).toBe(413);
+  });
+
+  test("keeps reviews across reissue and sweep, then removes them on delete and expiry", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const reviewKey = `artifacts/${published.id}/review.json`;
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    await reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Persist me",
+      },
+      env,
+    );
+
+    const reissue = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
+        method: "POST",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(reissue.status).toBe(200);
+    const reissued = (await reissue.json()) as { url: string };
+
+    expect((await worker.fetch(new Request(base), env as never)).status).toBe(404);
+
+    const reissuedReview = await worker.fetch(
+      new Request(
+        `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(reissued.url)}`,
+      ),
+      env as never,
+    );
+
+    expect(reissuedReview.status).toBe(200);
+    expect((await reissuedReview.json()) as { review: ReviewRecord }).toMatchObject({
+      review: { comments: [{ body: "Persist me" }] },
+    });
+    expect((await publisherReview(env, published.id)).review.comments).toHaveLength(1);
+
+    const reviewObject = env.ARTIFACTS.objects.get(reviewKey);
+
+    if (reviewObject) reviewObject.uploaded = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    expect(await env.ARTIFACTS.get(reviewKey)).not.toBeNull();
+
+    const retiredReviewKey = "artifacts/retiredreview123/review.json";
+
+    await env.ARTIFACTS.put(
+      retiredReviewKey,
+      JSON.stringify({ schemaVersion: 1, comments: [], decisions: [], updatedAt: null }),
+    );
+    await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    expect(await env.ARTIFACTS.get(retiredReviewKey)).toBeNull();
+
+    const deleted = await worker.fetch(
+      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer publish-secret" },
+      }),
+      env as never,
+    );
+
+    expect(deleted.status).toBe(200);
+    expect(await env.ARTIFACTS.get(reviewKey)).toBeNull();
+
+    const expiring = await publishFixture(env);
+    const expiringKey = `artifacts/${expiring.id}/review.json`;
+    const expiringBase = `https://pagebin.test/api/artifacts/${expiring.id}/review/${viewerToken(expiring.url)}`;
+
+    await reviewJsonRequest(
+      `${expiringBase}/comments`,
+      "POST",
+      {
+        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
+        body: "Expire me",
+      },
+      env,
+    );
+
+    const metadataKey = `artifacts/${expiring.id}/metadata.json`;
+    const metadataObject = await env.ARTIFACTS.get(metadataKey);
+    const metadata = JSON.parse((await metadataObject?.text()) ?? "{}");
+    metadata.expiresAt = "2020-01-01T00:00:00.000Z";
+    await env.ARTIFACTS.put(metadataKey, JSON.stringify(metadata));
+
+    const expiredViewer = await worker.fetch(new Request(expiringBase), env as never);
+    expect(expiredViewer.status).toBe(404);
+    expect(await expiredViewer.json()).toEqual({ error: "Artifact not found." });
+
+    await worker.scheduled({} as ScheduledController, env as never, {} as ExecutionContext);
+    expect(await env.ARTIFACTS.get(expiringKey)).toBeNull();
+  });
+});
+
+async function reviewJsonRequest(
+  url: string,
+  method: "POST" | "PATCH" | "PUT",
+  payload: ReviewRequestPayload,
+  env: TestEnv,
+  contentType = "application/json",
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  const body = JSON.stringify(payload);
+
+  return worker.fetch(
+    new Request(url, {
+      method,
+      headers: {
+        ...headers,
+        "Content-Length": String(new TextEncoder().encode(body).byteLength),
+        "Content-Type": contentType,
+      },
+      body,
+    }),
+    env as never,
+  );
+}
+
+function viewerToken(url: string): string {
+  return url.slice(url.lastIndexOf("/") + 1);
+}
+
+interface ReviewGetPause {
+  release: () => void;
+  started: Promise<void>;
+}
+
+type ReviewRequestPayload =
+  | boolean
+  | null
+  | number
+  | string
+  | ReviewRequestPayload[]
+  | { [key: string]: ReviewRequestPayload };
+
+function pauseReviewGet(bucket: MemoryR2Bucket): ReviewGetPause {
+  let release: () => void = () => {};
+
+  let started: () => void = () => {};
+
+  const releasePromise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const startedPromise = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+
+  bucket.pauseNextReviewGet = { release: releasePromise, started };
+
+  return { release, started: startedPromise };
+}
+
+function pauseReviewPut(bucket: MemoryR2Bucket): ReviewGetPause {
+  let release: () => void = () => {};
+
+  let started: () => void = () => {};
+
+  const releasePromise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const startedPromise = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+
+  bucket.pauseAfterNextReviewPut = { release: releasePromise, started };
+
+  return { release, started: startedPromise };
+}
+
+async function publisherReview(
+  env: TestEnv,
+  id: string,
+): Promise<{
+  id: string;
+  version: number;
+  title: string;
+  filename: string;
+  review: ReviewRecord;
+}> {
+  const response = await worker.fetch(
+    new Request(`https://pagebin.test/api/artifacts/${id}/review`, {
+      headers: { Authorization: "Bearer publish-secret" },
+    }),
+    env as never,
+  );
+
+  expect(response.status).toBe(200);
+
+  return response.json();
+}

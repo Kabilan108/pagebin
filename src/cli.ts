@@ -27,10 +27,13 @@ import {
   parseArtifactDetailResponse,
   parseManifestResponse,
   parseReceiptStore,
+  parseReviewResponse,
+  parseResolveReviewResponse,
 } from "./contracts";
 
 import { prepareBundle, sendBundle, verifyBundle, type LocalBundle } from "./file-upload";
 import { FILE_LIMIT, filePathUrl } from "../shared/content";
+import { formatReviewMarkdown, type DecisionValue, type ReviewDecision } from "../shared/review";
 
 import packageJson from "../package.json" with { type: "json" };
 
@@ -160,6 +163,12 @@ interface RollbackOptions extends VersionHistoryOptions {
   version: number;
 }
 
+interface ReviewOptions extends VersionHistoryOptions {
+  action: "show" | "resolve";
+  commentIds: string[];
+  reopen: boolean;
+}
+
 interface HelpOptions {
   topic: HelpTopic | null;
 }
@@ -189,6 +198,7 @@ type ParsedCommand =
   | { command: "verify"; options: VerifyOptions }
   | { command: "versions"; options: VersionHistoryOptions }
   | { command: "rollback"; options: RollbackOptions }
+  | { command: "review"; options: ReviewOptions }
   | { command: "receipts"; options: ReceiptListOptions }
   | { command: "show"; options: ShowOptions }
   | { command: "help"; options: HelpOptions }
@@ -396,6 +406,13 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     };
   }
 
+  if (command === "review") {
+    return {
+      command,
+      options: parseReviewOptions(rest, mergedEnv),
+    };
+  }
+
   throw new CliError(`Unknown command: ${command}`);
 }
 
@@ -438,6 +455,10 @@ async function main(): Promise<void> {
         return;
       case "rollback":
         await rollbackArtifact(parsed.options);
+
+        return;
+      case "review":
+        await reviewArtifact(parsed.options);
 
         return;
       case "receipts":
@@ -1086,6 +1107,75 @@ function parseRollbackOptions(args: string[], env: NodeJS.ProcessEnv): RollbackO
   return {
     ...parseVersionHistoryTarget(values[0], args, env, json),
     version,
+  };
+}
+
+function parseReviewOptions(args: string[], env: NodeJS.ProcessEnv): ReviewOptions {
+  const resolves = args[0] === "resolve";
+  const commandArgs = resolves ? args.slice(1) : args;
+  const values: string[] = [];
+  let json = false;
+  let reopen = false;
+
+  for (let index = 0; index < commandArgs.length; index += 1) {
+    const arg = commandArgs[index];
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "--reopen") {
+      reopen = true;
+      continue;
+    }
+
+    if (arg === "--endpoint") {
+      index += 1;
+      requireValue(commandArgs[index], "--endpoint");
+      continue;
+    }
+
+    if (arg?.startsWith("-") && !isArtifactId(arg)) {
+      throw new CliError(`Unknown option for review: ${arg}`);
+    }
+
+    values.push(arg ?? "");
+  }
+
+  if (!resolves) {
+    if (reopen) throw new CliError("--reopen is only valid with pagebin review resolve.");
+
+    if (values.length !== 1 || !values[0]) {
+      throw new CliError("review requires one artifact ID, viewer URL, or local file path.");
+    }
+
+    return {
+      ...parseVersionHistoryTarget(values[0], args, env, json),
+      action: "show",
+      commentIds: [],
+      reopen: false,
+    };
+  }
+
+  if (!values[0] || values.length < 2) {
+    throw new CliError("review resolve requires a target and at least one comment id.");
+  }
+
+  const commentIds = values.slice(1);
+
+  if (
+    commentIds.some((id) => !/^[A-Za-z0-9_-]+$/.test(id)) ||
+    new Set(commentIds).size !== commentIds.length
+  ) {
+    throw new CliError("review resolve comment ids must be unique base64url strings.");
+  }
+
+  return {
+    ...parseVersionHistoryTarget(values[0], args, env, json),
+    action: "resolve",
+    commentIds,
+    reopen,
   };
 }
 
@@ -2425,6 +2515,88 @@ async function listArtifactVersions(options: VersionHistoryOptions): Promise<voi
   }
 }
 
+async function reviewArtifact(options: ReviewOptions): Promise<void> {
+  const resolved = await resolveVersionHistoryTarget(options);
+  const token = readPublishToken();
+  const path = `${resolved.endpoint}/api/artifacts/${encodeURIComponent(resolved.id)}/review`;
+
+  if (options.action === "resolve") {
+    const body = JSON.stringify({
+      commentIds: options.commentIds,
+      ...(options.reopen ? { status: "open" as const } : {}),
+    });
+
+    const response = await fetch(`${path}/resolve`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Length": String(new TextEncoder().encode(body).byteLength),
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+
+    const payload = await readJsonResponse(response, parseResolveReviewResponse);
+
+    if (options.json) {
+      console.log(JSON.stringify(withSchema(payload), null, 2));
+
+      return;
+    }
+
+    const verb = options.reopen ? "Reopened" : "Addressed";
+    const noun = payload.comments.length === 1 ? "comment" : "comments";
+    console.log(`${verb} ${payload.comments.length} ${noun}.`);
+
+    return;
+  }
+
+  const response = await fetch(path, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  const payload = await readJsonResponse(response, parseReviewResponse);
+
+  const markdown = formatReviewMarkdown({
+    artifact: {
+      id: payload.id,
+      title: payload.title,
+      filename: payload.filename,
+      version: payload.version,
+    },
+    listsUnanswered: false,
+    decisions: payload.review.decisions.filter(reviewDecisionAnswered).map((decision) => ({
+      ...decision,
+      orphaned: false,
+      notOffered: false,
+    })),
+    comments: payload.review.comments.map((comment) => ({ ...comment, found: null })),
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify(withSchema({ ...payload, markdown }), null, 2));
+
+    return;
+  }
+
+  process.stdout.write(markdown);
+}
+
+function reviewDecisionAnswered(decision: ReviewDecision): boolean {
+  if (decision.interacted) return true;
+
+  const normalized = (value: DecisionValue | undefined): DecisionValue =>
+    Array.isArray(value) ? [...value].sort() : (value ?? null);
+
+  return decision.controls
+    .filter((control) => !control.name.endsWith(":note"))
+    .some(
+      (control) =>
+        JSON.stringify(normalized(decision.values[control.name])) !==
+        JSON.stringify(normalized(control.default)),
+    );
+}
+
 async function rollbackArtifact(options: RollbackOptions): Promise<void> {
   const resolved = await resolveVersionHistoryTarget(options);
   const token = readPublishToken();
@@ -3116,6 +3288,7 @@ function isHelpTopic(value: string): value is HelpTopic {
     value === "verify" ||
     value === "versions" ||
     value === "rollback" ||
+    value === "review" ||
     value === "receipts" ||
     value === "show" ||
     value === "delete" ||
@@ -3136,7 +3309,7 @@ Usage:
 
 Options:
   --ttl 7d             Sets an expiration; supported units are s, m, h, d, w.
-  --sandbox standard   Default. Allows scripts/forms/popups/downloads and clipboard writes, but not same-origin storage.
+  --sandbox standard   Default. Uses a per-artifact origin with browser storage, history, and IndexedDB; iframe cookies are usually blocked.
   --assets <dir>        Include a directory under its basename; repeat for more directories.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   --verify             Fetches the uploaded raw content and verifies its SHA-256 hash.
@@ -3204,7 +3377,7 @@ Usage:
 Options:
   --assets <dir>        Include directories explicitly; defaults to the local receipt when present.
   --ttl 7d             Sets an expiration for publish-then-watch mode only.
-  --sandbox standard   Default for publish-then-watch mode.
+  --sandbox standard   Default for publish-then-watch. Uses a per-artifact origin with browser storage; iframe cookies are usually blocked.
   --sandbox strict     Supports HTML and static Markdown; Mermaid requires standard.
   --json               Emits versioned JSON Lines publish, update, and error events.
   --endpoint URL       Worker endpoint. Inferred from viewer_url when omitted.
@@ -3249,6 +3422,21 @@ Usage:
 Options:
   --json               Prints the updated artifact metadata as JSON.
   --endpoint URL       Worker endpoint. Uses --endpoint, then PAGEBIN_ENDPOINT, then viewer_url.
+  -h, --help           Show this help.
+`;
+    case "review":
+      return `pagebin review
+
+Reads artifact decisions and comments, or changes comment status after addressing feedback.
+
+Usage:
+  pagebin review <artifact_id|viewer_url|file> [--json] [--endpoint URL]
+  pagebin review resolve <artifact_id|viewer_url|file> <comment-id>... [--reopen] [--json] [--endpoint URL]
+
+Options:
+  --reopen             Reopens the listed comments instead of marking them addressed.
+  --json               Prints the review record and rendered Markdown, or changed comments, as JSON.
+  --endpoint URL       Publisher endpoint. Uses --endpoint, then PAGEBIN_ENDPOINT, then viewer_url.
   -h, --help           Show this help.
 `;
     case "receipts":
@@ -3320,6 +3508,8 @@ Usage:
   pagebin verify <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
   pagebin versions <artifact_id|viewer_url|file> [--json] [--endpoint URL]
   pagebin rollback <artifact_id|viewer_url|file> <version> [--json] [--endpoint URL]
+  pagebin review <artifact_id|viewer_url|file> [--json] [--endpoint URL]
+  pagebin review resolve <artifact_id|viewer_url|file> <comment-id>... [--reopen] [--json] [--endpoint URL]
   pagebin receipts [--json]
   pagebin show <artifact_id|viewer_url|file> [--json]
   pagebin delete <artifact_id> [--json] [--endpoint URL]
@@ -3331,7 +3521,7 @@ Behavior:
   publish              Uploads files and HTML bundles; renders Markdown to HTML first.
   --json               Prints id, url, expiresAt, and sandbox as JSON.
   --ttl 7d             Sets expiration; update also accepts never to remove it.
-  --sandbox standard   Default. Allows scripts/forms/popups/downloads and clipboard writes, but not same-origin storage.
+  --sandbox standard   Default. Uses a per-artifact origin with browser storage, history, and IndexedDB; iframe cookies are usually blocked.
   --assets <dir>        Include a directory under its basename; repeat for more directories.
   --sandbox strict     Disables iframe sandbox permissions; static Markdown is supported, but Mermaid requires standard.
   list                 Lists stored pages by id, filename, dates, sandbox, and size.
@@ -3341,6 +3531,7 @@ Behavior:
   verify               Compares the local rendered bytes with raw content or the stored hash.
   versions             Lists retained content versions and pinned viewer URLs when known.
   rollback             Marks a retained version as current.
+  review               Reads decisions/comments and resolves or reopens comments.
   receipts             Lists protected local publication receipts.
   show                 Recovers a viewer URL from a local receipt.
   delete               Deletes an artifact by id; requires PAGEBIN_PUBLISH_TOKEN.
@@ -3372,6 +3563,7 @@ pagebin publish /absolute/path/artifact.html --verify --json
 pagebin update /absolute/path/artifact.html --json
 pagebin versions /absolute/path/artifact.html
 pagebin rollback /absolute/path/artifact.html <version>
+pagebin review /absolute/path/artifact.html
 pagebin verify <viewer-url-or-id> /absolute/path/artifact.html --json
 \`\`\`
 
@@ -3386,7 +3578,7 @@ Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally te
 
 Publish a recording or image with the same publish command. Give users the returned viewer \`url\`, which has the form \`/p/<id>/<token>\`. Never give users a \`/raw/.../v/<n>/...\` URL: it pins one version, skips the viewer, and goes stale after the next update. Use raw URLs only for your own inspection or as an image or video source. Use \`downloadUrl\` for the original file. PDFs open in a browser reader on desktop and mobile with zoom, search, and text selection. Videos use native browser playback without transcoding. In PRs, use a viewer link or a linked image preview; external video links may not render inline.
 
-The viewer renders the artifact in a sandboxed cross-origin iframe. Browser automation text snapshots and accessibility trees, including T3 preview snapshots, show only the toolbar. Wait a moment and take a screenshot before deciding that the artifact is blank.
+The viewer renders the artifact in a sandboxed cross-origin iframe. Standard documents run on their own per-artifact origin, so browser storage, history, and IndexedDB work. Cookies are third-party inside the viewer and browsers usually block them. Browser automation text snapshots and accessibility trees, including T3 preview snapshots, show only the toolbar. Wait a moment and take a screenshot before deciding that the artifact is blank.
 
 For a gallery or illustrated report:
 
@@ -3406,11 +3598,17 @@ Files are limited to 50 MiB each, with 200 files and 250 MiB total per bundle. K
 - \`watch <file>\`: publish or update continuously. Prefer explicit checkpoint updates unless continuous watch is useful.
 - \`versions <target>\`: list the retained content history; known viewer URLs include pinned links.
 - \`rollback <target> <version>\`: mark a retained version as current.
+- \`review <target>\`: read answered decisions and comments after a reader reviews an artifact.
+- \`review resolve <target> <comment-id>...\`: mark addressed comments by id; add \`--reopen\` to reopen them.
 - \`verify <id-or-url> <file>\`: confirm the published content matches the local file.
 - \`receipts\` and \`show <target>\`: recover locally stored viewer URLs without reissuing them.
 - \`list\`: list server-side artifact metadata; viewer tokens are intentionally absent.
 - \`reissue <id>\`: create a new viewer URL and revoke the old one.
 - \`delete <id>\`: permanently remove an artifact.
+
+## Review feedback
+
+After the user says they reviewed an artifact, run \`pagebin review <target>\`. Decisions without an answer are absent from CLI output and remain unconfirmed. Comments quote their selected text and record the artifact version where the reader made them. After addressing a comment, run \`pagebin review resolve <target> <comment-id>\` with the id from \`--json\` output.
 
 Use \`--json\` for agent-friendly output. Viewer URLs and receipt files are capability secrets: do not print them unnecessarily or commit them. Run \`pagebin <command> --help\` for the exact options supported by this version.
 `;

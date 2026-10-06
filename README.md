@@ -29,6 +29,8 @@ pagebin verify <artifact_id_or_viewer_url> ./plan.html --json
 pagebin verify ./plan.html <artifact_id_or_viewer_url> --json
 pagebin versions <artifact_id_or_viewer_url_or_file>
 pagebin rollback <artifact_id_or_viewer_url_or_file> <version>
+pagebin review <artifact_id_or_viewer_url_or_file>
+pagebin review resolve <artifact_id_or_viewer_url_or_file> <comment-id>...
 pagebin watch ./implementation-log.html --json
 pagebin list
 pagebin receipts
@@ -71,6 +73,24 @@ Active documents remain sandboxed, including direct SVG navigation. Every viewer
 ### Version history
 
 PageBin automatically retains the last 10 content versions of each artifact. Identical-content updates are deduplicated, while `pagebin versions` lists retained versions and `pagebin rollback` marks an older version as current again (publishing new content resumes from the highest version number). Pinned viewers use `/p/<id>/<token>/v/<n>` and never auto-reload. Reissuing an artifact rotates the capability token for the current content and all retained history; deletion or expiry removes every version.
+
+### Review feedback
+
+Readers can comment on selected text and answer decisions embedded in a document. `pagebin review <target>` fetches the review through the publisher API and prints agent-ready Markdown. Add `--json` to include the complete review record, addressed comments, comment ids, and the rendered Markdown. After changing the artifact in response to feedback, run `pagebin review resolve <target> <comment-id>...`; use `--reopen` to mark comments open again. A local source file works as the target when its publication receipt is present.
+
+The viewer uses its capability token for these JSON routes on `page-bin.com` or a local Worker origin:
+
+- `GET /api/artifacts/:id/review/:token`
+- `POST /api/artifacts/:id/review/:token/comments`
+- `PATCH` or `DELETE /api/artifacts/:id/review/:token/comments/:commentId`
+- `PUT /api/artifacts/:id/review/:token/decisions/:decisionId`
+
+Publisher-token clients use these routes on `api.page-bin.com`:
+
+- `GET /api/artifacts/:id/review`
+- `POST /api/artifacts/:id/review/resolve`
+
+Comments keep the quoted text, surrounding context, and artifact version where the reader made them. Decision answers also record their artifact version. Reissuing a viewer token preserves review data. Deletion and expiry remove it.
 
 ### Metadata inference
 

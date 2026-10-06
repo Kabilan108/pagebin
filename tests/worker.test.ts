@@ -4132,6 +4132,53 @@ describe("review API", () => {
     expect(await env.ARTIFACTS.get(metadataKey)).toBeNull();
     expect(await env.ARTIFACTS.get(reviewKey)).toBeNull();
   });
+
+  test("keeps the review when a write lands on an expired artifact that is later extended", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const reviewKey = `artifacts/${published.id}/review.json`;
+    const metadataKey = `artifacts/${published.id}/metadata.json`;
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+
+    const saved = await reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      { anchor: { quote: "quote", prefix: "", suffix: "", version: 1 }, body: "Earlier comment" },
+      env,
+    );
+
+    expect(saved.status).toBe(201);
+
+    const pause = pauseBeforeReviewPut(env.ARTIFACTS);
+
+    const pending = reviewJsonRequest(
+      `${base}/comments`,
+      "POST",
+      { anchor: { quote: "quote", prefix: "", suffix: "", version: 1 }, body: "Late comment" },
+      env,
+    );
+
+    await pause.started;
+
+    const expired = JSON.parse((await (await env.ARTIFACTS.get(metadataKey))?.text()) ?? "{}");
+
+    expired.expiresAt = "2020-01-01T00:00:00.000Z";
+    await env.ARTIFACTS.put(metadataKey, JSON.stringify(expired));
+    pause.release();
+
+    expect((await pending).status).toBe(404);
+
+    const extended = JSON.parse((await (await env.ARTIFACTS.get(metadataKey))?.text()) ?? "{}");
+
+    extended.expiresAt = null;
+    await env.ARTIFACTS.put(metadataKey, JSON.stringify(extended));
+
+    const review = JSON.parse((await (await env.ARTIFACTS.get(reviewKey))?.text()) ?? "{}");
+
+    expect(review.comments.map((comment: { body: string }) => comment.body)).toContain(
+      "Earlier comment",
+    );
+  });
 });
 
 async function reviewJsonRequest(

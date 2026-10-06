@@ -24,6 +24,7 @@ export interface ReviewArtifact {
   version: number;
   versions: number[];
   isLive: () => Promise<boolean>;
+  isDeleted: () => Promise<boolean>;
 }
 
 interface StoredReview {
@@ -394,7 +395,9 @@ async function mutateReview<T>(
 
     if (result !== null) {
       if (!(await artifact.isLive())) {
-        await env.ARTIFACTS.delete(reviewObjectKey(artifact.id));
+        // Only a tombstone is final. An expired artifact can still be extended, so expiry
+        // cleanup is left to the sweep, which retires it through the metadata CAS.
+        if (await artifact.isDeleted()) await env.ARTIFACTS.delete(reviewObjectKey(artifact.id));
 
         return { response: reviewNotFound() };
       }

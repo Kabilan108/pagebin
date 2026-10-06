@@ -564,7 +564,9 @@ const VIEWER_SCRIPT = `
       const payload = await api("POST", "/comments", { anchor: draft.anchor, body });
       if (!payload || !validComment(payload.comment)) throw new Error("unexpected response");
       Object.assign(comment, payload.comment, { saving: false, local: false });
-      store("local", DRAFT_KEY, null);
+      const savedDraft = JSON.parse(stored("local", DRAFT_KEY) || "null");
+      // A newer draft may have been started while this one was saving; keep it.
+      if (savedDraft && savedDraft.body.trim() === body && savedDraft.anchor.quote === draft.anchor.quote) store("local", DRAFT_KEY, null);
       pushHighlights();
       render();
       toast("Comment saved");

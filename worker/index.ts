@@ -1552,6 +1552,11 @@ function reviewArtifact(env: Env, metadata: ArtifactMetadata): ReviewArtifact {
         (!stored.metadata.expiresAt || Date.now() < Date.parse(stored.metadata.expiresAt)),
       );
     },
+    isDeleted: async () => {
+      const stored = await readStoredMetadata(env, metadata.id);
+
+      return !stored || Boolean(stored.metadata.deletedAt);
+    },
   };
 }
 

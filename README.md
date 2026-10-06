@@ -22,9 +22,11 @@ pagebin publish ./report.md --type report
 pagebin publish ./scratch.html --ttl 7d
 pagebin update ./plan.html --json
 pagebin update <artifact_id_or_viewer_url> ./plan.html
+pagebin update ./plan.html <artifact_id_or_viewer_url>
 pagebin update <artifact_id_or_viewer_url> --ttl never
 pagebin update <artifact_id_or_viewer_url> ./plan.html --ttl 7d
 pagebin verify <artifact_id_or_viewer_url> ./plan.html --json
+pagebin verify ./plan.html <artifact_id_or_viewer_url> --json
 pagebin versions <artifact_id_or_viewer_url_or_file>
 pagebin rollback <artifact_id_or_viewer_url_or_file> <version>
 pagebin watch ./implementation-log.html --json
@@ -39,6 +41,8 @@ pagebin skill
 Artifacts do not expire unless `--ttl` is provided. Markdown is rendered to static HTML in the CLI before upload, including GFM tables, highlighted code, frontmatter properties, and document outlines. Only documents containing Mermaid diagrams load the pinned Mermaid browser runtime.
 
 `pagebin skill` prints concise, version-matched instructions for agents and does not require endpoint credentials.
+
+The CLI also reads credentials from `${XDG_CONFIG_HOME:-~/.config}/pagebin/env`, or the path set by `PAGEBIN_CONFIG`. The file accepts `KEY=VALUE` lines, optional `export` prefixes, quotes, blank lines, and comments. Only `PAGEBIN_ENDPOINT` and `PAGEBIN_PUBLISH_TOKEN` are read. Environment values override the file, and `--endpoint` overrides both. Keep the file mode at `0600`; the CLI warns when group or other permissions are present.
 
 ### Files and attachments
 
@@ -56,7 +60,7 @@ Image viewers fit the original to the window. Video and audio viewers use native
 
 Receipts remember the asset directories for update, watch, and verify. Supply them again on another machine. An explicit list replaces the remembered list. Watch observes the entry file and included directories. Files removed from a selected directory disappear from the next version, while retained versions keep their files.
 
-New file uploads return `url`, `rawUrl`, and `downloadUrl` in JSON. `url` opens the viewer; the other two pin the published version. Use `rawUrl` as an image or video source in HTML, and `downloadUrl` to force a download. PRs can link to the viewer or use a linked image preview; inline playback of an external video URL depends on the PR host. Embedding shares the capability URL with that host, which may cache a copy.
+New file uploads return `url`, `rawUrl`, and `downloadUrl` in JSON. Give users `url`, the `/p/<id>/<token>` viewer URL. The other two pin the published version. Never give users a `/raw/.../v/<n>/...` URL: it skips the viewer and goes stale after the next update. Use `rawUrl` only for inspection or as an image or video source in HTML, and use `downloadUrl` to force a download. The viewer uses a sandboxed cross-origin iframe, so browser automation text snapshots and accessibility trees may show only its toolbar. Wait briefly and take a screenshot before deciding the artifact is blank. PRs can link to the viewer or use a linked image preview; inline playback of an external video URL depends on the PR host. Embedding shares the capability URL with that host, which may cache a copy.
 
 Each bundle version has a manifest of paths, types, sizes, and SHA-256 checksums. Unchanged files reuse objects within that artifact. Files upload individually before an atomic metadata commit; failed or conflicting uploads leave the previous version visible. `contentSha256` for these artifacts identifies the canonical manifest, and `files[].sha256` identifies each file's bytes. URL-based verification downloads and hashes every file; ID-based verification checks the stored manifest. Public manifest responses omit storage keys.
 
@@ -80,11 +84,13 @@ Publish and update infer:
 
 Override with `--title`, `--project`, `--repo`, `--source-host`, `--source-path`, `--git-branch`, `--git-commit`, `--type`, or `--agent`. `--agent` is the only authoritative agent override; there is no environment-variable override. Use `--no-infer` to send only explicit fields.
 
+`--type` is case-insensitive. It accepts `log`, `impl-log`, `implementation_log`, and `implementation` as aliases for `implementation-log`, plus `audit` and `benchmark` as aliases for `report`. Unknown values warn on stderr and use `other`.
+
 ### Local receipts
 
 Successful publication writes a mode-`0600` receipt under `${XDG_STATE_HOME:-~/.local/state}/pagebin/artifacts.json`. It stores the viewer URL, file association, hashes, revision, and provenance. This enables `pagebin update <file>` and URL recovery without storing plaintext viewer tokens in ordinary server listings.
 
-Publishing the same endpoint/file pair again is rejected. Use update, or pass `--force-new` when a second artifact is intentional. Override the state location with `PAGEBIN_STATE_PATH`.
+Publishing the same endpoint/file pair again is rejected, including while another PageBin process is still uploading it. Use update, or pass `--force-new` when a second artifact is intentional. Override the state location with `PAGEBIN_STATE_PATH`.
 
 ### Verification and machine output
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -22,6 +22,8 @@ process.env.PAGEBIN_STATE_PATH = join(
   tmpdir(),
   `pagebin-cli-tests-${process.pid}-${Date.now()}.json`,
 );
+
+process.env.PAGEBIN_CONFIG = join(tmpdir(), `pagebin-cli-tests-${process.pid}-${Date.now()}.env`);
 
 describe("parseTtlSeconds", () => {
   test("parses supported units", () => {
@@ -214,6 +216,50 @@ describe("parseArgs", () => {
         url: null,
       },
     });
+  });
+
+  test("accepts file and target in either order for update, verify, and watch", () => {
+    const env = { PAGEBIN_ENDPOINT: "https://example.com" };
+    const target = "abc1234567890123";
+
+    for (const command of ["update", "verify", "watch"] as const) {
+      const canonical = parseArgs([command, target, "plan.html"], env);
+      const reversed = parseArgs([command, "plan.html", target], env);
+
+      expect(reversed).toEqual(canonical);
+    }
+  });
+
+  test("prints each command shape when two-position arguments are ambiguous", () => {
+    const env = { PAGEBIN_ENDPOINT: "https://example.com" };
+
+    for (const command of ["update", "verify", "watch"] as const) {
+      expect(() => parseArgs([command, "first.html", "second.html"], env)).toThrow(
+        `pagebin ${command} <artifact_id|viewer_url> <file>`,
+      );
+      expect(() => parseArgs([command, "abc1234567890123", "def1234567890123"], env)).toThrow(
+        `pagebin ${command} <artifact_id|viewer_url> <file>`,
+      );
+    }
+  });
+
+  test("normalizes type aliases case-insensitively", () => {
+    const aliases = {
+      log: "implementation-log",
+      "IMPL-LOG": "implementation-log",
+      implementation_log: "implementation-log",
+      Implementation: "implementation-log",
+      audit: "report",
+      BENCHMARK: "report",
+    };
+
+    for (const [alias, artifactType] of Object.entries(aliases)) {
+      expect(
+        parseArgs(["publish", "plan.html", "--type", alias], {
+          PAGEBIN_ENDPOINT: "https://example.com",
+        }),
+      ).toMatchObject({ options: { attributes: { artifactType } } });
+    }
   });
 
   test("parses update with a viewer URL and infers the endpoint", () => {
@@ -604,6 +650,11 @@ describe("skill command", () => {
     expect(result.stdout).toContain("pagebin publish /absolute/path/artifact.html --verify --json");
     expect(result.stdout).toContain("pagebin versions /absolute/path/artifact.html");
     expect(result.stdout).toContain("pagebin rollback /absolute/path/artifact.html <version>");
+    expect(result.stdout).toContain("Give users the returned viewer `url`");
+    expect(result.stdout).toContain("Never give users a `/raw/.../v/<n>/...` URL");
+    expect(result.stdout).toContain("take a screenshot before deciding that the artifact is blank");
+    expect(result.stdout).toContain("PAGEBIN_CONFIG");
+    expect(result.stdout).toContain("`implementation_log`");
     expect(result.stdout).not.toContain("highlight.js");
   });
 
@@ -1128,6 +1179,245 @@ flowchart LR
   });
 });
 
+describe("configuration and type aliases", () => {
+  test("reads quoted and exported credentials from the config file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-test-"));
+    const configPath = join(directory, "env");
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("Authorization")).toBe("Bearer config-token");
+
+        return Response.json({ artifacts: [] });
+      },
+    });
+
+    await writeFile(
+      configPath,
+      `# PageBin credentials\nexport PAGEBIN_ENDPOINT="${server.url.origin}"\nPAGEBIN_PUBLISH_TOKEN='config-token'\nIGNORED=value\n`,
+      { mode: 0o600 },
+    );
+
+    try {
+      const result = await runPagebin(["list", "--json"], { PAGEBIN_CONFIG: configPath });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 1, artifacts: [] });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("ignores trailing comments in config values", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-comments-"));
+    const configPath = join(directory, "env");
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("Authorization")).toBe("Bearer tok#en");
+
+        return Response.json({ artifacts: [] });
+      },
+    });
+
+    await writeFile(
+      configPath,
+      `PAGEBIN_ENDPOINT=${server.url.origin} # local worker\nPAGEBIN_PUBLISH_TOKEN="tok#en" # publisher credential\n`,
+      { mode: 0o600 },
+    );
+
+    try {
+      const result = await runPagebin(["list", "--json"], { PAGEBIN_CONFIG: configPath });
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 1, artifacts: [] });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("treats a commented empty config value as unset", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-empty-"));
+    const configPath = join(directory, "env");
+    await writeFile(configPath, "PAGEBIN_PUBLISH_TOKEN= # unset\n", { mode: 0o600 });
+
+    const result = await runPagebin(["list", "--json", "--endpoint", "http://localhost:1"], {
+      PAGEBIN_CONFIG: configPath,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("PAGEBIN_PUBLISH_TOKEN is not set on");
+  });
+
+  test("lets an empty config endpoint fall back to the viewer origin", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-empty-endpoint-"));
+    const configPath = join(directory, "env");
+    await writeFile(configPath, "PAGEBIN_ENDPOINT= # unset\n", { mode: 0o600 });
+
+    const parsed = parseArgs(
+      ["update", "http://127.0.0.1:8790/p/abc1234567890123/view-token", "plan.html"],
+      { PAGEBIN_CONFIG: configPath },
+    );
+
+    expect(parsed.command).toBe("update");
+    expect(parsed.options).toMatchObject({ endpoint: "http://127.0.0.1:8790" });
+  });
+
+  test("runs credential-free commands when the config file is unreadable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-unreadable-"));
+
+    for (const args of [["version"], ["skill"], ["help"], ["receipts", "--json"]]) {
+      const result = await runPagebin(args, {
+        PAGEBIN_CONFIG: directory,
+        PAGEBIN_STATE_PATH: join(directory, "state.json"),
+      });
+
+      expect(result.exitCode).toBe(0);
+    }
+
+    const list = await runPagebin(["list", "--json"], { PAGEBIN_CONFIG: directory });
+
+    expect(list.exitCode).toBe(1);
+    expect(list.stderr).toContain(`Cannot read PageBin config file ${directory}: EISDIR.`);
+  });
+
+  test("rejects endpoints the receipt store could not record", () => {
+    for (const endpoint of ["ftp://127.0.0.1:1", "https://user:secret@example.com"]) {
+      expect(() => parseArgs(["publish", "plan.html", "--endpoint", endpoint], {})).toThrow(
+        "PAGEBIN_ENDPOINT must",
+      );
+    }
+  });
+
+  test("prefers environment credentials and then an explicit endpoint over config", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-precedence-"));
+    const configPath = join(directory, "env");
+    let configEndpointRequests = 0;
+    let environmentEndpointRequests = 0;
+
+    const configServer = Bun.serve({
+      port: 0,
+      fetch(request) {
+        configEndpointRequests += 1;
+        expect(request.headers.get("Authorization")).toBe("Bearer environment-token");
+
+        return Response.json({ artifacts: [] });
+      },
+    });
+
+    const environmentServer = Bun.serve({
+      port: 0,
+      fetch(request) {
+        environmentEndpointRequests += 1;
+        expect(request.headers.get("Authorization")).toBe("Bearer environment-token");
+
+        return Response.json({ artifacts: [] });
+      },
+    });
+
+    await writeFile(
+      configPath,
+      `PAGEBIN_ENDPOINT=${configServer.url.origin}\nPAGEBIN_PUBLISH_TOKEN=config-token\n`,
+      { mode: 0o600 },
+    );
+
+    const env = {
+      PAGEBIN_CONFIG: configPath,
+      PAGEBIN_ENDPOINT: environmentServer.url.origin,
+      PAGEBIN_PUBLISH_TOKEN: "environment-token",
+    };
+
+    try {
+      const environmentResult = await runPagebin(["list"], env);
+      const optionResult = await runPagebin(["list", "--endpoint", configServer.url.origin], env);
+
+      expect(environmentResult.exitCode).toBe(0);
+      expect(optionResult.exitCode).toBe(0);
+      expect(environmentEndpointRequests).toBe(1);
+      expect(configEndpointRequests).toBe(1);
+    } finally {
+      configServer.stop(true);
+      environmentServer.stop(true);
+    }
+  });
+
+  test("warns once when the credentials file is accessible by group or others", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-mode-"));
+    const configPath = join(directory, "env");
+    await writeFile(configPath, "# intentionally empty\n");
+    await chmod(configPath, 0o644);
+
+    const result = await runPagebin(["list", "--json"], { PAGEBIN_CONFIG: configPath });
+
+    expect(result.stderr.match(/grants group or other permissions/g)).toHaveLength(1);
+    expect(result.stderr).toContain(configPath);
+  });
+
+  test("names the host and config path when endpoint or token is missing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-missing-"));
+    const configPath = join(directory, "missing-env");
+    const filePath = join(directory, "plan.html");
+    await writeFile(filePath, "<!doctype html><h1>plan</h1>");
+
+    const missingEndpoint = await runPagebin(["list"], { PAGEBIN_CONFIG: configPath });
+
+    const missingToken = await runPagebin(
+      ["publish", filePath, "--endpoint", "http://localhost:8790"],
+      { PAGEBIN_CONFIG: configPath },
+    );
+
+    expect(missingEndpoint.exitCode).toBe(1);
+    expect(missingEndpoint.stderr).toContain("PAGEBIN_ENDPOINT is not set on");
+    expect(missingEndpoint.stderr).toContain(configPath);
+    expect(missingToken.exitCode).toBe(1);
+    expect(missingToken.stderr).toContain("PAGEBIN_PUBLISH_TOKEN is not set on");
+    expect(missingToken.stderr).toContain(configPath);
+  });
+
+  test("warns on an unknown type and publishes it as other without polluting JSON", async () => {
+    const filePath = await writeTempFile("unknown-type.html", "<!doctype html><h1>report</h1>");
+    const statePath = `${filePath}.state.json`;
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const form = await request.formData();
+        expect(JSON.parse(String(form.get("attributes"))).artifactType).toBe("other");
+        const origin = new URL(request.url).origin;
+
+        return Response.json({
+          id: "artifact-id-1234",
+          url: `${origin}/p/artifact-id-1234/view-token`,
+          expiresAt: null,
+          sandbox: "standard",
+          revision: 1,
+          version: 1,
+          contentSha256: "a".repeat(64),
+          attributes: { artifactType: "other" },
+        });
+      },
+    });
+
+    try {
+      const result = await runPagebin(
+        ["publish", filePath, "--type", "mystery", "--json", "--endpoint", server.url.origin],
+        { PAGEBIN_PUBLISH_TOKEN: "publish-token", PAGEBIN_STATE_PATH: statePath },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe(
+        'Unknown --type value "mystery"; accepted types are plan, report, review, explainer, implementation-log, other. Using other.\n',
+      );
+      expect(JSON.parse(result.stdout).attributes.artifactType).toBe("other");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
 describe("local receipt workflow", () => {
   test("persists a protected receipt, prevents duplicates, and updates by file", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pagebin-receipt-test-"));
@@ -1245,6 +1535,112 @@ describe("local receipt workflow", () => {
       expect(publishCount).toBe(2);
       expect(updateCount).toBe(1);
     } finally {
+      server.stop(true);
+    }
+  });
+
+  test("blocks publish while watch is waiting for its first publish response", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-publish-claim-"));
+    const statePath = join(directory, "artifacts.json");
+    const filePath = join(directory, "plan.html");
+    await writeFile(filePath, "<!doctype html><h1>plan</h1>");
+    let publishCount = 0;
+    let releaseResponse = (): void => {};
+
+    let markRequestStarted = (): void => {};
+
+    const requestStarted = new Promise<void>((resolve) => {
+      markRequestStarted = resolve;
+    });
+
+    const responseReleased = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        publishCount += 1;
+        markRequestStarted();
+        await responseReleased;
+        const origin = new URL(request.url).origin;
+
+        return Response.json({
+          id: "artifact-id-1234",
+          url: `${origin}/p/artifact-id-1234/view-token`,
+          expiresAt: null,
+          sandbox: "standard",
+          revision: 1,
+          version: 1,
+          contentSha256: "a".repeat(64),
+          attributes: {},
+        });
+      },
+    });
+
+    const watchProcess = Bun.spawn(
+      [process.execPath, "src/cli.ts", "watch", filePath, "--endpoint", server.url.origin],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PAGEBIN_CONFIG: process.env.PAGEBIN_CONFIG,
+          PAGEBIN_PUBLISH_TOKEN: "publish-token",
+          PAGEBIN_STATE_PATH: statePath,
+        },
+        stderr: "pipe",
+        stdout: "pipe",
+      },
+    );
+
+    try {
+      await withTimeout(requestStarted, 3000);
+
+      const claimedStore = JSON.parse(await readFile(statePath, "utf8")) as {
+        claims: Array<{ endpoint: string; filePath: string; pid: number; host: string }>;
+      };
+
+      expect(claimedStore.claims).toHaveLength(1);
+      expect(claimedStore.claims[0]).toMatchObject({
+        endpoint: server.url.origin,
+        filePath: resolve(filePath),
+        pid: watchProcess.pid,
+      });
+
+      const duplicate = await runPagebin(["publish", filePath, "--endpoint", server.url.origin], {
+        PAGEBIN_PUBLISH_TOKEN: "publish-token",
+        PAGEBIN_STATE_PATH: statePath,
+      });
+
+      expect(duplicate.exitCode).toBe(1);
+      expect(duplicate.stderr).toContain("Another PageBin process");
+      expect(duplicate.stderr).toContain(`PID ${watchProcess.pid}`);
+      expect(duplicate.stderr).toContain(`pagebin show ${filePath}`);
+      expect(publishCount).toBe(1);
+
+      releaseResponse();
+      await waitFor(async () => {
+        const store = JSON.parse(await readFile(statePath, "utf8")) as {
+          artifacts: unknown[];
+        };
+
+        return store.artifacts.length === 1;
+      });
+
+      const completedStore = JSON.parse(await readFile(statePath, "utf8")) as {
+        artifacts: unknown[];
+        claims?: unknown[];
+      };
+
+      expect(completedStore.artifacts).toHaveLength(1);
+      expect(completedStore.claims).toBeUndefined();
+      expect(publishCount).toBe(1);
+    } finally {
+      releaseResponse();
+      watchProcess.kill("SIGTERM");
+      await watchProcess.exited;
+      await new Response(watchProcess.stdout).text();
+      await new Response(watchProcess.stderr).text();
       server.stop(true);
     }
   });
@@ -1661,6 +2057,67 @@ describe("version history commands", () => {
     }
   });
 
+  test("prints recovery hints for versions and rollback without a viewer URL", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-version-hint-"));
+    const statePath = join(directory, "artifacts.json");
+
+    const detail = {
+      id: "artifact-id-1234",
+      filename: "plan.html",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+      expiresAt: null,
+      sandbox: "standard",
+      size: 31,
+      revision: 2,
+      version: 1,
+      contentSha256: "a".repeat(64),
+      attributes: {},
+      versions: [
+        {
+          version: 1,
+          size: 31,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          contentSha256: "a".repeat(64),
+          current: true,
+        },
+      ],
+    };
+
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json(detail);
+      },
+    });
+
+    const env = {
+      PAGEBIN_PUBLISH_TOKEN: "publish-token",
+      PAGEBIN_STATE_PATH: statePath,
+    };
+
+    try {
+      const versions = await runPagebin(
+        ["versions", "artifact-id-1234", "--json", "--endpoint", server.url.origin],
+        env,
+      );
+
+      const rollback = await runPagebin(
+        ["rollback", "artifact-id-1234", "1", "--json", "--endpoint", server.url.origin],
+        env,
+      );
+
+      expect(versions.exitCode).toBe(0);
+      expect(JSON.parse(versions.stdout).url).toBeNull();
+      expect(versions.stderr).toContain("No viewer URL is recorded on this host");
+      expect(rollback.exitCode).toBe(0);
+      expect(JSON.parse(rollback.stdout).id).toBe("artifact-id-1234");
+      expect(rollback.stderr).toContain("No viewer URL is recorded on this host");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("rolls back by file receipt, updates the receipt revision, and prints its viewer URL", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pagebin-rollback-test-"));
     const statePath = join(directory, "artifacts.json");
@@ -1939,7 +2396,7 @@ describe("update command", () => {
     }
   });
 
-  test("updates content by ID and prints structured JSON", async () => {
+  test("keeps JSON unchanged and prints a recovery hint when update has no viewer URL", async () => {
     const filePath = await writeTempFile("cli-plan.html", "<!doctype html><h1>updated</h1>");
 
     const server = Bun.serve({
@@ -1983,6 +2440,9 @@ describe("update command", () => {
       );
 
       expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe(
+        "No viewer URL is recorded on this host for artifact-id-1234; on the host that published it run `pagebin show artifact-id-1234`; otherwise `pagebin reissue artifact-id-1234` mints a new URL and revokes the old one.\n",
+      );
       expect(JSON.parse(result.stdout)).toEqual({
         revision: 1,
         contentSha256: "a".repeat(64),
@@ -2132,7 +2592,8 @@ describe("update command", () => {
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("artifact-id-1234\n");
-      expect(result.stderr).toBe("");
+      expect(result.stderr).toContain("No viewer URL is recorded on this host");
+      expect(result.stderr).not.toContain("Mermaid diagrams require");
     } finally {
       server.stop(true);
     }
@@ -2747,7 +3208,7 @@ describe("runtime contract validation", () => {
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toContain(`Invalid ${item.error}`);
         expect(result.stdout).toBe("");
-        expect(await readFile(statePath, "utf8")).toBe(original);
+        expect(JSON.parse(await readFile(statePath, "utf8"))).toEqual(JSON.parse(original));
       } finally {
         server.stop(true);
       }
@@ -2888,10 +3349,15 @@ async function writeTempFile(filename: string, contents: string): Promise<string
 }
 
 async function runPagebin(args: string[], env: Record<string, string>): Promise<CliRun> {
+  const baseEnv = { ...process.env };
+
+  delete baseEnv.PAGEBIN_ENDPOINT;
+  delete baseEnv.PAGEBIN_PUBLISH_TOKEN;
+
   const proc = Bun.spawn([process.execPath, "src/cli.ts", ...args], {
     cwd: process.cwd(),
     env: {
-      ...process.env,
+      ...baseEnv,
       ...env,
     },
     stderr: "pipe",
@@ -2911,17 +3377,22 @@ async function runPagebin(args: string[], env: Record<string, string>): Promise<
   };
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<void> {
   await withTimeout(
-    new Promise<void>((resolve) => {
-      const interval = setInterval(() => {
-        if (!predicate()) {
+    new Promise<void>((resolve, reject) => {
+      const check = async (): Promise<void> => {
+        if (await predicate()) {
+          resolve();
+
           return;
         }
 
-        clearInterval(interval);
-        resolve();
-      }, 10);
+        setTimeout(() => {
+          check().catch(reject);
+        }, 10);
+      };
+
+      check().catch(reject);
     }),
     3000,
   );

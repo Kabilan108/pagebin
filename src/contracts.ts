@@ -123,9 +123,15 @@ export interface WatchOwnership {
   startedAt: string;
 }
 
+export interface PublishClaim extends WatchOwnership {
+  endpoint: string;
+  filePath: string;
+}
+
 export interface ReceiptStore {
   schemaVersion: 1;
   artifacts: ArtifactReceipt[];
+  claims?: PublishClaim[];
 }
 
 export type SandboxMode = "standard" | "strict";
@@ -389,6 +395,12 @@ function isWatchOwnership(value: unknown): value is WatchOwnership {
   );
 }
 
+function isPublishClaim(value: unknown): value is PublishClaim {
+  if (!isObject(value) || !isWatchOwnership(value)) return false;
+
+  return isHttpUrl(value.endpoint) && isString(value.filePath) && isAbsolute(value.filePath);
+}
+
 function isArtifactReceipt(value: unknown): value is ArtifactReceipt {
   return (
     isObject(value) &&
@@ -414,7 +426,9 @@ function isReceiptStore(value: unknown): value is ReceiptStore {
     isObject(value) &&
     value.schemaVersion === 1 &&
     Array.isArray(value.artifacts) &&
-    value.artifacts.every(isArtifactReceipt)
+    value.artifacts.every(isArtifactReceipt) &&
+    (value.claims === undefined ||
+      (Array.isArray(value.claims) && value.claims.every(isPublishClaim)))
   );
 }
 

@@ -170,9 +170,10 @@ const MAX_ARTIFACT_VERSIONS = 10;
 
 const METADATA_READ_CONCURRENCY = 6;
 
-const STANDARD_SANDBOX = "allow-scripts allow-forms allow-popups allow-downloads";
+const STANDARD_SANDBOX =
+  "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals";
 
-const STANDARD_IFRAME_PERMISSIONS = "clipboard-write";
+const STANDARD_IFRAME_PERMISSIONS = "clipboard-write; fullscreen";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -2485,7 +2486,7 @@ function iframePermissionsAttribute(mode: SandboxMode): string {
     return "";
   }
 
-  return ` allow="${STANDARD_IFRAME_PERMISSIONS}"`;
+  return ` allow="${STANDARD_IFRAME_PERMISSIONS}" allowfullscreen`;
 }
 
 function rawSandboxCsp(mode: SandboxMode): string {

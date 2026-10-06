@@ -304,22 +304,44 @@ const FRAME_SCRIPT_BODY = `
     return [...groups.values()];
   }
 
+  // The authored default is what the control shows before any interaction, so implicit HTML
+  // defaults (first option, range midpoint, sanitized input values) count as the recommendation.
+  function authoredInputValue(el) {
+    if (el.tagName === "TEXTAREA") return el.defaultValue;
+    const probe = document.createElement("input");
+    for (const name of ["type", "min", "max", "step", "value"]) {
+      const value = el.getAttribute(name);
+      if (value !== null) probe.setAttribute(name, value);
+    }
+    return probe.value;
+  }
+
   function readValue(group, authored) {
     const els = group.elements;
     switch (group.type) {
       case "radio": {
-        const on = els.find((e) => (authored ? e.defaultChecked : e.checked));
+        const on = authored ? els.filter((e) => e.defaultChecked).pop() : els.find((e) => e.checked);
         return on ? on.value : null;
       }
       case "checkbox":
         return els.filter((e) => (authored ? e.defaultChecked : e.checked)).map((e) => e.value);
       case "select": {
         const select = els[0];
-        const picked = [...select.options].filter((o) => (authored ? o.defaultSelected : o.selected)).map((o) => o.value);
+        const options = [...select.options];
+        const picked = authored
+          ? authoredSelectValues(
+              options.map((o) => ({
+                value: o.value,
+                defaultSelected: o.defaultSelected,
+                disabled: o.disabled || (o.parentElement instanceof HTMLOptGroupElement && o.parentElement.disabled),
+              })),
+              select.multiple,
+            )
+          : options.filter((o) => o.selected).map((o) => o.value);
         return select.multiple ? picked : picked.length ? picked[0] : null;
       }
       default:
-        return authored ? els[0].defaultValue : els[0].value;
+        return authored ? authoredInputValue(els[0]) : els[0].value;
     }
   }
 
@@ -352,6 +374,8 @@ const FRAME_SCRIPT_BODY = `
       }
       default:
         if (typeof value !== "string") return true;
+        // Restoring saved answers must not overwrite what the reader is typing right now.
+        if (els[0] === document.activeElement) return true;
         els[0].value = value;
         return !(group.type === "range" && els[0].value !== value);
     }
@@ -528,9 +552,41 @@ export function frameScriptTag(viewerOrigin: string): string {
     `const VIEWER_ORIGIN = ${scriptLiteral(viewerOrigin)};`,
     `const QUOTE_LIMIT = ${REVIEW_LIMITS.quote};`,
     `const REVIEW_FRAME_CSS = ${scriptLiteral(REVIEW_FRAME_CSS)};`,
+    embeddedFunction("authoredSelectValues", authoredSelectValues),
   ].join("\n  ");
 
   return `<script data-pagebin="frame">(() => {\n  ${constants}\n${FRAME_SCRIPT_BODY}})();</script>`;
+}
+
+export interface SelectOptionDefault {
+  value: string;
+  defaultSelected: boolean;
+  disabled: boolean;
+}
+
+// The browser's initial selection: every selected option for a multiple select; otherwise the
+// last option marked selected, or the first enabled option when none is. Embedded in the frame.
+export function authoredSelectValues(options: SelectOptionDefault[], multiple: boolean): string[] {
+  const marked = options.flatMap((option) => (option.defaultSelected ? [option.value] : []));
+
+  if (multiple) return marked;
+
+  const last = marked.at(-1);
+
+  if (last !== undefined) return [last];
+
+  const firstEnabled = options.find((option) => !option.disabled);
+
+  return firstEnabled ? [firstEnabled.value] : [];
+}
+
+// Emits a self-contained function's source as a const declaration. Wrangler bundles with
+// keepNames, which wraps inner functions in a module-level __name helper the copy cannot see.
+export function embeddedFunction(name: string, fn: { toString(): string }): string {
+  const source = fn.toString();
+  const keepNames = source.includes("__name(") ? "const __name = (target) => target;\n" : "";
+
+  return `${keepNames}const ${name} = ${source};`;
 }
 
 function scriptLiteral(value: string): string {

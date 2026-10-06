@@ -1,5 +1,5 @@
 import { REVIEW_LIMITS, formatReviewMarkdown } from "../shared/review";
-import { escapeScriptText } from "./review-frame";
+import { embeddedFunction, escapeScriptText } from "./review-frame";
 
 export interface ReviewViewerConfig {
   id: string;
@@ -208,18 +208,63 @@ function reviewConfigJson(config: ReviewViewerConfig): string {
   return escapeScriptText(JSON.stringify({ ...config, limits: REVIEW_LIMITS }));
 }
 
-// Wrangler bundles with keepNames, which wraps named functions in a module-level __name call
-// that the embedded copy cannot see.
 export function embeddedFormatterSource(): string {
-  const source = formatReviewMarkdown.toString();
-  const keepNames = source.includes("__name(") ? "const __name = (target) => target;\n" : "";
+  return embeddedFunction("formatReviewMarkdown", formatReviewMarkdown);
+}
 
-  return `${keepNames}const formatReviewMarkdown = ${source};`;
+export interface SerialSaver {
+  request: () => void;
+  busy: () => boolean;
+}
+
+// Keeps one save in flight per decision. Requests made meanwhile collapse into a single
+// follow-up save, and send reads the latest answer when it runs, so an older answer can never
+// land after a newer one. Embedded in the viewer script.
+export function createSerialSaver(send: () => Promise<void>, onIdle: () => void): SerialSaver {
+  let running = false;
+  let queued = false;
+
+  const run = async (): Promise<void> => {
+    running = true;
+
+    do {
+      queued = false;
+
+      try {
+        await send();
+      } catch {
+        // send reports its own failures; the next queued save still runs.
+      }
+    } while (queued);
+
+    running = false;
+    onIdle();
+  };
+
+  return {
+    request: () => {
+      if (running) queued = true;
+      else void run();
+    },
+    busy: () => running || queued,
+  };
 }
 
 export function reviewViewerScript(): string {
+  // Each embedded function may carry its own __name shim; keep only the first declaration.
+  const helpers = [
+    embeddedFormatterSource(),
+    embeddedFunction("createSerialSaver", createSerialSaver),
+  ]
+    .join("\n")
+    .split("\n")
+    .filter(
+      (line, index, lines) => !line.startsWith("const __name =") || lines.indexOf(line) === index,
+    )
+    .join("\n");
+
   return `(() => {
-${embeddedFormatterSource()}
+${helpers}
 ${VIEWER_SCRIPT}
 })();`;
 }
@@ -263,6 +308,7 @@ const VIEWER_SCRIPT = `
     selection: null,
     draft: null,
     editingId: null,
+    editDraft: null,
     expanded: new Set(),
     frameReady: false,
     frameIsEntry: true,
@@ -340,7 +386,7 @@ const VIEWER_SCRIPT = `
       state.comments = (Array.isArray(review.comments) ? review.comments : []).filter(validComment).map(localComment);
       state.decisions.clear();
       for (const d of Array.isArray(review.decisions) ? review.decisions : []) {
-        if (validDecision(d)) state.decisions.set(d.id, { ...d, notOffered: [], saving: false, saveTimer: 0, saveToken: 0 });
+        if (validDecision(d)) state.decisions.set(d.id, { ...d, notOffered: [], saving: false, saveTimer: 0, saver: null });
       }
       state.loaded = true;
       state.loadError = "";
@@ -618,7 +664,7 @@ const VIEWER_SCRIPT = `
   }
 
   function recordFrom(view, notOffered) {
-    const rec = state.decisions.get(view.id) || { id: view.id, saving: false, saveTimer: 0, saveToken: 0, notOffered: [], updatedAt: "" };
+    const rec = state.decisions.get(view.id) || { id: view.id, saving: false, saveTimer: 0, saver: null, notOffered: [], updatedAt: "" };
     Object.assign(rec, {
       question: view.question,
       controls: view.controls,
@@ -637,26 +683,36 @@ const VIEWER_SCRIPT = `
     return { id: rec.id, question: rec.question, controls: rec.controls, values, interacted: true, answeredVersion: rec.answeredVersion };
   }
 
+  function saverFor(rec) {
+    if (!rec.saver) {
+      rec.saver = createSerialSaver(
+        () => putDecision(rec, false),
+        () => {
+          rec.saving = !!rec.saveTimer;
+          render();
+        },
+      );
+    }
+    return rec.saver;
+  }
+
   function scheduleDecisionSave(rec, delay) {
     clearTimeout(rec.saveTimer);
     rec.saving = true;
-    rec.saveTimer = setTimeout(() => saveDecision(rec, false), delay);
+    rec.saveTimer = setTimeout(() => {
+      rec.saveTimer = 0;
+      saverFor(rec).request();
+    }, delay);
     render();
   }
 
-  async function saveDecision(rec, keepalive) {
-    clearTimeout(rec.saveTimer);
-    rec.saveTimer = 0;
-    const token = ++rec.saveToken;
+  // The payload is built when the request starts, so a queued save always carries the latest answer.
+  async function putDecision(rec, keepalive) {
     try {
       const payload = await api("PUT", "/decisions/" + encodeURIComponent(rec.id), decisionPayload(rec), keepalive);
-      if (token === rec.saveToken && payload && payload.decision && isString(payload.decision.updatedAt)) rec.updatedAt = payload.decision.updatedAt;
+      if (payload && payload.decision && isString(payload.decision.updatedAt)) rec.updatedAt = payload.decision.updatedAt;
     } catch (error) {
       if (!keepalive) toast("Decision not saved: " + errorText(error));
-    }
-    if (token === rec.saveToken) {
-      rec.saving = false;
-      render();
     }
   }
 
@@ -664,8 +720,10 @@ const VIEWER_SCRIPT = `
     const view = decisionViews().find((v) => v.id === id);
     if (!view || view.orphaned) return;
     const rec = recordFrom(view, []);
+    clearTimeout(rec.saveTimer);
+    rec.saveTimer = 0;
     rec.saving = true;
-    saveDecision(rec, false);
+    saverFor(rec).request();
     render();
   }
 
@@ -740,6 +798,14 @@ const VIEWER_SCRIPT = `
 
     if (!state.panelOpen) return;
     const scrollTop = list.scrollTop;
+    // Async renders rebuild the list; carry an open editor's text, caret, and focus across.
+    const liveEditor = list.querySelector(".pb-card .edit:not([hidden]) textarea");
+    if (liveEditor && state.editDraft) {
+      state.editDraft.value = liveEditor.value;
+      state.editDraft.start = liveEditor.selectionStart;
+      state.editDraft.end = liveEditor.selectionEnd;
+      if (document.activeElement === liveEditor) state.editDraft.focus = true;
+    }
     list.replaceChildren();
     if (state.loadError) {
       const error = document.createElement("div");
@@ -874,11 +940,15 @@ const VIEWER_SCRIPT = `
       const edit = el.querySelector(".edit");
       edit.hidden = false;
       const ta = edit.querySelector("textarea");
-      ta.value = c.body;
-      queueMicrotask(() => {
-        ta.focus();
-        ta.setSelectionRange(ta.value.length, ta.value.length);
-      });
+      const draft = state.editDraft && state.editDraft.id === c.id ? state.editDraft : null;
+      ta.value = draft ? draft.value : c.body;
+      if (draft && draft.focus) {
+        draft.focus = false;
+        queueMicrotask(() => {
+          ta.focus();
+          ta.setSelectionRange(draft.start, draft.end);
+        });
+      }
     }
     return el;
   }
@@ -1180,6 +1250,7 @@ const VIEWER_SCRIPT = `
     if (act === "jump") jumpTo(c.id);
     if (act === "edit") {
       state.editingId = c.id;
+      state.editDraft = { id: c.id, value: c.body, start: c.body.length, end: c.body.length, focus: true };
       render();
     }
     if (act === "edit-cancel") {
@@ -1249,7 +1320,11 @@ const VIEWER_SCRIPT = `
       clearTimeout(pending.timer);
       commitDelete(pending, true);
     }
-    for (const rec of state.decisions.values()) if (rec.saveTimer) saveDecision(rec, true);
+    for (const rec of state.decisions.values()) {
+      if (!rec.saveTimer) continue;
+      clearTimeout(rec.saveTimer);
+      putDecision(rec, true);
+    }
   });
 
   // ---- mobile keyboard docking ----

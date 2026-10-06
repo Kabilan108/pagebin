@@ -2,8 +2,17 @@ import { describe, expect, test } from "bun:test";
 
 import { formatReviewMarkdown, type ReviewFormatInput } from "../shared/review";
 import worker from "../worker/index";
-import { frameScriptTag } from "../worker/review-frame";
-import { embeddedFormatterSource, reviewViewerScript } from "../worker/review-ui";
+import {
+  authoredSelectValues,
+  embeddedFunction,
+  frameScriptTag,
+  type SelectOptionDefault,
+} from "../worker/review-frame";
+import {
+  createSerialSaver,
+  embeddedFormatterSource,
+  reviewViewerScript,
+} from "../worker/review-ui";
 
 interface StoredObject {
   bytes: Uint8Array;
@@ -361,5 +370,119 @@ describe("embedded response formatter", () => {
 
     expect(script).not.toContain("</script");
     expect(() => new Function(script)).not.toThrow();
+  });
+});
+
+const option = (value: string, defaultSelected = false, disabled = false): SelectOptionDefault => ({
+  value,
+  defaultSelected,
+  disabled,
+});
+
+describe("authored select defaults", () => {
+  test("a single select without a selected option defaults to its first enabled option", () => {
+    expect(authoredSelectValues([option("light"), option("dark")], false)).toEqual(["light"]);
+    expect(authoredSelectValues([option("pick", false, true), option("dark")], false)).toEqual([
+      "dark",
+    ]);
+    expect(authoredSelectValues([option("a", false, true)], false)).toEqual([]);
+  });
+
+  test("a single select keeps the last option marked selected", () => {
+    expect(
+      authoredSelectValues([option("a", true), option("b"), option("c", true)], false),
+    ).toEqual(["c"]);
+  });
+
+  test("a multiple select has no implicit default", () => {
+    expect(authoredSelectValues([option("a"), option("b")], true)).toEqual([]);
+    expect(authoredSelectValues([option("a", true), option("b", true)], true)).toEqual(["a", "b"]);
+  });
+
+  test("ships in the frame script", () => {
+    expect(frameScriptTag("*")).toContain(
+      embeddedFunction("authoredSelectValues", authoredSelectValues),
+    );
+  });
+});
+
+describe("serial decision saver", () => {
+  test("keeps one save in flight and sends the latest answer last", async () => {
+    let answer = "dark";
+    let stored = "";
+    const sent: string[] = [];
+    const releases: (() => void)[] = [];
+    let idle = 0;
+
+    const saver = createSerialSaver(
+      () => {
+        const value = answer;
+
+        sent.push(value);
+
+        return new Promise<void>((resolve) => {
+          releases.push(() => {
+            stored = value;
+            resolve();
+          });
+        });
+      },
+      () => {
+        idle += 1;
+      },
+    );
+
+    saver.request();
+    answer = "light";
+    saver.request();
+    answer = "auto";
+    saver.request();
+
+    expect(sent).toEqual(["dark"]);
+    expect(saver.busy()).toBe(true);
+
+    releases[0]!();
+    await Bun.sleep(0);
+
+    expect(sent).toEqual(["dark", "auto"]);
+
+    releases[1]!();
+    await Bun.sleep(0);
+
+    expect(stored).toBe("auto");
+    expect(saver.busy()).toBe(false);
+    expect(idle).toBe(1);
+  });
+
+  test("runs a queued save after a failed one", async () => {
+    const calls: number[] = [];
+    let release: () => void = () => {};
+
+    const saver = createSerialSaver(
+      () => {
+        calls.push(calls.length);
+
+        return calls.length === 1
+          ? new Promise<void>((_, reject) => {
+              release = () => reject(new Error("offline"));
+            })
+          : Promise.resolve();
+      },
+      () => {},
+    );
+
+    saver.request();
+    saver.request();
+    release();
+    await Bun.sleep(0);
+
+    expect(calls).toEqual([0, 1]);
+    expect(saver.busy()).toBe(false);
+  });
+
+  test("ships in the viewer script", () => {
+    expect(reviewViewerScript()).toContain(
+      embeddedFunction("createSerialSaver", createSerialSaver),
+    );
   });
 });

@@ -712,7 +712,7 @@ describe("worker", () => {
     expect(viewerHtml).toContain(`href="/p/${published.id}/`);
     expect(viewerHtml).toContain('id="pagebin-dd"');
     expect(viewerHtml).not.toContain("pagebinPoll");
-    expect(viewerHtml).not.toContain("/api/artifacts/");
+    expect(viewerHtml).not.toContain("/version/");
     expect((await worker.fetch(new Request(`${published.url}/v/0`), env as never)).status).toBe(
       404,
     );

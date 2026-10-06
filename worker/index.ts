@@ -13,6 +13,13 @@ import {
 } from "../shared/content";
 import { FAVICON_SVG, dashboardHtml } from "./dashboard";
 import { NOT_FOUND_HTML } from "./not-found";
+import { frameScriptTag } from "./review-frame";
+import {
+  REVIEW_CSS,
+  type ReviewViewerConfig,
+  reviewCountButtonHtml,
+  reviewStageHtml,
+} from "./review-ui";
 
 interface Env {
   ARTIFACTS: R2Bucket;
@@ -181,21 +188,6 @@ const STANDARD_IFRAME_PERMISSIONS = "clipboard-write; fullscreen";
 const USERCONTENT_LABEL_PLACEHOLDER = "{label}";
 
 const FRAME_PATH = /^\/frame\/([^/]+)\/([^/]+)\/v\/([1-9]\d*)(?:\/(.+))?$/;
-
-// Runs inside every standard document frame. Links to other hosts open in a new tab because
-// the sandbox blocks top-level navigation and most sites refuse to be framed.
-const FRAME_SCRIPT = `<script data-pagebin="frame">(() => {
-  const navigatesFrame = (link) => ["", "_self", "_top", "_parent"].includes((link.getAttribute("target") || "").toLowerCase());
-  addEventListener("click", (event) => {
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const link = event.target instanceof Element ? event.target.closest("a[href], area[href]") : null;
-    if (!link || link.hasAttribute("download") || !navigatesFrame(link)) return;
-    const url = new URL(link.getAttribute("href"), document.baseURI);
-    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.host === location.host) return;
-    event.preventDefault();
-    window.open(url.href, "_blank", "noopener,noreferrer");
-  });
-})();</script>`;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -1630,6 +1622,7 @@ function scrubberBarHtml(
   token: string,
   metadata: ArtifactMetadata,
   pinnedVersion: number | null,
+  reviewable: boolean,
 ): string {
   const current = artifactHead(metadata).version;
   const viewed = pinnedVersion ?? current;
@@ -1662,7 +1655,9 @@ function scrubberBarHtml(
   const agent = viewerAgentHtml(metadata.attributes.agent);
   const identity = `<span class="pb-identity"><span class="pb-name">${escapeHtml(metadata.filename)}</span>${agent ? `<span class="pb-agent-sep" aria-hidden="true">·</span>${agent}` : ""}</span>`;
 
-  return `<div class="pagebin-bar">${identity}${liveDot}${dropdown}${copy}</div>`;
+  const comments = reviewable ? reviewCountButtonHtml() : "";
+
+  return `<div class="pagebin-bar">${identity}${liveDot}${dropdown}${comments}${copy}</div>`;
 }
 
 function scrubberBarScript(id: string, token: string, viewedVersion: number): string {
@@ -1719,6 +1714,32 @@ if (pagebinDd) {
 `;
 }
 
+// Resizing the layout viewport for the soft keyboard keeps the docked composer above it.
+const VIEWER_VIEWPORT = "width=device-width, initial-scale=1, interactive-widget=resizes-content";
+
+// Review needs the frame script, which only standard HTML documents receive.
+function reviewViewerConfig(
+  metadata: ArtifactMetadata,
+  entry: ArtifactVersion,
+  token: string,
+  frameOrigin: string | null,
+): ReviewViewerConfig | null {
+  const file = entry.manifest?.files.find((f) => f.path === entry.manifest?.entrypoint);
+  const isDocument = entry.manifest ? contentKind(file?.contentType ?? "") === "document" : true;
+
+  if (metadata.sandbox !== "standard" || !isDocument) return null;
+
+  return {
+    id: metadata.id,
+    token,
+    title: metadata.attributes.title ?? metadata.filename,
+    filename: metadata.filename,
+    version: entry.version,
+    framePath: framePath(metadata.id, token, entry),
+    frameOrigin,
+  };
+}
+
 async function serveViewer(
   env: Env,
   requestUrl: string,
@@ -1742,22 +1763,24 @@ async function serveViewer(
   const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
   const version = metadata.revision;
   const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, artifactHead(metadata))}`;
+  const review = reviewViewerConfig(metadata, artifactHead(metadata), token, frameOrigin);
+  const content = contentViewer(metadata, artifactHead(metadata), rawPath, sandbox, frameSrc);
 
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="${VIEWER_VIEWPORT}">
 <meta name="robots" content="noindex,nofollow,noarchive">
 <title>${escapeHtml(metadata.filename)}</title>
 <style>
 html,body{height:100%;margin:0;background:#fff}
 iframe{display:block;width:100%;height:100%;border:0}
-${VIEWER_BAR_CSS}
+${VIEWER_BAR_CSS}${review ? REVIEW_CSS : ""}
 </style>
 </head>
 <body>
-${scrubberBarHtml(id, token, metadata, null)}${contentViewer(metadata, artifactHead(metadata), rawPath, sandbox, frameSrc)}
+${scrubberBarHtml(id, token, metadata, null, review !== null)}${review ? reviewStageHtml(content, review) : content}
 <script>
 ${scrubberBarScript(id, token, artifactHead(metadata).version)}
 const pagebinMinDelayMs = 2000;
@@ -1830,22 +1853,24 @@ async function servePinnedViewer(
   const frameOrigin = await documentFrameOrigin(env, metadata);
   const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
   const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, entry)}`;
+  const review = reviewViewerConfig(metadata, entry, token, frameOrigin);
+  const content = contentViewer(metadata, entry, rawPath, sandbox, frameSrc);
 
   const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="${VIEWER_VIEWPORT}">
 <meta name="robots" content="noindex,nofollow,noarchive">
 <title>${escapeHtml(metadata.filename)} · Version ${entry.version}</title>
 <style>
 html,body{height:100%;margin:0;background:#fff}
 iframe{display:block;width:100%;height:100%;border:0}
-${VIEWER_BAR_CSS}
+${VIEWER_BAR_CSS}${review ? REVIEW_CSS : ""}
 </style>
 </head>
 <body>
-${scrubberBarHtml(id, token, metadata, entry.version)}${contentViewer(metadata, entry, rawPath, sandbox, frameSrc)}
+${scrubberBarHtml(id, token, metadata, entry.version, review !== null)}${review ? reviewStageHtml(content, review) : content}
 <script>${scrubberBarScript(id, token, entry.version)}</script>
 </body>
 </html>`;
@@ -2887,7 +2912,18 @@ function viewerCsp(frameOrigin: string | null): string {
   return `default-src 'none'; connect-src 'self'; frame-src ${frameSources}; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
 }
 
-function withFrameScript(response: Response): Response {
+// The frame posts review messages to this origin. Without a usercontent origin the frame shares
+// the viewer's host with an opaque origin, so it must use "*"; its CSP's frame-ancestors 'self'
+// still guarantees that the parent is the viewer.
+function frameViewerOrigin(request: Request, env: Env): string {
+  const viewerOrigin = configuredViewerOrigin(env);
+
+  return viewerOrigin && isUsercontentHostname(new URL(request.url).hostname, env)
+    ? viewerOrigin
+    : "*";
+}
+
+function withFrameScript(response: Response, script: string): Response {
   let injected = false;
 
   // The script goes first inside an explicit <head>, or before the first element after <html>.
@@ -2903,15 +2939,15 @@ function withFrameScript(response: Response): Response {
         injected = true;
 
         if (tagName === "head") {
-          element.prepend(FRAME_SCRIPT, { html: true });
+          element.prepend(script, { html: true });
         } else {
-          element.before(FRAME_SCRIPT, { html: true });
+          element.before(script, { html: true });
         }
       },
     })
     .onDocument({
       end(end) {
-        if (!injected) end.append(FRAME_SCRIPT, { html: true });
+        if (!injected) end.append(script, { html: true });
       },
     })
     .transform(response);
@@ -3044,7 +3080,10 @@ async function serveFile(
 
     if (!object) return siteNotFound();
 
-    return withFrameScript(new Response(object.body, { status: 200, headers }));
+    return withFrameScript(
+      new Response(object.body, { status: 200, headers }),
+      frameScriptTag(frameViewerOrigin(request, env)),
+    );
   }
 
   let range: { offset: number; length: number } | undefined;

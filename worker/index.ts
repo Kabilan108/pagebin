@@ -24,7 +24,6 @@ import {
   resolvePublisherComments,
   reviewNotFound,
   reviewObjectKey,
-  synchronizeReviewBinding,
   type ReviewArtifact,
 } from "./review";
 import { frameScriptTag } from "./review-frame";
@@ -1307,7 +1306,7 @@ async function reissueArtifact(request: Request, env: Env, id: string): Promise<
     ...(encryptedToken ? { encryptedToken } : {}),
   };
 
-  if (!(await writeMetadataThenSynchronizeReview(env, stored, nextMetadata, tokenHash))) {
+  if (!(await writeMetadataIfMatch(env, id, nextMetadata, stored.etag))) {
     return conflict();
   }
 
@@ -1470,19 +1469,7 @@ async function routeReviewRequest(
 
     if (!stored || stored.metadata.deletedAt) return reviewNotFound();
 
-    const artifact = reviewArtifact(
-      stored.metadata,
-      async () => {
-        const current = await readStoredMetadata(env, id);
-
-        return (
-          current !== null &&
-          !current.metadata.deletedAt &&
-          current.metadata.tokenHash === stored.metadata.tokenHash
-        );
-      },
-      async () => artifactRetired(env, id),
-    );
+    const artifact = reviewArtifact(stored.metadata);
 
     return publisherMatch
       ? getPublisherReview(env, artifact)
@@ -1507,11 +1494,7 @@ async function routeReviewRequest(
 
   if (!metadata) return reviewNotFound();
 
-  const artifact = reviewArtifact(
-    metadata,
-    async () => (await readAuthorizedMetadata(env, id, token)) !== null,
-    async () => artifactRetired(env, id),
-  );
+  const artifact = reviewArtifact(metadata);
 
   if (request.method === "GET" && !viewerMatch[3]) {
     return getViewerReview(env, artifact);
@@ -1536,31 +1519,14 @@ async function routeReviewRequest(
   return reviewNotFound();
 }
 
-function reviewArtifact(
-  metadata: ArtifactMetadata,
-  bindingCurrent: () => Promise<boolean>,
-  retired: () => Promise<boolean>,
-): ReviewArtifact {
+function reviewArtifact(metadata: ArtifactMetadata): ReviewArtifact {
   return {
-    binding: metadata.tokenHash,
-    bindingCurrent,
     id: metadata.id,
     filename: metadata.filename,
     title: metadata.attributes.title ?? metadata.filename,
-    retired,
     version: artifactHead(metadata).version,
     versions: metadata.versions.map((version) => version.version),
   };
-}
-
-async function artifactRetired(env: Env, id: string): Promise<boolean> {
-  const stored = await readStoredMetadata(env, id);
-
-  return (
-    stored === null ||
-    Boolean(stored.metadata.deletedAt) ||
-    Boolean(stored.metadata.expiresAt && Date.now() >= Date.parse(stored.metadata.expiresAt))
-  );
 }
 
 function decodePathSegment(value: string | undefined): string | null {
@@ -2876,34 +2842,6 @@ async function writeMetadataIfMatch(
   });
 
   return result !== null;
-}
-
-async function writeMetadataThenSynchronizeReview(
-  env: Env,
-  stored: StoredArtifactMetadata,
-  metadata: ArtifactMetadata,
-  nextBinding: string,
-): Promise<boolean> {
-  const written = await writeMetadataIfMatch(env, metadata.id, metadata, stored.etag);
-
-  if (!written) return false;
-
-  const bindingCurrent = async (): Promise<boolean> => {
-    const current = await readStoredMetadata(env, metadata.id);
-
-    return (
-      current !== null &&
-      !current.metadata.deletedAt &&
-      (!current.metadata.expiresAt || Date.now() < Date.parse(current.metadata.expiresAt)) &&
-      current.metadata.tokenHash === nextBinding
-    );
-  };
-
-  await synchronizeReviewBinding(env, metadata.id, nextBinding, bindingCurrent, async () =>
-    artifactRetired(env, metadata.id),
-  );
-
-  return bindingCurrent();
 }
 
 function tombstoneMetadata(metadata: ArtifactMetadata): ArtifactMetadata {

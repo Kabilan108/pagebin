@@ -28,11 +28,8 @@ class MemoryR2Bucket {
   invalidateConditionalPuts = 0;
   maxMetadataGets = 0;
   metadataGetDelayMs = 0;
-  pauseAfterNextReviewPut: BucketPause | null = null;
   pauseBeforeNextMetadataPut: BucketPause | null = null;
-  pauseBeforeNextReviewPut: BucketPause | null = null;
   pauseNextMetadataGetAfterRead: BucketPause | null = null;
-  pauseNextReviewGet: BucketPause | null = null;
   reviewObjectsFirstOnNextList = false;
   listPageSize = Number.POSITIVE_INFINITY;
   listRequestCount = 0;
@@ -50,13 +47,6 @@ class MemoryR2Bucket {
   ): Promise<{ etag: string } | null> {
     if (this.failMetadataPut && key.endsWith("/metadata.json")) {
       throw new Error("metadata put failed");
-    }
-
-    if (options.onlyIf && key.endsWith("/review.json") && this.pauseBeforeNextReviewPut) {
-      const pause = this.pauseBeforeNextReviewPut;
-      this.pauseBeforeNextReviewPut = null;
-      pause.started();
-      await pause.release;
     }
 
     if (options.onlyIf && key.endsWith("/metadata.json") && this.pauseBeforeNextMetadataPut) {
@@ -106,13 +96,6 @@ class MemoryR2Bucket {
         uploaded: new Date(),
       });
 
-      if (key.endsWith("/review.json") && this.pauseAfterNextReviewPut) {
-        const pause = this.pauseAfterNextReviewPut;
-        this.pauseAfterNextReviewPut = null;
-        pause.started();
-        await pause.release;
-      }
-
       return { etag };
     }
 
@@ -160,13 +143,6 @@ class MemoryR2Bucket {
     etag: string;
     customMetadata?: Record<string, string>;
   } | null> {
-    if (key.endsWith("/review.json") && this.pauseNextReviewGet) {
-      const pause = this.pauseNextReviewGet;
-      this.pauseNextReviewGet = null;
-      pause.started();
-      await pause.release;
-    }
-
     const tracksConcurrency = key.endsWith("/metadata.json");
 
     if (tracksConcurrency) {
@@ -3297,12 +3273,18 @@ describe("review API", () => {
       return payload.review.decisions[0]!.values.theme;
     };
 
-    expect((await put(answer("light", "page-one", 2))).status).toBe(200);
+    const newest = await put(answer("light", "page-one", 2));
+
+    expect(newest.status).toBe(200);
+    expect(JSON.stringify(await newest.json())).not.toContain("lastWrite");
 
     const stale = await put(answer("dark", "page-one", 1));
 
     expect(stale.status).toBe(200);
-    expect(await stale.json()).toMatchObject({ decision: { values: { theme: "light" } } });
+    const stalePayload = await stale.json();
+
+    expect(stalePayload).toMatchObject({ decision: { values: { theme: "light" } } });
+    expect(JSON.stringify(stalePayload)).not.toContain("lastWrite");
     expect(await storedTheme()).toBe("light");
 
     expect((await put(answer("dark", "page-two", 1))).status).toBe(200);
@@ -3310,6 +3292,12 @@ describe("review API", () => {
 
     expect((await put(answer("light", "page-one", 1))).status).toBe(200);
     expect(await storedTheme()).toBe("light");
+
+    const viewerResponse = await worker.fetch(new Request(base), env as never);
+    const publisherResponse = await publisherReview(env, published.id);
+
+    expect(JSON.stringify(await viewerResponse.json())).not.toContain("lastWrite");
+    expect(JSON.stringify(publisherResponse)).not.toContain("lastWrite");
 
     for (const clientSeq of [{ page: "page-one", n: 0 }, { page: "bad page", n: 1 }, { n: 3 }]) {
       expect((await put({ ...(answer("dark", "x", 1) as object), clientSeq })).status).toBe(400);
@@ -3420,312 +3408,57 @@ describe("review API", () => {
     expect(publisher.review.comments[0]?.body).toBe("Updated after one conflict");
   });
 
-  test("fences an in-flight old-token review update when reissue changes the binding", async () => {
+  test("reads legacy review envelopes and rewrites them as plain records", async () => {
     const env = createEnv();
     const published = await publishFixture(env);
-    const oldBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+    const reviewKey = `artifacts/${published.id}/review.json`;
+    const base = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
+    const now = new Date().toISOString();
 
-    const created = await reviewJsonRequest(
-      `${oldBase}/comments`,
-      "POST",
-      {
-        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
-        body: "Before reissue",
-      },
-      env,
-    );
-
-    const commentId = ((await created.json()) as { comment: { id: string } }).comment.id;
-    const writePause = pauseBeforeReviewPut(env.ARTIFACTS);
-
-    const staleWrite = reviewJsonRequest(
-      `${oldBase}/comments/${commentId}`,
-      "PATCH",
-      { body: "Revoked mutation" },
-      env,
-    );
-
-    await writePause.started;
-
-    const reissue = await worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
-        method: "POST",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
-
-    expect(reissue.status).toBe(200);
-    writePause.release();
-    expect((await staleWrite).status).toBe(404);
-    expect((await publisherReview(env, published.id)).review.comments[0]?.body).toBe(
-      "Before reissue",
-    );
-  });
-
-  test("initializes a reissue fence before an in-flight first comment can create the review", async () => {
-    const env = createEnv();
-    const published = await publishFixture(env);
-    const oldBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
-    const writePause = pauseBeforeReviewPut(env.ARTIFACTS);
-
-    const staleCreate = reviewJsonRequest(
-      `${oldBase}/comments`,
-      "POST",
-      {
-        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
-        body: "Revoked create",
-      },
-      env,
-    );
-
-    await writePause.started;
-
-    const reissue = await worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
-        method: "POST",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
-
-    expect(reissue.status).toBe(200);
-    const reissued = (await reissue.json()) as { url: string };
-    writePause.release();
-    expect((await staleCreate).status).toBe(404);
-    expect((await publisherReview(env, published.id)).review.comments).toEqual([]);
-
-    const stored = await env.ARTIFACTS.get(`artifacts/${published.id}/review.json`);
-
-    const value = JSON.parse((await stored?.text()) ?? "null") as {
-      binding?: string;
-      review?: ReviewRecord;
+    const review: ReviewRecord = {
+      schemaVersion: 1,
+      comments: [
+        {
+          id: "legacy-comment",
+          anchor: { quote: "old shape", prefix: "", suffix: "", version: 1 },
+          body: "Stored in an envelope",
+          status: "open",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      decisions: [],
+      updatedAt: now,
     };
 
-    expect(value.binding).toBe(await sha256ForTest(viewerToken(reissued.url)));
-    expect(value.review).toEqual({
-      schemaVersion: 1,
-      comments: [],
-      decisions: [],
-      updatedAt: null,
+    await env.ARTIFACTS.put(reviewKey, JSON.stringify({ binding: "legacy-token-hash", review }));
+
+    const read = await worker.fetch(new Request(base), env as never);
+
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({
+      review: { comments: [{ id: "legacy-comment", body: "Stored in an envelope" }] },
     });
-  });
 
-  test("rejects in-flight old-token writes across reissue and deletion", async () => {
-    const env = createEnv();
-    const reissuedArtifact = await publishFixture(env);
-    const oldBase = `https://pagebin.test/api/artifacts/${reissuedArtifact.id}/review/${viewerToken(reissuedArtifact.url)}`;
-
-    const created = await reviewJsonRequest(
-      `${oldBase}/comments`,
-      "POST",
-      {
-        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
-        body: "Original",
-      },
-      env,
-    );
-
-    const commentId = ((await created.json()) as { comment: { id: string } }).comment.id;
-    const reissuePause = pauseReviewGet(env.ARTIFACTS);
-
-    const oldWrite = reviewJsonRequest(
-      `${oldBase}/comments/${commentId}`,
+    const updated = await reviewJsonRequest(
+      `${base}/comments/legacy-comment`,
       "PATCH",
-      { body: "Stale writer" },
+      { body: "Rewritten without an envelope" },
       env,
     );
 
-    await reissuePause.started;
+    expect(updated.status).toBe(200);
 
-    const reissue = await worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${reissuedArtifact.id}/reissue`, {
-        method: "POST",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
+    const stored = JSON.parse(
+      (await (await env.ARTIFACTS.get(reviewKey))?.text()) ?? "null",
+    ) as Record<string, unknown> | null;
 
-    expect(reissue.status).toBe(200);
-    reissuePause.release();
-    expect((await oldWrite).status).toBe(404);
-    expect((await publisherReview(env, reissuedArtifact.id)).review.comments[0]?.body).toBe(
-      "Original",
-    );
-
-    const postPutArtifact = await publishFixture(env);
-    const postPutBase = `https://pagebin.test/api/artifacts/${postPutArtifact.id}/review/${viewerToken(postPutArtifact.url)}`;
-
-    const postPutComment = await reviewJsonRequest(
-      `${postPutBase}/comments`,
-      "POST",
-      {
-        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
-        body: "Before race",
-      },
-      env,
-    );
-
-    const postPutCommentId = ((await postPutComment.json()) as { comment: { id: string } }).comment
-      .id;
-
-    const postPutPause = pauseReviewPut(env.ARTIFACTS);
-
-    const committedWrite = reviewJsonRequest(
-      `${postPutBase}/comments/${postPutCommentId}`,
-      "PATCH",
-      { body: "Committed before reissue" },
-      env,
-    );
-
-    await postPutPause.started;
-
-    const postPutReissue = await worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${postPutArtifact.id}/reissue`, {
-        method: "POST",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
-
-    expect(postPutReissue.status).toBe(200);
-    postPutPause.release();
-    expect((await committedWrite).status).toBe(404);
-    expect((await publisherReview(env, postPutArtifact.id)).review.comments[0]?.body).toBe(
-      "Committed before reissue",
-    );
-
-    const deletedArtifact = await publishFixture(env);
-    const deletedBase = `https://pagebin.test/api/artifacts/${deletedArtifact.id}/review/${viewerToken(deletedArtifact.url)}`;
-
-    const deletedComment = await reviewJsonRequest(
-      `${deletedBase}/comments`,
-      "POST",
-      {
-        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
-        body: "Delete me",
-      },
-      env,
-    );
-
-    const deletedCommentId = ((await deletedComment.json()) as { comment: { id: string } }).comment
-      .id;
-
-    const deletePause = pauseReviewGet(env.ARTIFACTS);
-
-    const deletedWrite = reviewJsonRequest(
-      `${deletedBase}/comments/${deletedCommentId}`,
-      "PATCH",
-      { body: "Orphan attempt" },
-      env,
-    );
-
-    await deletePause.started;
-
-    const deletion = await worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${deletedArtifact.id}`, {
-        method: "DELETE",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
-
-    expect(deletion.status).toBe(200);
-    deletePause.release();
-    expect((await deletedWrite).status).toBe(404);
-    expect(await env.ARTIFACTS.get(`artifacts/${deletedArtifact.id}/review.json`)).toBeNull();
-  });
-
-  test("does not recreate a review when deletion overtakes reissue synchronization", async () => {
-    const env = createEnv();
-    const published = await publishFixture(env);
-    const reviewBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
-
-    expect(
-      (
-        await reviewJsonRequest(
-          `${reviewBase}/comments`,
-          "POST",
-          {
-            anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
-            body: "Delete during reissue",
-          },
-          env,
-        )
-      ).status,
-    ).toBe(201);
-
-    const synchronizationPause = pauseReviewGet(env.ARTIFACTS);
-
-    const reissue = worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
-        method: "POST",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
-
-    await synchronizationPause.started;
-
-    const deletion = await worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${published.id}`, {
-        method: "DELETE",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
-
-    expect(deletion.status).toBe(200);
-    synchronizationPause.release();
-    expect((await reissue).status).toBe(409);
-    expect(await env.ARTIFACTS.get(`artifacts/${published.id}/metadata.json`)).toBeNull();
-    expect(await env.ARTIFACTS.get(`artifacts/${published.id}/review.json`)).toBeNull();
-  });
-
-  test("repairs review binding after an interrupted metadata-first reissue", async () => {
-    const env = createEnv();
-    const published = await publishFixture(env);
-    const oldBase = `https://pagebin.test/api/artifacts/${published.id}/review/${viewerToken(published.url)}`;
-
-    const created = await reviewJsonRequest(
-      `${oldBase}/comments`,
-      "POST",
-      {
-        anchor: { quote: "quote", prefix: "", suffix: "", version: 1 },
-        body: "Before interruption",
-      },
-      env,
-    );
-
-    const commentId = ((await created.json()) as { comment: { id: string } }).comment.id;
-    const newToken = "replacement-viewer-token";
-    const metadataKey = `artifacts/${published.id}/metadata.json`;
-    const metadataObject = await env.ARTIFACTS.get(metadataKey);
-    const metadata = JSON.parse((await metadataObject?.text()) ?? "{}");
-    metadata.tokenHash = await sha256ForTest(newToken);
-    metadata.revision += 1;
-    await env.ARTIFACTS.put(metadataKey, JSON.stringify(metadata));
-
-    const repaired = await reviewJsonRequest(
-      `https://pagebin.test/api/artifacts/${published.id}/review/${newToken}/comments/${commentId}`,
-      "PATCH",
-      { body: "Recovered" },
-      env,
-    );
-
-    expect(repaired.status).toBe(200);
-    expect((await publisherReview(env, published.id)).review.comments[0]?.body).toBe("Recovered");
-
-    const reissue = await worker.fetch(
-      new Request(`https://pagebin.test/api/artifacts/${published.id}/reissue`, {
-        method: "POST",
-        headers: { Authorization: "Bearer publish-secret" },
-      }),
-      env as never,
-    );
-
-    expect(reissue.status).toBe(200);
-    expect((await publisherReview(env, published.id)).review.comments[0]?.body).toBe("Recovered");
+    expect(stored).toMatchObject({
+      schemaVersion: 1,
+      comments: [{ id: "legacy-comment", body: "Rewritten without an envelope" }],
+    });
+    expect(stored && Object.hasOwn(stored, "binding")).toBe(false);
+    expect(stored && Object.hasOwn(stored, "review")).toBe(false);
   });
 
   test("enforces comment count and total review size limits", async () => {
@@ -4050,50 +3783,6 @@ type ReviewRequestPayload =
   | string
   | ReviewRequestPayload[]
   | { [key: string]: ReviewRequestPayload };
-
-function pauseReviewGet(bucket: MemoryR2Bucket): ReviewGetPause {
-  let release: () => void = () => {};
-
-  let started: () => void = () => {};
-
-  const releasePromise = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-
-  const startedPromise = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-
-  bucket.pauseNextReviewGet = { release: releasePromise, started };
-
-  return { release, started: startedPromise };
-}
-
-function pauseReviewPut(bucket: MemoryR2Bucket): ReviewGetPause {
-  let release: () => void = () => {};
-
-  let started: () => void = () => {};
-
-  const releasePromise = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-
-  const startedPromise = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-
-  bucket.pauseAfterNextReviewPut = { release: releasePromise, started };
-
-  return { release, started: startedPromise };
-}
-
-function pauseBeforeReviewPut(bucket: MemoryR2Bucket): ReviewGetPause {
-  const pause = makeBucketPause();
-
-  bucket.pauseBeforeNextReviewPut = pause.bucketPause;
-
-  return pause.control;
-}
 
 function pauseBeforeMetadataPut(bucket: MemoryR2Bucket): ReviewGetPause {
   const pause = makeBucketPause();

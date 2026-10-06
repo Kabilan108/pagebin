@@ -70,6 +70,19 @@ export interface ReviewRecord {
   updatedAt: string | null;
 }
 
+export function reviewDecisionForResponse(decision: ReviewDecision): ReviewDecision {
+  const { lastWrite: _lastWrite, ...response } = decision;
+
+  return response;
+}
+
+export function reviewRecordForResponse(review: ReviewRecord): ReviewRecord {
+  return {
+    ...review,
+    decisions: review.decisions.map(reviewDecisionForResponse),
+  };
+}
+
 export interface ReviewDecisionView extends ReviewDecision {
   orphaned: boolean;
   notOffered: boolean;

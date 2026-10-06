@@ -135,6 +135,7 @@ Legacy artifacts remain viewable but cannot be opened from the dashboard until r
 
 - Public URLs are unlisted bearer capabilities, not identity-based access control.
 - Viewer tokens use 256 bits of randomness. Only their SHA-256 hashes are used for public request authentication.
+- A review write already in flight when a viewer link is reissued may still finish, but the revoked link cannot read the review or start another write.
 - A second AES-256-GCM encrypted token copy enables single-artifact dashboard recovery. The key is a Worker secret and is never stored in R2.
 - Dashboard endpoints validate the Cloudflare Access JWT signature, issuer, audience, and expiry. The CLI publisher token is never exposed to browser JavaScript.
 - Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers.

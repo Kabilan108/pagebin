@@ -3441,6 +3441,7 @@ describe("review commands", () => {
           interacted: true,
           answeredVersion: 1,
           updatedAt: now,
+          lastWrite: { page: "internal-page", n: 3 },
         },
         {
           id: "density",
@@ -3507,6 +3508,7 @@ describe("review commands", () => {
         review: { comments: [{ id: "open-comment" }, { id: "addressed-comment" }] },
       });
       expect(payload.review.decisions).toHaveLength(2);
+      expect(JSON.stringify(payload.review)).not.toContain("lastWrite");
       expect(payload.markdown).toBe(markdown.stdout);
     } finally {
       server.stop(true);

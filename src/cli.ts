@@ -33,7 +33,12 @@ import {
 
 import { prepareBundle, sendBundle, verifyBundle, type LocalBundle } from "./file-upload";
 import { FILE_LIMIT, filePathUrl } from "../shared/content";
-import { formatReviewMarkdown, type DecisionValue, type ReviewDecision } from "../shared/review";
+import {
+  formatReviewMarkdown,
+  reviewRecordForResponse,
+  type DecisionValue,
+  type ReviewDecision,
+} from "../shared/review";
 
 import packageJson from "../package.json" with { type: "json" };
 
@@ -2556,6 +2561,7 @@ async function reviewArtifact(options: ReviewOptions): Promise<void> {
   });
 
   const payload = await readJsonResponse(response, parseReviewResponse);
+  const review = reviewRecordForResponse(payload.review);
 
   const markdown = formatReviewMarkdown({
     artifact: {
@@ -2565,16 +2571,16 @@ async function reviewArtifact(options: ReviewOptions): Promise<void> {
       version: payload.version,
     },
     listsUnanswered: false,
-    decisions: payload.review.decisions.filter(reviewDecisionAnswered).map((decision) => ({
+    decisions: review.decisions.filter(reviewDecisionAnswered).map((decision) => ({
       ...decision,
       orphaned: false,
       notOffered: false,
     })),
-    comments: payload.review.comments.map((comment) => ({ ...comment, found: null })),
+    comments: review.comments.map((comment) => ({ ...comment, found: null })),
   });
 
   if (options.json) {
-    console.log(JSON.stringify(withSchema({ ...payload, markdown }), null, 2));
+    console.log(JSON.stringify(withSchema({ ...payload, review, markdown }), null, 2));
 
     return;
   }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.1 - 2026-10-06
+
+- Fixed a review panel race where a comment could appear twice, with a doubled count and a repeated entry in Copy response, until the page was reloaded. Stored reviews were not affected.
+- Release checksum files now name the bare binary, so `sha256sum -c pagebin-linux-x64.sha256` works in the download directory.
+
 ## 0.14.0 - 2026-10-06
 
 - Added a review layer to standard documents. Readers comment on selected text and answer form-control decisions marked with `data-pb-decision`. Copy response and the new `pagebin review` command produce the same Markdown, and `pagebin review resolve` marks comments addressed. Comments and answers are stored per artifact and carry across versions.

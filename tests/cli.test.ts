@@ -1252,6 +1252,20 @@ describe("configuration and type aliases", () => {
     expect(result.stderr).toContain("PAGEBIN_PUBLISH_TOKEN is not set on");
   });
 
+  test("lets an empty config endpoint fall back to the viewer origin", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-empty-endpoint-"));
+    const configPath = join(directory, "env");
+    await writeFile(configPath, "PAGEBIN_ENDPOINT= # unset\n", { mode: 0o600 });
+
+    const parsed = parseArgs(
+      ["update", "http://127.0.0.1:8790/p/abc1234567890123/view-token", "plan.html"],
+      { PAGEBIN_CONFIG: configPath },
+    );
+
+    expect(parsed.command).toBe("update");
+    expect(parsed.options).toMatchObject({ endpoint: "http://127.0.0.1:8790" });
+  });
+
   test("runs credential-free commands when the config file is unreadable", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pagebin-config-unreadable-"));
 

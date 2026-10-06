@@ -1195,7 +1195,11 @@ function readPagebinConfig(
       continue;
     }
 
-    config[match[1]] = parseConfigValue(match[2]);
+    const value = parseConfigValue(match[2]);
+
+    if (value) {
+      config[match[1]] = value;
+    }
   }
 
   return config;

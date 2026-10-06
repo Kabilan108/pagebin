@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { watch } from "node:fs";
+import { readFileSync, statSync, watch } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, relative, resolve } from "node:path";
@@ -13,6 +13,7 @@ import {
   type VerificationResult,
   type ArtifactReceipt,
   type WatchOwnership,
+  type PublishClaim,
   type ReceiptStore,
   type SandboxMode,
   type ArtifactType,
@@ -52,6 +53,32 @@ const HTML_EXTENSION = ".html";
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
 
 const OUTPUT_SCHEMA_VERSION = 1;
+
+const PUBLISH_CLAIM_MAX_AGE_MS = 10 * 60 * 1000;
+
+const ARTIFACT_TYPES = [
+  "plan",
+  "report",
+  "review",
+  "explainer",
+  "implementation-log",
+  "other",
+] as const satisfies readonly ArtifactType[];
+
+const ARTIFACT_TYPE_ALIASES = new Map<string, ArtifactType>([
+  ["log", "implementation-log"],
+  ["impl-log", "implementation-log"],
+  ["implementation_log", "implementation-log"],
+  ["implementation", "implementation-log"],
+  ["audit", "report"],
+  ["benchmark", "report"],
+]);
+
+const CONFIG_KEYS = ["PAGEBIN_ENDPOINT", "PAGEBIN_PUBLISH_TOKEN"] as const;
+
+let runtimeEnvironment: NodeJS.ProcessEnv | null = null;
+
+const warnedConfigPaths = new Set<string>();
 
 interface PublishOptions {
   assets?: string[];
@@ -233,11 +260,14 @@ export function parseTtlSeconds(value: string): number {
   return ttlSeconds;
 }
 
-export function normalizeEndpoint(value: string): string {
+export function normalizeEndpoint(
+  value: string,
+  env: NodeJS.ProcessEnv = runtimeEnvironment ?? process.env,
+): string {
   const endpoint = value.trim().replace(/\/+$/, "");
 
   if (!endpoint) {
-    throw new CliError("PAGEBIN_ENDPOINT is required.");
+    throw new CliError(missingConfigurationMessage("PAGEBIN_ENDPOINT", env));
   }
 
   try {
@@ -258,6 +288,12 @@ export function normalizeEndpoint(value: string): string {
 }
 
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): ParsedCommand {
+  const mergedEnv = mergePagebinEnvironment(env);
+
+  if (env === process.env) {
+    runtimeEnvironment = mergedEnv;
+  }
+
   const [command, ...rest] = argv;
 
   if (!command || isHelpFlag(command)) {
@@ -287,63 +323,63 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
   if (command === "publish") {
     return {
       command,
-      options: parsePublishOptions(rest, env),
+      options: parsePublishOptions(rest, mergedEnv),
     };
   }
 
   if (command === "delete") {
     return {
       command,
-      options: parseDeleteOptions(rest, env),
+      options: parseDeleteOptions(rest, mergedEnv),
     };
   }
 
   if (command === "reissue") {
     return {
       command,
-      options: parseReissueOptions(rest, env),
+      options: parseReissueOptions(rest, mergedEnv),
     };
   }
 
   if (command === "update") {
     return {
       command,
-      options: parseUpdateOptions(rest, env),
+      options: parseUpdateOptions(rest, mergedEnv),
     };
   }
 
   if (command === "watch") {
     return {
       command,
-      options: parseWatchOptions(rest, env),
+      options: parseWatchOptions(rest, mergedEnv),
     };
   }
 
   if (command === "list") {
     return {
       command,
-      options: parseListOptions(rest, env),
+      options: parseListOptions(rest, mergedEnv),
     };
   }
 
   if (command === "verify") {
     return {
       command,
-      options: parseVerifyOptions(rest, env),
+      options: parseVerifyOptions(rest, mergedEnv),
     };
   }
 
   if (command === "versions") {
     return {
       command,
-      options: parseVersionHistoryOptions(rest, env),
+      options: parseVersionHistoryOptions(rest, mergedEnv),
     };
   }
 
   if (command === "rollback") {
     return {
       command,
-      options: parseRollbackOptions(rest, env),
+      options: parseRollbackOptions(rest, mergedEnv),
     };
   }
 
@@ -446,7 +482,7 @@ function parseHelpOptions(args: string[]): ParsedCommand {
 }
 
 function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOptions {
-  const endpoint = normalizeEndpoint(readEndpoint(args, env));
+  const endpoint = normalizeEndpoint(readEndpoint(args, env), env);
   let filePath: string | null = null;
   let json = false;
   const assets: string[] = [];
@@ -540,7 +576,7 @@ function parsePublishOptions(args: string[], env: NodeJS.ProcessEnv): PublishOpt
 }
 
 function parseDeleteOptions(args: string[], env: NodeJS.ProcessEnv): DeleteOptions {
-  const endpoint = normalizeEndpoint(readEndpoint(args, env));
+  const endpoint = normalizeEndpoint(readEndpoint(args, env), env);
   let id: string | null = null;
   let json = false;
 
@@ -581,7 +617,7 @@ function parseDeleteOptions(args: string[], env: NodeJS.ProcessEnv): DeleteOptio
 }
 
 function parseReissueOptions(args: string[], env: NodeJS.ProcessEnv): ReissueOptions {
-  const endpoint = normalizeEndpoint(readEndpoint(args, env));
+  const endpoint = normalizeEndpoint(readEndpoint(args, env), env);
   let id: string | null = null;
   let json = false;
 
@@ -622,10 +658,9 @@ function parseReissueOptions(args: string[], env: NodeJS.ProcessEnv): ReissueOpt
 }
 
 function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptions {
-  let filePath: string | null = null;
+  const values: string[] = [];
   let json = false;
   const assets: string[] = [];
-  let targetValue: string | null = null;
   let inferMetadata = true;
   let ttlSeconds: number | null | undefined;
   const attributes: ArtifactAttributes = {};
@@ -672,27 +707,28 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
       throw new CliError(`Unknown option for update: ${arg}`);
     }
 
-    if (!targetValue) {
-      targetValue = arg ?? null;
-      continue;
-    }
+    values.push(arg ?? "");
 
-    if (!filePath) {
-      filePath = arg ?? null;
-      continue;
+    if (values.length > 2) {
+      throw new CliError("Usage: pagebin update <artifact_id|viewer_url> <file>.");
     }
-
-    throw new CliError("update accepts exactly one artifact target and one file path.");
   }
 
-  if (!targetValue) {
+  if (!values[0]) {
     throw new CliError("update requires an artifact ID or viewer URL.");
+  }
+
+  let targetValue = values[0];
+  let filePath = values[1] ?? null;
+
+  if (filePath) {
+    [targetValue, filePath] = resolveTargetAndFile("update", targetValue, filePath);
   }
 
   if (!filePath && isSupportedArtifactFile(targetValue)) {
     return {
       ...(assets.length ? { assets } : {}),
-      endpoint: normalizeEndpoint(readEndpoint(args, env)),
+      endpoint: normalizeEndpoint(readEndpoint(args, env), env),
       filePath: targetValue,
       id: "",
       json,
@@ -720,6 +756,7 @@ function parseUpdateOptions(args: string[], env: NodeJS.ProcessEnv): UpdateOptio
 
   const endpoint = normalizeEndpoint(
     readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "",
+    env,
   );
 
   return {
@@ -821,7 +858,7 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
 
     return {
       ...(assets.length ? { assets } : {}),
-      endpoint: normalizeEndpoint(readEndpoint(args, env)),
+      endpoint: normalizeEndpoint(readEndpoint(args, env), env),
       filePath,
       json,
       mode: "publish",
@@ -846,18 +883,21 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
     throw new CliError("Metadata options can only be used with pagebin watch <file>.");
   }
 
-  const [targetValue, filePath] = values;
+  const [firstValue, secondValue] = values;
 
-  if (!targetValue || !filePath) {
+  if (!firstValue || !secondValue) {
     throw new CliError(
       "watch accepts either one file path or one artifact target and one file path.",
     );
   }
 
+  const [targetValue, filePath] = resolveTargetAndFile("watch", firstValue, secondValue);
+
   const target = parseArtifactTarget(targetValue);
 
   const endpoint = normalizeEndpoint(
     readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "",
+    env,
   );
 
   return {
@@ -876,7 +916,7 @@ function parseWatchOptions(args: string[], env: NodeJS.ProcessEnv): WatchOptions
 }
 
 function parseListOptions(args: string[], env: NodeJS.ProcessEnv): ListOptions {
-  const endpoint = normalizeEndpoint(readEndpoint(args, env));
+  const endpoint = normalizeEndpoint(readEndpoint(args, env), env);
   let json = false;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -903,10 +943,9 @@ function parseListOptions(args: string[], env: NodeJS.ProcessEnv): ListOptions {
 }
 
 function parseVerifyOptions(args: string[], env: NodeJS.ProcessEnv): VerifyOptions {
-  let filePath: string | null = null;
+  const values: string[] = [];
   let json = false;
   const assets: string[] = [];
-  let targetValue: string | null = null;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -931,31 +970,28 @@ function parseVerifyOptions(args: string[], env: NodeJS.ProcessEnv): VerifyOptio
       throw new CliError(`Unknown option for verify: ${arg}`);
     }
 
-    if (!targetValue) {
-      targetValue = arg ?? null;
-      continue;
-    }
+    values.push(arg ?? "");
 
-    if (!filePath) {
-      filePath = arg ?? null;
-      continue;
+    if (values.length > 2) {
+      throw new CliError("Usage: pagebin verify <artifact_id|viewer_url> <file>.");
     }
-
-    throw new CliError("verify accepts exactly one artifact target and one file path.");
   }
 
-  if (!targetValue) {
+  if (!values[0]) {
     throw new CliError("verify requires an artifact ID or viewer URL.");
   }
 
-  if (!filePath) {
+  if (!values[1]) {
     throw new CliError("verify requires a file path.");
   }
+
+  const [targetValue, filePath] = resolveTargetAndFile("verify", values[0], values[1]);
 
   const target = parseArtifactTarget(targetValue);
 
   const endpoint = normalizeEndpoint(
     readEndpointOption(args) ?? target.urlOrigin ?? env.PAGEBIN_ENDPOINT ?? "",
+    env,
   );
 
   return {
@@ -1056,7 +1092,7 @@ function parseVersionHistoryTarget(
 ): VersionHistoryOptions {
   if (!isArtifactTargetLike(value)) {
     return {
-      endpoint: normalizeEndpoint(readEndpoint(args, env)),
+      endpoint: normalizeEndpoint(readEndpoint(args, env), env),
       filePath: value,
       id: "",
       json,
@@ -1070,6 +1106,7 @@ function parseVersionHistoryTarget(
   return {
     endpoint: normalizeEndpoint(
       readEndpointOption(args) ?? env.PAGEBIN_ENDPOINT ?? managementOrigin(target.urlOrigin) ?? "",
+      env,
     ),
     filePath: null,
     id: target.id,
@@ -1105,6 +1142,99 @@ function readEndpoint(args: string[], env: NodeJS.ProcessEnv): string {
   return readOptionalEndpoint(args, env) ?? "";
 }
 
+function mergePagebinEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const config = readPagebinConfig(env);
+  const merged = { ...env };
+
+  for (const key of CONFIG_KEYS) {
+    if (merged[key] === undefined && config[key] !== undefined) {
+      merged[key] = config[key];
+    }
+  }
+
+  return merged;
+}
+
+function readPagebinConfig(
+  env: NodeJS.ProcessEnv,
+): Partial<Record<(typeof CONFIG_KEYS)[number], string>> {
+  const path = pagebinConfigPath(env);
+  let contents: string;
+
+  try {
+    contents = readFileSync(path, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return {};
+    }
+
+    throw error;
+  }
+
+  warnAboutConfigPermissions(path);
+
+  const config: Partial<Record<(typeof CONFIG_KEYS)[number], string>> = {};
+
+  for (const sourceLine of contents.split(/\r?\n/)) {
+    const line = sourceLine.trim();
+
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const match = line.replace(/^export\s+/, "").match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+
+    if (!match?.[1] || match[2] === undefined || !isConfigKey(match[1])) {
+      continue;
+    }
+
+    const value = match[2].trim();
+    const quote = value[0];
+
+    config[match[1]] =
+      (quote === '"' || quote === "'") && value.at(-1) === quote ? value.slice(1, -1) : value;
+  }
+
+  return config;
+}
+
+function isConfigKey(value: string): value is (typeof CONFIG_KEYS)[number] {
+  return CONFIG_KEYS.some((key) => key === value);
+}
+
+function warnAboutConfigPermissions(path: string): void {
+  if (warnedConfigPaths.has(path)) {
+    return;
+  }
+
+  warnedConfigPaths.add(path);
+
+  if ((statSync(path).mode & 0o077) !== 0) {
+    console.error(
+      `Warning: PageBin config file ${path} grants group or other permissions; use mode 0600.`,
+    );
+  }
+}
+
+function pagebinConfigPath(env: NodeJS.ProcessEnv): string {
+  const override = env.PAGEBIN_CONFIG?.trim() || process.env.PAGEBIN_CONFIG?.trim();
+
+  if (override) {
+    return resolve(override);
+  }
+
+  const configHome = env.XDG_CONFIG_HOME?.trim() || resolve(homedir(), ".config");
+
+  return resolve(configHome, "pagebin/env");
+}
+
+function missingConfigurationMessage(
+  key: (typeof CONFIG_KEYS)[number],
+  env: NodeJS.ProcessEnv,
+): string {
+  return `${key} is not set on ${hostname()}. Set it in the environment or in ${pagebinConfigPath(env)}.`;
+}
+
 function managementOrigin(viewerOrigin: string | null): string | null {
   if (viewerOrigin === "https://page-bin.com") {
     return "https://api.page-bin.com";
@@ -1125,6 +1255,23 @@ function readEndpointOption(args: string[]): string | null {
   }
 
   return requireValue(args[endpointIndex + 1], "--endpoint");
+}
+
+function resolveTargetAndFile(
+  command: "update" | "verify" | "watch",
+  first: string,
+  second: string,
+): [target: string, file: string] {
+  const firstIsTarget = isArtifactTargetLike(first);
+  const secondIsTarget = isArtifactTargetLike(second);
+
+  if (firstIsTarget === secondIsTarget) {
+    throw new CliError(
+      `Usage: pagebin ${command} <artifact_id|viewer_url> <file> (the file and target may be supplied in either order).`,
+    );
+  }
+
+  return firstIsTarget ? [first, second] : [second, first];
 }
 
 function parseArtifactTarget(value: string): ArtifactTarget {
@@ -1187,11 +1334,7 @@ function parseArtifactAttributeOption(
   const value = requireValue(args[index + 1], arg);
 
   if (key === "artifactType") {
-    if (!isArtifactType(value))
-      throw new CliError(
-        "--type must be plan, report, review, explainer, implementation-log, or other.",
-      );
-    attributes.artifactType = value;
+    attributes.artifactType = normalizeArtifactType(value);
   } else {
     attributes[key] = value;
   }
@@ -1200,14 +1343,27 @@ function parseArtifactAttributeOption(
 }
 
 function isArtifactType(value: string): value is ArtifactType {
-  return (
-    value === "plan" ||
-    value === "report" ||
-    value === "review" ||
-    value === "explainer" ||
-    value === "implementation-log" ||
-    value === "other"
+  return ARTIFACT_TYPES.some((type) => type === value);
+}
+
+function normalizeArtifactType(value: string): ArtifactType {
+  const normalized = value.toLowerCase();
+
+  if (isArtifactType(normalized)) {
+    return normalized;
+  }
+
+  const alias = ARTIFACT_TYPE_ALIASES.get(normalized);
+
+  if (alias) {
+    return alias;
+  }
+
+  console.error(
+    `Unknown --type value "${value}"; accepted types are ${ARTIFACT_TYPES.join(", ")}. Using other.`,
   );
+
+  return "other";
 }
 
 function parseSandbox(value: string): SandboxMode {
@@ -1236,69 +1392,73 @@ async function publishArtifact(options: PublishOptions, output = true): Promise<
   );
 
   const absoluteFilePath = resolve(options.filePath);
-  const existingReceipt = await findReceiptByFile(options.endpoint, absoluteFilePath);
+  const claim = await claimPublish(options.endpoint, absoluteFilePath, options.forceNew);
+  let payload: PublishResponse;
+  let useBundle: boolean;
 
-  if (existingReceipt && !options.forceNew) {
-    const watcher = describeActiveWatcher(existingReceipt);
-    throw new CliError(
-      `This file is already published as ${existingReceipt.id}${watcher}. Use pagebin update ${existingReceipt.id} ${options.filePath} or pass --force-new.`,
-    );
-  }
+  try {
+    let response: Response;
+    useBundle = await requiresBundle(options.filePath, options.assets ?? []);
 
-  let response: Response;
-  const useBundle = await requiresBundle(options.filePath, options.assets ?? []);
+    if (useBundle) {
+      const bundle = await prepareArtifactBundle(
+        options.filePath,
+        options.assets ?? [],
+        options.sandbox,
+      );
 
-  if (useBundle) {
-    const bundle = await prepareArtifactBundle(
-      options.filePath,
-      options.assets ?? [],
-      options.sandbox,
-    );
+      response = await sendBundle(options.endpoint, token, bundle, {
+        sandbox: options.sandbox,
+        ttlSeconds: options.ttlSeconds,
+        attributes,
+      });
+    } else {
+      reportStage(
+        options.json,
+        isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…",
+      );
+      const { form, hasMermaid, sourceKind } = await createHtmlUploadForm(options.filePath);
+      assertSandboxSupportsUpload(sourceKind, hasMermaid, options.sandbox);
 
-    response = await sendBundle(options.endpoint, token, bundle, {
-      sandbox: options.sandbox,
-      ttlSeconds: options.ttlSeconds,
-      attributes,
-    });
-  } else {
-    reportStage(
-      options.json,
-      isMarkdownFile(options.filePath) ? "Rendering Markdown…" : "Preparing HTML…",
-    );
-    const { form, hasMermaid, sourceKind } = await createHtmlUploadForm(options.filePath);
-    assertSandboxSupportsUpload(sourceKind, hasMermaid, options.sandbox);
+      form.set("sandbox", options.sandbox);
+      setArtifactAttributes(form, attributes);
 
-    form.set("sandbox", options.sandbox);
-    setArtifactAttributes(form, attributes);
+      if (options.ttlSeconds !== null) {
+        form.set("ttlSeconds", String(options.ttlSeconds));
+      }
 
-    if (options.ttlSeconds !== null) {
-      form.set("ttlSeconds", String(options.ttlSeconds));
+      reportStage(options.json, "Uploading artifact…");
+      response = await fetch(`${options.endpoint}/api/publish`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: form,
+      });
     }
 
-    reportStage(options.json, "Uploading artifact…");
-    response = await fetch(`${options.endpoint}/api/publish`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
+    payload = await readJsonResponse(response, parsePublishResponse);
+    await upsertReceipt(
+      {
+        endpoint: options.endpoint,
+        id: payload.id,
+        url: payload.url,
+        rawUrl: toRawUrl(payload.url),
+        ...(useBundle ? { bundle: true, assets: options.assets ?? [] } : {}),
+        filePath: absoluteFilePath,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        revision: payload.revision ?? 1,
+        contentSha256: payload.contentSha256 ?? null,
+        attributes: payload.attributes ?? attributes,
       },
-      body: form,
-    });
+      claim,
+    );
+  } catch (error) {
+    await removePublishClaim(claim);
+    throw error;
   }
 
-  const payload = await readJsonResponse(response, parsePublishResponse);
-  await upsertReceipt({
-    endpoint: options.endpoint,
-    id: payload.id,
-    url: payload.url,
-    rawUrl: toRawUrl(payload.url),
-    ...(useBundle ? { bundle: true, assets: options.assets ?? [] } : {}),
-    filePath: absoluteFilePath,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    revision: payload.revision ?? 1,
-    contentSha256: payload.contentSha256 ?? null,
-    attributes: payload.attributes ?? attributes,
-  });
   let verification: VerificationResult | null = null;
 
   if (options.verify) {
@@ -1612,6 +1772,10 @@ async function updateArtifact(options: UpdateOptions, output = true): Promise<Up
   const payload = await readJsonResponse(response, parseUpdateResponse);
 
   await updateReceiptAfterContent(resolvedOptions, payload, attributes);
+
+  if (output && !resolvedOptions.url) {
+    printMissingViewerUrlHint(resolvedOptions.id);
+  }
 
   if (!output) {
     return payload;
@@ -2210,6 +2374,10 @@ async function listArtifactVersions(options: VersionHistoryOptions): Promise<voi
   const artifact = await fetchArtifactDetail(resolved.endpoint, resolved.id, token);
   const url = resolved.url ? toViewerUrl(resolved.url) : null;
 
+  if (!url) {
+    printMissingViewerUrlHint(resolved.id);
+  }
+
   if (options.json) {
     console.log(
       JSON.stringify(
@@ -2256,6 +2424,10 @@ async function rollbackArtifact(options: RollbackOptions): Promise<void> {
 
   await updateReceiptAfterRollback(resolved.endpoint, resolved.id, payload);
 
+  if (!resolved.url) {
+    printMissingViewerUrlHint(resolved.id);
+  }
+
   if (options.json) {
     console.log(JSON.stringify(withSchema(payload), null, 2));
 
@@ -2264,6 +2436,12 @@ async function rollbackArtifact(options: RollbackOptions): Promise<void> {
 
   const url = resolved.url ? toViewerUrl(resolved.url) : null;
   console.log(`Marked v${payload.version} as current for ${resolved.id}${url ? ` · ${url}` : ""}`);
+}
+
+function printMissingViewerUrlHint(id: string): void {
+  console.error(
+    `No viewer URL is recorded on this host for ${id}; on the host that published it run \`pagebin show ${id}\`; otherwise \`pagebin reissue ${id}\` mints a new URL and revokes the old one.`,
+  );
 }
 
 async function listReceipts(options: ReceiptListOptions): Promise<void> {
@@ -2411,12 +2589,100 @@ async function resolveUpdateReceipt(options: UpdateOptions): Promise<UpdateOptio
   };
 }
 
-async function upsertReceipt(receipt: ArtifactReceipt): Promise<void> {
+async function claimPublish(
+  endpoint: string,
+  filePath: string,
+  forceNew: boolean,
+): Promise<PublishClaim> {
+  const claim: PublishClaim = {
+    endpoint,
+    filePath,
+    pid: process.pid,
+    host: hostname(),
+    startedAt: new Date().toISOString(),
+  };
+
+  await mutateReceiptStore((store) => {
+    const activeClaims = (store.claims ?? []).filter((candidate) => !isStaleClaim(candidate));
+
+    const existingReceipt = store.artifacts
+      .filter((receipt) => receipt.endpoint === endpoint && receipt.filePath === filePath)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+
+    if (existingReceipt && !forceNew) {
+      const watcher = describeActiveWatcher(existingReceipt);
+
+      throw new CliError(
+        `This file is already published as ${existingReceipt.id}${watcher}. Use pagebin update ${existingReceipt.id} ${filePath} or pass --force-new.`,
+      );
+    }
+
+    const existingClaim = activeClaims.find(
+      (candidate) => candidate.endpoint === endpoint && candidate.filePath === filePath,
+    );
+
+    if (existingClaim && !forceNew) {
+      throw new CliError(
+        `Another PageBin process (PID ${existingClaim.pid} on ${existingClaim.host}) is publishing this file. Wait for it to finish, then run pagebin show ${filePath}.`,
+      );
+    }
+
+    store.claims = [...activeClaims, claim];
+  });
+
+  return claim;
+}
+
+function isStaleClaim(claim: PublishClaim): boolean {
+  if (Date.now() - Date.parse(claim.startedAt) > PUBLISH_CLAIM_MAX_AGE_MS) {
+    return true;
+  }
+
+  if (claim.host !== hostname()) {
+    return false;
+  }
+
+  try {
+    process.kill(claim.pid, 0);
+
+    return false;
+  } catch (error) {
+    return isNodeError(error) && error.code === "ESRCH";
+  }
+}
+
+async function removePublishClaim(claim: PublishClaim): Promise<void> {
+  await mutateReceiptStore((store) => dropPublishClaim(store, claim));
+}
+
+function dropPublishClaim(store: ReceiptStore, claim: PublishClaim): void {
+  const claims = (store.claims ?? []).filter((candidate) => !sameClaim(candidate, claim));
+
+  if (claims.length) {
+    store.claims = claims;
+  } else {
+    delete store.claims;
+  }
+}
+
+function sameClaim(left: PublishClaim, right: PublishClaim): boolean {
+  return (
+    left.endpoint === right.endpoint &&
+    left.filePath === right.filePath &&
+    left.pid === right.pid &&
+    left.host === right.host &&
+    left.startedAt === right.startedAt
+  );
+}
+
+async function upsertReceipt(receipt: ArtifactReceipt, claim?: PublishClaim): Promise<void> {
   await mutateReceiptStore((store) => {
     store.artifacts = store.artifacts.filter(
       (candidate) => candidate.endpoint !== receipt.endpoint || candidate.id !== receipt.id,
     );
     store.artifacts.push(receipt);
+
+    if (claim) dropPublishClaim(store, claim);
   });
 }
 
@@ -2775,10 +3041,11 @@ async function readJsonResponse<T>(response: Response, parse: (value: unknown) =
 // oxlint-enable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters
 
 function readPublishToken(): string {
-  const token = process.env.PAGEBIN_PUBLISH_TOKEN?.trim();
+  const env = runtimeEnvironment ?? mergePagebinEnvironment(process.env);
+  const token = env.PAGEBIN_PUBLISH_TOKEN?.trim();
 
   if (!token) {
-    throw new CliError("PAGEBIN_PUBLISH_TOKEN is required.");
+    throw new CliError(missingConfigurationMessage("PAGEBIN_PUBLISH_TOKEN", env));
   }
 
   return token;
@@ -2855,6 +3122,7 @@ Options:
   --force-new          Intentionally creates another artifact for a file with a local receipt.
   --no-infer           Disables repository, host, title, type, and agent inference.
   --title/--project    Override inferred metadata. See README for every metadata option.
+  --type TYPE          Sets the type; common log, audit, and benchmark aliases are accepted.
   --json               Prints id, url, expiresAt, and sandbox as JSON.
   --endpoint URL       Worker endpoint. Defaults to PAGEBIN_ENDPOINT.
   -h, --help           Show this help.
@@ -2892,6 +3160,7 @@ Replaces content, changes expiration, or does both atomically while preserving e
 
 Usage:
   pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--assets DIR] [--json] [--endpoint URL]
+  pagebin update <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
   pagebin update <file> [--assets DIR] [--json] [--endpoint URL]
 
 Options:
@@ -2909,6 +3178,7 @@ Publishes a file and keeps updating it, or watches a file for an existing artifa
 Usage:
   pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--assets DIR] [--json] [--endpoint URL]
   pagebin watch <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
+  pagebin watch <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
 
 Options:
   --assets <dir>        Include directories explicitly; defaults to the local receipt when present.
@@ -2926,6 +3196,7 @@ Verifies file bytes or every file in an explicitly included bundle. Markdown is 
 
 Usage:
   pagebin verify <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
+  pagebin verify <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
 
 Options:
   --assets <dir>        Include directories explicitly; defaults to the local receipt when present.
@@ -3020,9 +3291,12 @@ Usage:
   pagebin list [--json] [--endpoint URL]
   pagebin reissue <artifact_id> [--json] [--endpoint URL]
   pagebin update <artifact_id|viewer_url> [file] [--ttl 7d|never] [--assets DIR] [--json] [--endpoint URL]
+  pagebin update <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
   pagebin watch <file> [--ttl 7d] [--sandbox standard|strict] [--endpoint URL]
   pagebin watch <artifact_id|viewer_url> <file> [--endpoint URL]
+  pagebin watch <file> <artifact_id|viewer_url> [--endpoint URL]
   pagebin verify <artifact_id|viewer_url> <file> [--assets DIR] [--json] [--endpoint URL]
+  pagebin verify <file> <artifact_id|viewer_url> [--assets DIR] [--json] [--endpoint URL]
   pagebin versions <artifact_id|viewer_url|file> [--json] [--endpoint URL]
   pagebin rollback <artifact_id|viewer_url|file> <version> [--json] [--endpoint URL]
   pagebin receipts [--json]
@@ -3054,6 +3328,7 @@ Behavior:
 Environment:
   PAGEBIN_ENDPOINT        Worker endpoint, for example https://pagebin.example.workers.dev
   PAGEBIN_PUBLISH_TOKEN  Publisher token shared with the Worker
+  PAGEBIN_CONFIG         Credentials file; defaults to $XDG_CONFIG_HOME/pagebin/env or ~/.config/pagebin/env
 `;
 }
 
@@ -3080,12 +3355,17 @@ pagebin verify <viewer-url-or-id> /absolute/path/artifact.html --json
 \`\`\`
 
 PageBin infers repository, project, host, branch, commit, source path, title, type, and agent. Override incorrect inference with metadata flags such as \`--title\`, \`--type\`, or \`--agent\`; use \`--no-infer\` only when inference is unwanted.
+\`--type\` accepts the aliases \`log\`, \`impl-log\`, \`implementation_log\`, \`implementation\`, \`audit\`, and \`benchmark\`.
+
+Set \`PAGEBIN_ENDPOINT\` and \`PAGEBIN_PUBLISH_TOKEN\` in the environment or in \`\${XDG_CONFIG_HOME:-~/.config}/pagebin/env\`. Override that path with \`PAGEBIN_CONFIG\`.
 
 Artifacts are long-lived by default. Add \`--ttl 7d\` only when intentionally temporary. Change an existing lifetime with \`pagebin update <id-or-url> --ttl 7d\`; use \`--ttl never\` to remove expiration.
 
 ## Files and HTML attachments
 
-Publish a recording or image with the same publish command. Use the returned \`url\` for the browser viewer, \`rawUrl\` for an image or video source, and \`downloadUrl\` for the original file. PDFs open in a browser reader on desktop and mobile with zoom, search, and text selection. Videos use native browser playback without transcoding. In PRs, use a viewer link or a linked image preview; external video links may not render inline.
+Publish a recording or image with the same publish command. Give users the returned viewer \`url\`, which has the form \`/p/<id>/<token>\`. Never give users a \`/raw/.../v/<n>/...\` URL: it pins one version, skips the viewer, and goes stale after the next update. Use raw URLs only for your own inspection or as an image or video source. Use \`downloadUrl\` for the original file. PDFs open in a browser reader on desktop and mobile with zoom, search, and text selection. Videos use native browser playback without transcoding. In PRs, use a viewer link or a linked image preview; external video links may not render inline.
+
+The viewer renders the artifact in a sandboxed cross-origin iframe. Browser automation text snapshots and accessibility trees, including T3 preview snapshots, show only the toolbar. Wait a moment and take a screenshot before deciding that the artifact is blank.
 
 For a gallery or illustrated report:
 

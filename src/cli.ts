@@ -273,8 +273,12 @@ export function normalizeEndpoint(
   try {
     const url = new URL(endpoint);
 
-    if (url.protocol !== "https:" && !isLocalhost(url.hostname)) {
-      throw new CliError("PAGEBIN_ENDPOINT must use https unless it points at localhost.");
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocalhost(url.hostname))) {
+      throw new CliError("PAGEBIN_ENDPOINT must use https, or http on localhost.");
+    }
+
+    if (url.username || url.password) {
+      throw new CliError("PAGEBIN_ENDPOINT must not contain credentials.");
     }
 
     return url.toString().replace(/\/+$/, "");
@@ -288,12 +292,6 @@ export function normalizeEndpoint(
 }
 
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): ParsedCommand {
-  const mergedEnv = mergePagebinEnvironment(env);
-
-  if (env === process.env) {
-    runtimeEnvironment = mergedEnv;
-  }
-
   const [command, ...rest] = argv;
 
   if (!command || isHelpFlag(command)) {
@@ -318,6 +316,21 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     }
 
     return { command: "skill" };
+  }
+
+  if (command === "receipts") {
+    return { command, options: parseReceiptListOptions(rest) };
+  }
+
+  if (command === "show") {
+    return { command, options: parseShowOptions(rest) };
+  }
+
+  // Commands above never need credentials, so a broken config file cannot block them.
+  const mergedEnv = mergePagebinEnvironment(env);
+
+  if (env === process.env) {
+    runtimeEnvironment = mergedEnv;
   }
 
   if (command === "publish") {
@@ -381,14 +394,6 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
       command,
       options: parseRollbackOptions(rest, mergedEnv),
     };
-  }
-
-  if (command === "receipts") {
-    return { command, options: parseReceiptListOptions(rest) };
-  }
-
-  if (command === "show") {
-    return { command, options: parseShowOptions(rest) };
   }
 
   throw new CliError(`Unknown command: ${command}`);
@@ -1168,7 +1173,9 @@ function readPagebinConfig(
       return {};
     }
 
-    throw error;
+    throw new CliError(
+      `Cannot read PageBin config file ${path}: ${isNodeError(error) ? error.code : String(error)}.`,
+    );
   }
 
   warnAboutConfigPermissions(path);
@@ -1188,14 +1195,23 @@ function readPagebinConfig(
       continue;
     }
 
-    const value = match[2].trim();
-    const quote = value[0];
-
-    config[match[1]] =
-      (quote === '"' || quote === "'") && value.at(-1) === quote ? value.slice(1, -1) : value;
+    config[match[1]] = parseConfigValue(match[2]);
   }
 
   return config;
+}
+
+// A quoted value ends at its closing quote; an unquoted value ends before a whitespace-led `#`.
+function parseConfigValue(source: string): string {
+  const value = source.trim();
+  const quote = value[0];
+  const closingQuote = quote === '"' || quote === "'" ? value.indexOf(quote, 1) : -1;
+
+  if (closingQuote > 0) {
+    return value.slice(1, closingQuote);
+  }
+
+  return value.replace(/\s+#.*$/, "");
 }
 
 function isConfigKey(value: string): value is (typeof CONFIG_KEYS)[number] {

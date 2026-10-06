@@ -1210,6 +1210,61 @@ describe("configuration and type aliases", () => {
     }
   });
 
+  test("ignores trailing comments in config values", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-comments-"));
+    const configPath = join(directory, "env");
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("Authorization")).toBe("Bearer tok#en");
+
+        return Response.json({ artifacts: [] });
+      },
+    });
+
+    await writeFile(
+      configPath,
+      `PAGEBIN_ENDPOINT=${server.url.origin} # local worker\nPAGEBIN_PUBLISH_TOKEN="tok#en" # publisher credential\n`,
+      { mode: 0o600 },
+    );
+
+    try {
+      const result = await runPagebin(["list", "--json"], { PAGEBIN_CONFIG: configPath });
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 1, artifacts: [] });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("runs credential-free commands when the config file is unreadable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pagebin-config-unreadable-"));
+
+    for (const args of [["version"], ["skill"], ["help"], ["receipts", "--json"]]) {
+      const result = await runPagebin(args, {
+        PAGEBIN_CONFIG: directory,
+        PAGEBIN_STATE_PATH: join(directory, "state.json"),
+      });
+
+      expect(result.exitCode).toBe(0);
+    }
+
+    const list = await runPagebin(["list", "--json"], { PAGEBIN_CONFIG: directory });
+
+    expect(list.exitCode).toBe(1);
+    expect(list.stderr).toContain(`Cannot read PageBin config file ${directory}: EISDIR.`);
+  });
+
+  test("rejects endpoints the receipt store could not record", () => {
+    for (const endpoint of ["ftp://127.0.0.1:1", "https://user:secret@example.com"]) {
+      expect(() => parseArgs(["publish", "plan.html", "--endpoint", endpoint], {})).toThrow(
+        "PAGEBIN_ENDPOINT must",
+      );
+    }
+  });
+
   test("prefers environment credentials and then an explicit endpoint over config", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pagebin-config-precedence-"));
     const configPath = join(directory, "env");
@@ -1268,9 +1323,8 @@ describe("configuration and type aliases", () => {
     await writeFile(configPath, "# intentionally empty\n");
     await chmod(configPath, 0o644);
 
-    const result = await runPagebin(["version"], { PAGEBIN_CONFIG: configPath });
+    const result = await runPagebin(["list", "--json"], { PAGEBIN_CONFIG: configPath });
 
-    expect(result.exitCode).toBe(0);
     expect(result.stderr.match(/grants group or other permissions/g)).toHaveLength(1);
     expect(result.stderr).toContain(configPath);
   });

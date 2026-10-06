@@ -1059,6 +1059,9 @@ const VIEWER_SCRIPT = `
         for (const c of view.controls) if (c.name in msg.values) values[c.name] = msg.values[c.name];
         const kept = rec ? rec.notOffered : [];
         for (const name of kept) if (name !== msg.name && name in rec.values) values[name] = rec.values[name];
+        // A text field's change event repeats its last input on blur. Re-rendering then would
+        // replace the panel button the reader is clicking between mousedown and mouseup.
+        if (rec && rec.interacted && view.controls.every((c) => sameValue(rec.values[c.name], values[c.name]))) break;
         const updated = recordFrom({ ...view, values }, kept.filter((name) => name !== msg.name));
         scheduleDecisionSave(updated, DECISION_SAVE_DELAY_MS);
         break;

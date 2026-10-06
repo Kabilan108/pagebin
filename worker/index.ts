@@ -26,6 +26,7 @@ interface Env {
   PAGEBIN_ACCESS_TEAM_DOMAIN?: string;
   PAGEBIN_ACCESS_AUD?: string;
   PAGEBIN_DEV_ADMIN_HOSTNAMES?: string;
+  PAGEBIN_USERCONTENT_ORIGIN?: string;
 }
 
 interface ArtifactMetadata {
@@ -150,6 +151,8 @@ interface StoredArtifactMetadata {
 
 type SandboxMode = "standard" | "strict";
 
+type FileRoute = "raw" | "download" | "frame";
+
 type ArtifactType = "plan" | "report" | "review" | "explainer" | "implementation-log" | "other";
 
 interface UploadedFile {
@@ -174,6 +177,25 @@ const STANDARD_SANDBOX =
   "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals";
 
 const STANDARD_IFRAME_PERMISSIONS = "clipboard-write; fullscreen";
+
+const USERCONTENT_LABEL_PLACEHOLDER = "{label}";
+
+const FRAME_PATH = /^\/frame\/([^/]+)\/([^/]+)\/v\/([1-9]\d*)(?:\/(.+))?$/;
+
+// Runs inside every standard document frame. Links to other hosts open in a new tab because
+// the sandbox blocks top-level navigation and most sites refuse to be framed.
+const FRAME_SCRIPT = `<script data-pagebin="frame">(() => {
+  const navigatesFrame = (link) => ["", "_self", "_top", "_parent"].includes((link.getAttribute("target") || "").toLowerCase());
+  addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target instanceof Element ? event.target.closest("a[href], area[href]") : null;
+    if (!link || link.hasAttribute("download") || !navigatesFrame(link)) return;
+    const url = new URL(link.getAttribute("href"), document.baseURI);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.host === location.host) return;
+    event.preventDefault();
+    window.open(url.href, "_blank", "noopener,noreferrer");
+  });
+})();</script>`;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -200,6 +222,10 @@ export default {
 async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const hostname = url.hostname;
+
+  if (isUsercontentHostname(hostname, env)) {
+    return routeUsercontent(request, env, url);
+  }
 
   if (
     url.pathname.startsWith("/pdfjs/") &&
@@ -252,6 +278,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     (url.pathname === "/" ||
       url.pathname.startsWith("/p/") ||
       url.pathname.startsWith("/raw/") ||
+      url.pathname.startsWith("/frame/") ||
       url.pathname.startsWith("/download/"))
   ) {
     return misdirected();
@@ -315,7 +342,18 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     if (!entry) return siteNotFound();
 
     if (entry.manifest || fileMatch[1] === "download" || request.method === "HEAD")
-      return serveFile(request, env, metadata, entry, fileMatch[5], fileMatch[1] === "download");
+      return serveFile(
+        request,
+        env,
+        metadata,
+        entry,
+        fileMatch[5],
+        fileMatch[1] === "download" ? "download" : "raw",
+      );
+  }
+
+  if ((request.method === "GET" || request.method === "HEAD") && FRAME_PATH.test(url.pathname)) {
+    return serveFrame(request, env, url);
   }
 
   if (request.method === "POST" && url.pathname === "/api/publish") {
@@ -1700,8 +1738,10 @@ async function serveViewer(
     : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}`;
 
   const versionPath = `/api/artifacts/${encodeURIComponent(id)}/version/${encodeURIComponent(token)}`;
-  const sandbox = iframeSandboxAttribute(metadata.sandbox);
+  const frameOrigin = await documentFrameOrigin(env, metadata);
+  const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
   const version = metadata.revision;
+  const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, artifactHead(metadata))}`;
 
   const html = `<!doctype html>
 <html lang="en">
@@ -1717,7 +1757,7 @@ ${VIEWER_BAR_CSS}
 </style>
 </head>
 <body>
-${scrubberBarHtml(id, token, metadata, null)}${contentViewer(metadata, artifactHead(metadata), rawPath, sandbox)}
+${scrubberBarHtml(id, token, metadata, null)}${contentViewer(metadata, artifactHead(metadata), rawPath, sandbox, frameSrc)}
 <script>
 ${scrubberBarScript(id, token, artifactHead(metadata).version)}
 const pagebinMinDelayMs = 2000;
@@ -1758,8 +1798,7 @@ pagebinSchedule();
 </html>`;
 
   return text(html, 200, {
-    "Content-Security-Policy":
-      "default-src 'none'; connect-src 'self'; frame-src 'self'; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": viewerCsp(frameOrigin),
     "Content-Type": "text/html; charset=utf-8",
     Link: `<${url.origin}/robots.txt>; rel="robots"`,
   });
@@ -1788,7 +1827,9 @@ async function servePinnedViewer(
     ? manifestRawPath(id, token, entry)
     : `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}`;
 
-  const sandbox = iframeSandboxAttribute(metadata.sandbox);
+  const frameOrigin = await documentFrameOrigin(env, metadata);
+  const sandbox = iframeSandboxAttribute(metadata.sandbox, frameOrigin !== null);
+  const frameSrc = `${frameOrigin ?? ""}${framePath(id, token, entry)}`;
 
   const html = `<!doctype html>
 <html lang="en">
@@ -1804,14 +1845,13 @@ ${VIEWER_BAR_CSS}
 </style>
 </head>
 <body>
-${scrubberBarHtml(id, token, metadata, entry.version)}${contentViewer(metadata, entry, rawPath, sandbox)}
+${scrubberBarHtml(id, token, metadata, entry.version)}${contentViewer(metadata, entry, rawPath, sandbox, frameSrc)}
 <script>${scrubberBarScript(id, token, entry.version)}</script>
 </body>
 </html>`;
 
   return text(html, 200, {
-    "Content-Security-Policy":
-      "default-src 'none'; connect-src 'self'; frame-src 'self'; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": viewerCsp(frameOrigin),
     "Content-Type": "text/html; charset=utf-8",
     Link: `<${url.origin}/robots.txt>; rel="robots"`,
   });
@@ -2473,12 +2513,14 @@ function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-function iframeSandboxAttribute(mode: SandboxMode): string {
+// allow-same-origin is only safe on a usercontent host: on the viewer's host it would let the
+// artifact's scripts reach into the viewer and remove their own sandbox.
+function iframeSandboxAttribute(mode: SandboxMode, usercontentFrame: boolean): string {
   if (mode === "strict") {
     return " sandbox";
   }
 
-  return ` sandbox="${STANDARD_SANDBOX}"`;
+  return ` sandbox="${STANDARD_SANDBOX}${usercontentFrame ? " allow-same-origin" : ""}"`;
 }
 
 function iframePermissionsAttribute(mode: SandboxMode): string {
@@ -2720,16 +2762,175 @@ function manifestRawPath(id: string, token: string, entry: ArtifactVersion): str
   return `/raw/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}/${filePathUrl(entry.manifest!.entrypoint)}`;
 }
 
+function framePath(id: string, token: string, entry: ArtifactVersion): string {
+  const entrypoint = entry.manifest ? `/${filePathUrl(entry.manifest.entrypoint)}` : "";
+
+  return `/frame/${encodeURIComponent(id)}/${encodeURIComponent(token)}/v/${entry.version}${entrypoint}`;
+}
+
+async function routeUsercontent(request: Request, env: Env, url: URL): Promise<Response> {
+  // A service worker would outlive updates, reissues, and deletion of the artifact it controls.
+  if (request.headers.get("Service-Worker") === "script") return siteNotFound();
+
+  if ((request.method === "GET" || request.method === "HEAD") && FRAME_PATH.test(url.pathname)) {
+    return serveFrame(request, env, url);
+  }
+
+  return siteNotFound();
+}
+
+async function serveFrame(request: Request, env: Env, url: URL): Promise<Response> {
+  const match = FRAME_PATH.exec(url.pathname);
+
+  if (!match?.[1] || !match[2] || !match[3]) return siteNotFound();
+
+  const [, id, token, version, encodedPath] = match;
+
+  if (
+    isUsercontentHostname(url.hostname, env) &&
+    url.origin !== (await usercontentOrigin(env, id))
+  ) {
+    return siteNotFound();
+  }
+
+  const metadata = await readAuthorizedMetadata(env, id, token);
+
+  if (!metadata || metadata.sandbox === "strict") return siteNotFound();
+
+  const entry = metadata.versions.find((candidate) => candidate.version === Number(version));
+
+  if (!entry) return siteNotFound();
+
+  return serveFile(request, env, metadata, entry, encodedPath, "frame");
+}
+
+function usercontentHostSuffix(env: Env): string | null {
+  const template = env.PAGEBIN_USERCONTENT_ORIGIN?.trim();
+  const viewerOrigin = configuredViewerOrigin(env);
+
+  if (!template || !viewerOrigin || !/^https?:\/\/\{label\}\./.test(template)) {
+    return null;
+  }
+
+  try {
+    const url = new URL(template.replace(USERCONTENT_LABEL_PLACEHOLDER, "x"));
+    const suffix = url.hostname.slice(2);
+    const viewerHostname = new URL(viewerOrigin).hostname.replace(/\.+$/, "");
+
+    // The label must survive parsing, and the namespace must sit outside the viewer's own
+    // hosts, or every artifact would share the viewer's origin or capture its API hosts.
+    const isolated =
+      url.hostname.startsWith("x.") &&
+      !url.hostname.endsWith(".") &&
+      !url.username &&
+      !url.password &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash &&
+      viewerHostname !== suffix &&
+      !viewerHostname.endsWith(`.${suffix}`);
+
+    return isolated ? suffix : null;
+  } catch {
+    return null;
+  }
+}
+
+// Covers the whole namespace, including nested and trailing-dot hosts, so none of them reach
+// the main router. serveFrame then requires the artifact's exact canonical origin.
+function isUsercontentHostname(hostname: string, env: Env): boolean {
+  const suffix = usercontentHostSuffix(env);
+  const host = hostname.replace(/\.+$/, "");
+
+  return suffix !== null && (host === suffix || host.endsWith(`.${suffix}`));
+}
+
+async function usercontentOrigin(env: Env, id: string): Promise<string | null> {
+  const template = env.PAGEBIN_USERCONTENT_ORIGIN?.trim();
+
+  if (!template || usercontentHostSuffix(env) === null) return null;
+
+  const label = (await sha256Hex(`pagebin-usercontent:${id}`)).slice(0, 32);
+
+  return new URL(template.replace(USERCONTENT_LABEL_PLACEHOLDER, label)).origin;
+}
+
+async function documentFrameOrigin(env: Env, metadata: ArtifactMetadata): Promise<string | null> {
+  return metadata.sandbox === "strict" ? null : usercontentOrigin(env, metadata.id);
+}
+
+function configuredViewerOrigin(env: Env): string | null {
+  const configured = env.PAGEBIN_PUBLIC_ORIGIN?.trim();
+
+  if (!configured) return null;
+
+  try {
+    return new URL(configured).origin;
+  } catch {
+    return null;
+  }
+}
+
+function frameDocumentCsp(request: Request, env: Env): string {
+  const viewerOrigin = configuredViewerOrigin(env);
+
+  if (viewerOrigin && isUsercontentHostname(new URL(request.url).hostname, env)) {
+    return `sandbox ${STANDARD_SANDBOX} allow-same-origin; frame-ancestors ${viewerOrigin}`;
+  }
+
+  return `sandbox ${STANDARD_SANDBOX}; frame-ancestors 'self'`;
+}
+
+function viewerCsp(frameOrigin: string | null): string {
+  const frameSources = frameOrigin ? `'self' ${frameOrigin}` : "'self'";
+
+  return `default-src 'none'; connect-src 'self'; frame-src ${frameSources}; img-src 'self'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+}
+
+function withFrameScript(response: Response): Response {
+  let injected = false;
+
+  // The script goes first inside an explicit <head>, or before the first element after <html>.
+  // Inserting before <html> or <head> would make the parser open an implicit head and drop the
+  // document's own <head> attributes; inserting before the doctype would force quirks mode.
+  return new HTMLRewriter()
+    .on("*", {
+      element(element) {
+        const tagName = element.tagName.toLowerCase();
+
+        if (injected || tagName === "html") return;
+
+        injected = true;
+
+        if (tagName === "head") {
+          element.prepend(FRAME_SCRIPT, { html: true });
+        } else {
+          element.before(FRAME_SCRIPT, { html: true });
+        }
+      },
+    })
+    .onDocument({
+      end(end) {
+        if (!injected) end.append(FRAME_SCRIPT, { html: true });
+      },
+    })
+    .transform(response);
+}
+
 function contentViewer(
   metadata: ArtifactMetadata,
   entry: ArtifactVersion,
   path: string,
   sandbox: string,
+  frameSrc: string,
 ): string {
   const file = entry.manifest?.files.find((f) => f.path === entry.manifest?.entrypoint);
 
-  if (!file || contentKind(file.contentType) === "document")
-    return `<iframe id="pagebin-frame"${sandbox}${iframePermissionsAttribute(metadata.sandbox)} src="${escapeHtml(path)}" title="${escapeHtml(entry.filename ?? metadata.filename)}"></iframe>`;
+  if (!file || contentKind(file.contentType) === "document") {
+    const src = metadata.sandbox === "strict" ? path : frameSrc;
+
+    return `<iframe id="pagebin-frame"${sandbox}${iframePermissionsAttribute(metadata.sandbox)} src="${escapeHtml(src)}" title="${escapeHtml(entry.filename ?? metadata.filename)}"></iframe>`;
+  }
 
   if (file.contentType === "application/pdf") {
     // This frame contains our trusted reader, never uploaded HTML. PDF scripts are disabled.
@@ -2758,8 +2959,9 @@ async function serveFile(
   metadata: ArtifactMetadata,
   entry: ArtifactVersion,
   encodedPath: string | undefined,
-  download: boolean,
+  route: FileRoute,
 ): Promise<Response> {
+  const download = route === "download";
   let path: string;
 
   try {
@@ -2784,10 +2986,17 @@ async function serveFile(
 
   if (!file) return siteNotFound();
 
+  const isDocument = file.contentType.startsWith("text/html");
+
   // An entry document must have a canonical filename URL so relative references stay version-pinned.
-  if (!encodedPath && entry.manifest && !download && file.contentType.startsWith("text/html")) {
+  if (!encodedPath && entry.manifest && !download && isDocument) {
     const url = new URL(request.url);
-    url.pathname = manifestRawPath(metadata.id, url.pathname.split("/")[3]!, entry);
+    const token = url.pathname.split("/")[3]!;
+
+    url.pathname =
+      route === "frame"
+        ? framePath(metadata.id, token, entry)
+        : manifestRawPath(metadata.id, token, entry);
 
     return new Response(null, {
       status: 307,
@@ -2812,12 +3021,32 @@ async function serveFile(
     "Content-Length": String(head.size),
     "Accept-Ranges": "bytes",
     ETag: head.httpEtag,
-    "Content-Security-Policy": file.contentType.startsWith("text/html")
-      ? rawSandboxCsp(metadata.sandbox)
+    "Content-Security-Policy": isDocument
+      ? route === "frame"
+        ? frameDocumentCsp(request, env)
+        : rawSandboxCsp(metadata.sandbox)
       : "sandbox; default-src 'none'; style-src 'unsafe-inline'",
   });
 
+  const injectsFrameScript = route === "frame" && isDocument;
+
+  if (injectsFrameScript) {
+    // The injected script changes the length and identity of the stored bytes.
+    headers.delete("Content-Length");
+    headers.delete("Accept-Ranges");
+    headers.delete("ETag");
+  }
+
   if (request.method === "HEAD") return new Response(null, { headers });
+
+  if (injectsFrameScript) {
+    const object = await env.ARTIFACTS.get(file.objectKey);
+
+    if (!object) return siteNotFound();
+
+    return withFrameScript(new Response(object.body, { status: 200, headers }));
+  }
+
   let range: { offset: number; length: number } | undefined;
   const requested = request.headers.get("Range");
   const ifRange = request.headers.get("If-Range");

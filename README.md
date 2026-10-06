@@ -7,8 +7,9 @@
 - `https://page-bin.com` serves public, unlisted `/p/<id>/<token>` viewers and `/raw/<id>/<token>` content.
 - `https://api.page-bin.com` exposes publisher-token-authenticated CLI APIs.
 - `https://admin.page-bin.com` serves the Cloudflare Access-protected dashboard and dashboard APIs.
+- `https://<label>.pagebin-usercontent.com` serves the `/frame/` documents that standard-mode viewers embed. Each artifact gets its own label, derived from its ID, and therefore its own origin.
 
-The Worker rejects management requests on the public origin and artifact requests on the API origin. R2 remains private.
+The Worker rejects management requests on the public origin and artifact requests on the API origin. Usercontent hosts serve only `/frame/` routes for the artifact their label belongs to. R2 remains private.
 
 ## CLI
 
@@ -110,7 +111,10 @@ Legacy artifacts remain viewable but cannot be opened from the dashboard until r
 - Viewer tokens use 256 bits of randomness. Only their SHA-256 hashes are used for public request authentication.
 - A second AES-256-GCM encrypted token copy enables single-artifact dashboard recovery. The key is a Worker secret and is never stored in R2.
 - Dashboard endpoints validate the Cloudflare Access JWT signature, issuer, audience, and expiry. The CLI publisher token is never exposed to browser JavaScript.
-- Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers. The standard sandbox delegates clipboard writes for user-initiated copy controls but keeps artifacts on an opaque origin without browser storage access.
+- Artifact HTML stays in private R2 and renders through a sandboxed iframe with no-referrer, no-store, noindex, nosniff, and restrictive permissions headers.
+- Standard-mode documents load from a per-artifact origin on `pagebin-usercontent.com` with `allow-same-origin`, so `localStorage`, `sessionStorage`, IndexedDB, and history work, persist across versions, and stay isolated from the viewer and from other artifacts. Browsers partition that storage under the viewer's site. Cookies are third-party inside the viewer, so browsers block or partition them. The frame also gets clipboard writes, fullscreen, modals, and popups that leave the sandbox, but cannot navigate the viewer. Usercontent hosts refuse service worker scripts, so an artifact cannot keep serving itself after an update, reissue, or deletion.
+- PageBin injects one script at the start of each `/frame/` document. It opens links to other hosts in a new tab. `/raw/` and `/download/` always return the stored bytes, which is what `verify` hashes.
+- Without `PAGEBIN_USERCONTENT_ORIGIN`, for example under local `wrangler dev`, `/frame/` documents are served from the viewer's host on an opaque origin with no storage access. Strict documents always use `/raw/` with every sandbox permission off.
 - Markdown permits raw HTML without sanitization, matching direct HTML uploads. Treat published source as trusted; use the strict sandbox for static Markdown when scripts and other interactive permissions are unnecessary. Mermaid requires the standard sandbox.
 - Metadata mutation uses R2 ETag preconditions, monotonic revisions, tombstones, and versioned content objects to prevent lost updates and token resurrection.
 - Bundle cleanup retains every attachment referenced by every retained version. Do not downgrade to a Worker without manifest-aware cleanup after publishing bundles; an older Worker could delete their attachments.

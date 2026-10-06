@@ -174,6 +174,7 @@ interface TestEnv {
   PAGEBIN_CAPABILITY_KEY_VERSION?: string;
   PAGEBIN_ACCESS_TEAM_DOMAIN?: string;
   PAGEBIN_ACCESS_AUD?: string;
+  PAGEBIN_USERCONTENT_ORIGIN?: string;
 }
 
 describe("worker", () => {
@@ -2614,4 +2615,306 @@ test("bundle cleanup keeps shared objects until every referencing version is pru
   expect(manifest.status).toBe(200);
   expect(publicManifest).not.toContain("objectKey");
   expect(publicManifest).toContain("pictures/new.png");
+});
+
+describe("document frames", () => {
+  const frameHtmlFor = async (contents: string): Promise<string> => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    const updated = await updateFixtureResponse(env, published.id, {
+      contents,
+      filename: "plan.html",
+    });
+
+    expect(updated.status).toBe(200);
+
+    const token = published.url.slice(published.url.lastIndexOf("/") + 1);
+
+    const frame = await worker.fetch(
+      new Request(`https://pagebin.test/frame/${published.id}/${token}/v/2`),
+      env as never,
+    );
+
+    return frame.text();
+  };
+
+  test("injects inside an explicit head and keeps its attributes", async () => {
+    expect(
+      await frameHtmlFor(
+        '<!DOCTYPE html>\n<html lang="en">\n<head id="settings" data-theme="dark"><title>t</title></head><body></body></html>',
+      ),
+    ).toStartWith(
+      '<!DOCTYPE html>\n<html lang="en">\n<head id="settings" data-theme="dark"><script data-pagebin="frame">',
+    );
+    expect(await frameHtmlFor('\uFEFF<html><body class="dark">x</body></html>')).toContain(
+      '<html><script data-pagebin="frame">',
+    );
+    expect(await frameHtmlFor("plain text only")).toEndWith("</script>");
+  });
+
+  test("routes every usercontent namespace host away from the main site", async () => {
+    const env = usercontentEnv();
+    const published = await publishFixture(env);
+    const origin = new URL(await usercontentOriginFor(published.id));
+    const framePathname = `/frame/${published.id}/${tokenOf(published.url)}/v/1`;
+
+    for (const host of [
+      `child.${origin.hostname}`,
+      `${origin.hostname}.`,
+      "usercontent.test",
+      "usercontent.test.",
+    ]) {
+      for (const path of ["/robots.txt", "/api/artifacts", framePathname]) {
+        const response = await worker.fetch(
+          new Request(`https://${host}${path}`, {
+            headers: { Authorization: "Bearer publish-secret" },
+          }),
+          env as never,
+        );
+
+        expect(response.status).toBe(404);
+      }
+    }
+  });
+
+  test("ignores usercontent templates that would share or capture the viewer origin", async () => {
+    for (const template of [
+      "https://{label}.usercontent.test@pagebin.test",
+      "https://{label}.pagebin.test",
+      "https://{label}.usercontent.test/path",
+      "https://{label}.usercontent.test.",
+    ]) {
+      const env = createEnv({
+        PAGEBIN_PUBLIC_ORIGIN: "https://pagebin.test",
+        PAGEBIN_USERCONTENT_ORIGIN: template,
+      });
+
+      const published = await publishFixture(env);
+
+      const viewerHtml = await (
+        await worker.fetch(new Request(published.url), env as never)
+      ).text();
+
+      expect(viewerHtml).toContain(`src="/frame/${published.id}/`);
+      expect(viewerHtml).not.toContain("allow-same-origin");
+    }
+  });
+
+  const usercontentEnv = (): TestEnv =>
+    createEnv({
+      PAGEBIN_PUBLIC_ORIGIN: "https://pagebin.test",
+      PAGEBIN_USERCONTENT_ORIGIN: "https://{label}.usercontent.test",
+    });
+
+  const usercontentOriginFor = async (id: string): Promise<string> =>
+    `https://${(await sha256ForTest(`pagebin-usercontent:${id}`)).slice(0, 32)}.usercontent.test`;
+
+  const frameSrc = (html: string): string => {
+    const src = /<iframe id="pagebin-frame"[^>]* src="([^"]+)"/.exec(html)?.[1];
+
+    expect(src).toBeDefined();
+
+    return src!.replaceAll("&amp;", "&");
+  };
+
+  const tokenOf = (url: string): string => url.slice(url.lastIndexOf("/") + 1);
+
+  test("serves standard documents through an injected frame without changing raw bytes", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+    const viewer = await worker.fetch(new Request(published.url), env as never);
+    const viewerHtml = await viewer.text();
+    const src = frameSrc(viewerHtml);
+
+    expect(src).toBe(`/frame/${published.id}/${tokenOf(published.url)}/v/1`);
+    expect(viewerHtml).not.toContain("allow-same-origin");
+    expect(viewer.headers.get("Content-Security-Policy")).toContain("frame-src 'self';");
+
+    const frame = await worker.fetch(new Request(`https://pagebin.test${src}`), env as never);
+    const frameHtml = await frame.text();
+
+    expect(frame.status).toBe(200);
+    expect(frame.headers.get("Content-Security-Policy")).toBe(
+      "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals; frame-ancestors 'self'",
+    );
+    expect(frame.headers.get("Content-Length")).toBeNull();
+    expect(frame.headers.get("ETag")).toBeNull();
+    expect(frameHtml).toStartWith('<!doctype html><script data-pagebin="frame">');
+    expect(frameHtml).toEndWith("<script>globalThis.ok = true</script>");
+
+    const raw = await worker.fetch(
+      new Request(published.url.replace("/p/", "/raw/")),
+      env as never,
+    );
+
+    expect(await raw.text()).toBe("<!doctype html><script>globalThis.ok = true</script>");
+  });
+
+  test("gives each artifact its own same-origin frame on the usercontent host", async () => {
+    const env = usercontentEnv();
+    const published = await publishFixture(env);
+    const origin = await usercontentOriginFor(published.id);
+    const viewer = await worker.fetch(new Request(published.url), env as never);
+    const viewerHtml = await viewer.text();
+    const src = frameSrc(viewerHtml);
+
+    expect(src).toBe(`${origin}/frame/${published.id}/${tokenOf(published.url)}/v/1`);
+    expect(viewerHtml).toContain('allow="clipboard-write; fullscreen" allowfullscreen');
+    expect(viewerHtml).toContain(
+      'sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-same-origin"',
+    );
+    expect(viewer.headers.get("Content-Security-Policy")).toContain(`frame-src 'self' ${origin};`);
+
+    const frame = await worker.fetch(new Request(src), env as never);
+
+    expect(frame.status).toBe(200);
+    expect(frame.headers.get("Content-Security-Policy")).toBe(
+      "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-same-origin; frame-ancestors https://pagebin.test",
+    );
+    expect(await frame.text()).toContain('<script data-pagebin="frame">');
+
+    const other = await publishFixture(env);
+
+    const borrowedOrigin = await worker.fetch(
+      new Request(`${origin}/frame/${other.id}/${tokenOf(other.url)}/v/1`),
+      env as never,
+    );
+
+    expect(borrowedOrigin.status).toBe(404);
+
+    const serviceWorker = await worker.fetch(
+      new Request(src, { headers: { "Service-Worker": "script" } }),
+      env as never,
+    );
+
+    expect(serviceWorker.status).toBe(404);
+
+    for (const path of [
+      `/p/${published.id}/${tokenOf(published.url)}`,
+      `/raw/${published.id}/${tokenOf(published.url)}`,
+      `/api/artifacts/${published.id}/version/${tokenOf(published.url)}`,
+      "/api/artifacts",
+      "/",
+    ]) {
+      const response = await worker.fetch(new Request(`${origin}${path}`), env as never);
+
+      expect(response.status).toBe(404);
+    }
+
+    const mainHostFrame = await worker.fetch(
+      new Request(`https://pagebin.test${new URL(src).pathname}`),
+      env as never,
+    );
+
+    expect(mainHostFrame.headers.get("Content-Security-Policy")).not.toContain("allow-same-origin");
+  });
+
+  test("keeps strict documents on the raw route", async () => {
+    for (const env of [createEnv(), usercontentEnv()]) {
+      const published = await publishFixture(env, { sandbox: "strict" });
+
+      const viewerHtml = await (
+        await worker.fetch(new Request(published.url), env as never)
+      ).text();
+
+      expect(frameSrc(viewerHtml)).toBe(`/raw/${published.id}/${tokenOf(published.url)}`);
+
+      const frame = await worker.fetch(
+        new Request(`https://pagebin.test/frame/${published.id}/${tokenOf(published.url)}/v/1`),
+        env as never,
+      );
+
+      expect(frame.status).toBe(404);
+    }
+  });
+
+  test("pins viewer frames to the version shown", async () => {
+    const env = createEnv();
+    const published = await publishFixture(env);
+
+    const updated = await updateFixtureResponse(env, published.id, {
+      contents: "<!doctype html><p>second</p>",
+      filename: "plan.html",
+    });
+
+    expect(updated.status).toBe(200);
+
+    const pinned = await (
+      await worker.fetch(new Request(`${published.url}/v/1`), env as never)
+    ).text();
+
+    const current = await (await worker.fetch(new Request(published.url), env as never)).text();
+
+    expect(frameSrc(pinned)).toEndWith("/v/1");
+    expect(frameSrc(current)).toEndWith("/v/2");
+  });
+
+  test("injects every bundle document and serves other bundle files unchanged", async () => {
+    const env = createEnv();
+
+    const session = await beginBundle(env, {
+      "index.html": '<!doctype html><html lang="en"><a href="page2.html">next</a></html>',
+      "page2.html": "<!-- second --><p>two</p>",
+      "style.css": "p { color: red }",
+    });
+
+    const published = (await (await session.commit()).json()) as { id: string; url: string };
+    const token = tokenOf(published.url);
+
+    const src = frameSrc(
+      await (await worker.fetch(new Request(published.url), env as never)).text(),
+    );
+
+    expect(src).toBe(`/frame/${published.id}/${token}/v/1/index.html`);
+
+    const entry = await (
+      await worker.fetch(new Request(`https://pagebin.test${src}`), env as never)
+    ).text();
+
+    expect(entry).toStartWith('<!doctype html><html lang="en"><script data-pagebin="frame">');
+
+    const second = await (
+      await worker.fetch(
+        new Request(`https://pagebin.test${src.replace("index.html", "page2.html")}`),
+        env as never,
+      )
+    ).text();
+
+    expect(second).toStartWith('<!-- second --><script data-pagebin="frame">');
+
+    const style = await worker.fetch(
+      new Request(`https://pagebin.test${src.replace("index.html", "style.css")}`),
+      env as never,
+    );
+
+    expect(await style.text()).toBe("p { color: red }");
+    expect(style.headers.get("Content-Length")).toBe("16");
+
+    const bare = await worker.fetch(
+      new Request(`https://pagebin.test/frame/${published.id}/${token}/v/1`),
+      env as never,
+    );
+
+    expect(bare.status).toBe(307);
+    expect(new URL(bare.headers.get("Location")!).pathname).toBe(src);
+  });
+
+  test("rejects frame paths on the API host and ignores malformed usercontent templates", async () => {
+    const env = createEnv({
+      PAGEBIN_PUBLIC_ORIGIN: "https://pagebin.test",
+      PAGEBIN_USERCONTENT_ORIGIN: "https://usercontent.test/{label}",
+    });
+
+    const published = await publishFixture(env);
+    const path = `/frame/${published.id}/${tokenOf(published.url)}/v/1`;
+
+    expect(
+      (await worker.fetch(new Request(`https://api.page-bin.com${path}`), env as never)).status,
+    ).toBe(421);
+
+    const viewerHtml = await (await worker.fetch(new Request(published.url), env as never)).text();
+
+    expect(frameSrc(viewerHtml)).toBe(path);
+  });
 });

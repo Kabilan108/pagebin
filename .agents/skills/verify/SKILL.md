@@ -18,6 +18,21 @@ Runs in miniflare with a local R2 bucket — no cloud state touched. Wait for
 for local QA: its production custom domains can rewrite localhost requests and
 produce misleading 421 responses.
 
+## Per-artifact frame origin
+
+`wrangler.dev.toml` leaves `PAGEBIN_USERCONTENT_ORIGIN` unset, so `/frame/`
+documents load on the viewer's host with an opaque origin and no storage. To
+exercise production's split (each artifact on its own origin with
+`allow-same-origin`), add this to the launch command:
+
+```sh
+  --var 'PAGEBIN_USERCONTENT_ORIGIN:http://{label}.localhost:8790'
+```
+
+Chromium resolves `*.localhost` to loopback and treats it as a secure context,
+so drive this mode with agent-browser on the same machine. The tailnet-IP setup
+below cannot carry per-artifact subdomains.
+
 ## Drive the API
 
 ```sh

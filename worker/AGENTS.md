@@ -6,3 +6,4 @@
 - `normalizeMetadata` reconciliation must only synthesize a head entry when NO `versions[]` entry references the current content; healing on "last entry != head" fabricates a version after every pointer rollback.
 - `cleanupOrphanedContent` keeps every key referenced by `versions[]`, not just `contentKey`. Downgrading the Worker below 0.12.0 for over an hour permanently GCs retained history and breaks pinned `/v/<n>` URLs.
 - Version-pinned routes use a path segment (`/p|/raw/<id>/<token>/v/<n>`), not `?v=` — the viewer already uses `?v=` as a cache-buster. One capability token covers all versions; reissue must revoke history routes too.
+- `/raw/` and `/download/` must return the stored bytes, because `verify` hashes them. Serve-time changes such as the injected frame script belong on `/frame/` only.

@@ -8,6 +8,7 @@ import {
   embeddedFormatterSource,
   mergeLoaded,
   reviewViewerScript,
+  withoutOtherCopies,
 } from "../worker/review-ui";
 
 interface StoredObject {
@@ -475,5 +476,22 @@ describe("initial review load merge", () => {
 
   test("ships in the viewer script", () => {
     expect(reviewViewerScript()).toContain(embeddedFunction("mergeLoaded", mergeLoaded));
+  });
+});
+
+describe("withoutOtherCopies", () => {
+  test("drops a loaded copy of a comment whose save returned after the load", () => {
+    const saved = { id: "c1", body: "mine" };
+    const loadedCopy = { id: "c1", body: "mine" };
+    const other = { id: "c2", body: "other" };
+
+    expect(withoutOtherCopies([loadedCopy, other, saved], saved)).toEqual([other, saved]);
+    expect(withoutOtherCopies([loadedCopy, other, saved], saved)[1]).toBe(saved);
+  });
+
+  test("ships in the viewer script", () => {
+    expect(reviewViewerScript()).toContain(
+      embeddedFunction("withoutOtherCopies", withoutOtherCopies),
+    );
   });
 });

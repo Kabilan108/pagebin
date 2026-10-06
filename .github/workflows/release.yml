@@ -61,7 +61,7 @@ jobs:
         run: |
           bun run build:linux
           chmod +x dist/pagebin-linux-x64
-          sha256sum dist/pagebin-linux-x64 > dist/pagebin-linux-x64.sha256
+          (cd dist && sha256sum pagebin-linux-x64 > pagebin-linux-x64.sha256)
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7

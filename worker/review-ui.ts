@@ -265,12 +265,19 @@ export function mergeLoaded<T extends ReviewItem>(local: T[], loaded: T[]): T[] 
   return [...loaded.filter((item) => !localIds.has(item.id)), ...local];
 }
 
+// Keeps the saved item and drops any other copy with its id, such as one the initial load
+// returned before the save's own response arrived. Embedded in the viewer script.
+export function withoutOtherCopies<T extends ReviewItem>(items: T[], saved: T): T[] {
+  return items.filter((item) => item === saved || item.id !== saved.id);
+}
+
 export function reviewViewerScript(): string {
   // Each embedded function may carry its own __name shim; keep only the first declaration.
   const helpers = [
     embeddedFormatterSource(),
     embeddedFunction("createSerialSaver", createSerialSaver),
     embeddedFunction("mergeLoaded", mergeLoaded),
+    embeddedFunction("withoutOtherCopies", withoutOtherCopies),
   ]
     .join("\n")
     .split("\n")
@@ -588,6 +595,7 @@ const VIEWER_SCRIPT = `
       const payload = await api("POST", "/comments", { anchor: comment.anchor, body: comment.body });
       if (!payload || !validComment(payload.comment)) throw new Error("unexpected response");
       Object.assign(comment, payload.comment, { saving: false, local: false, failed: false });
+      state.comments = withoutOtherCopies(state.comments, comment);
       // A newer draft may have been started while this one was saving; keep it.
       if (isThisDraft(savedDraft())) store("local", DRAFT_KEY, null);
       pushHighlights();

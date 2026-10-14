@@ -15,6 +15,7 @@ import { REVIEW_LIMITS } from "../shared/review";
 //   pb:draft            { anchor | null }         provisional highlight while composing
 //   pb:jump             { id }                    scroll to a highlight and emphasise it
 //   pb:jump-decision    { id }
+//   pb:active           { id | null }             mark one comment's highlight as selected
 //   pb:decisions-apply  { values: { [id]: { [name]: value } } }  restore answers, then describe
 //   pb:clear-selection
 // Frame -> viewer
@@ -22,7 +23,8 @@ import { REVIEW_LIMITS } from "../shared/review";
 //   pb:selection        { anchor | null, rect, end, start }
 //   pb:tab              { anchor, rect, end, start }  Tab pressed with text selected
 //   pb:resolved         { results: [{ id, found, start }] }
-//   pb:highlight-click  { id }
+//   pb:highlight-click  { id | null, rect, end }  id is null for a click outside every highlight
+//   pb:active-rect      { id, rect, end }         the selected highlight moved
 //   pb:decisions        { decisions: [{ id, question, start, controls, values, notOffered }] }
 //   pb:decision-input   { id, name, values }
 //
@@ -227,7 +229,33 @@ const REVIEW_FRAME_SCRIPT_BODY = `
       wrap(loc.ns, loc.ne, idx, { "data-pb-id": item.id, "data-pb-state": item.state === "addressed" ? "addressed" : "open" });
       results.push({ id: item.id, found: true, start: loc.ns });
     }
+    applyActive();
     post({ type: "pb:resolved", results });
+  }
+
+  let activeId = null;
+  const marksOf = (id) => [...document.querySelectorAll("mark[data-pb-id]")].filter((mark) => mark.dataset.pbId === id);
+
+  function applyActive() {
+    for (const mark of document.querySelectorAll("mark[data-pb-id]")) mark.toggleAttribute("data-pb-active", mark.dataset.pbId === activeId);
+  }
+
+  function marksRect(marks) {
+    const rects = marks.flatMap((mark) => [...mark.getClientRects()]);
+    if (rects.length === 0) return null;
+    const box = {
+      left: Math.min(...rects.map((r) => r.left)),
+      top: Math.min(...rects.map((r) => r.top)),
+      right: Math.max(...rects.map((r) => r.right)),
+      bottom: Math.max(...rects.map((r) => r.bottom)),
+    };
+    return { rect: { ...box, width: box.right - box.left, height: box.bottom - box.top }, end: pickRect(rects[rects.length - 1]) };
+  }
+
+  function announceActiveRect() {
+    if (!activeId) return;
+    const box = marksRect(marksOf(activeId));
+    if (box) post({ type: "pb:active-rect", id: activeId, ...box });
   }
 
   function applyDraft(anchor) {
@@ -253,7 +281,7 @@ const REVIEW_FRAME_SCRIPT_BODY = `
   const smooth = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
 
   function jump(id) {
-    const marks = [...document.querySelectorAll("mark[data-pb-id]")].filter((mark) => mark.dataset.pbId === id);
+    const marks = marksOf(id);
     if (marks.length === 0) return;
     marks[0].scrollIntoView({ block: "center", behavior: smooth() });
     emphasise(marks);
@@ -456,6 +484,7 @@ const REVIEW_FRAME_SCRIPT_BODY = `
     scrollFrame = requestAnimationFrame(() => {
       const current = currentSelection();
       if (current) post({ type: "pb:selection", ...current });
+      announceActiveRect();
     });
   }
 
@@ -483,9 +512,13 @@ const REVIEW_FRAME_SCRIPT_BODY = `
     document.addEventListener("keydown", handOffTab, true);
     document.addEventListener("click", (event) => {
       const mark = event.target instanceof Element ? event.target.closest("mark[data-pb-id]") : null;
-      if (!mark) return;
+      if (!mark) {
+        post({ type: "pb:highlight-click", id: null, rect: null, end: null });
+        return;
+      }
       if (mark.closest("label")) event.preventDefault();
-      post({ type: "pb:highlight-click", id: mark.dataset.pbId });
+      const box = marksRect(marksOf(mark.dataset.pbId)) || { rect: pickRect(mark.getBoundingClientRect()), end: null };
+      post({ type: "pb:highlight-click", id: mark.dataset.pbId, ...box });
     });
     for (const type of ["input", "change", "click"]) document.addEventListener(type, reportDecisionInput);
 
@@ -510,6 +543,10 @@ const REVIEW_FRAME_SCRIPT_BODY = `
         case "pb:jump-decision":
           jumpDecision(msg.id);
           break;
+        case "pb:active":
+          activeId = typeof msg.id === "string" ? msg.id : null;
+          applyActive();
+          break;
         case "pb:decisions-apply":
           applyDecisionValues(msg.values);
           break;
@@ -530,10 +567,12 @@ const REVIEW_FRAME_SCRIPT_BODY = `
 
 const REVIEW_FRAME_CSS = [
   "mark[data-pb-id],mark[data-pb-draft]{color:inherit;padding:.06em 0;border-radius:2px;box-decoration-break:clone;-webkit-box-decoration-break:clone;transition:background .2s}",
-  "mark[data-pb-id]{--pb-mark:rgba(214,152,70,.3);--pb-mark-deep:rgba(214,152,70,.6);background:var(--pb-mark);border-bottom:1.5px solid rgba(138,84,38,.55);cursor:pointer}",
-  "mark[data-pb-id]:hover{background:rgba(214,152,70,.48)}",
-  'mark[data-pb-state="addressed"]{--pb-mark:rgba(111,149,86,.14);--pb-mark-deep:rgba(111,149,86,.4);border-bottom:1.5px dotted rgba(111,149,86,.75)}',
-  'mark[data-pb-state="addressed"]:hover{background:rgba(111,149,86,.26)}',
+  "mark[data-pb-id]{--pb-mark:rgba(214,152,70,.12);--pb-mark-deep:rgba(214,152,70,.55);background:var(--pb-mark);border-bottom:1.5px solid rgba(190,124,52,.42);cursor:pointer}",
+  "mark[data-pb-id]:hover{background:rgba(214,152,70,.26)}",
+  "mark[data-pb-id][data-pb-active]{--pb-mark:rgba(214,152,70,.36);background:var(--pb-mark);border-bottom-color:rgba(190,110,40,.9)}",
+  'mark[data-pb-state="addressed"]{--pb-mark:rgba(111,149,86,.07);--pb-mark-deep:rgba(111,149,86,.4);border-bottom:1.5px dotted rgba(111,149,86,.6)}',
+  'mark[data-pb-state="addressed"]:hover{background:rgba(111,149,86,.2)}',
+  'mark[data-pb-state="addressed"][data-pb-active]{--pb-mark:rgba(111,149,86,.24);background:var(--pb-mark);border-bottom-color:rgba(111,149,86,.9)}',
   "mark[data-pb-draft]{background:rgba(214,152,70,.18);border-bottom:1.5px dashed rgba(138,84,38,.6)}",
   "mark.pb-emph{animation:pbEmph 1.1s ease-out}",
   "@keyframes pbEmph{0%,30%{background:var(--pb-mark-deep)}100%{background:var(--pb-mark)}}",

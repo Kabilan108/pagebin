@@ -43,7 +43,7 @@ html,body{height:100%;height:100dvh;overflow:hidden;overscroll-behavior:none;bac
 .pb-composer{position:fixed;z-index:20;width:min(380px,calc(100vw - 24px));background:var(--pb-panel);border:1px solid var(--pb-line);border-radius:10px;box-shadow:var(--pb-shadow);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;color:var(--pb-text);display:flex;flex-direction:column;animation:pbrise .18s ease-out}
 .pb-quote{margin:12px 14px 0;padding:2px 0 2px 10px;border-left:2px solid var(--pb-accent);color:var(--pb-muted);font-size:12px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .pb-quote::before{content:'\\201C'}.pb-quote::after{content:'\\201D'}
-.pb-composer textarea,.pb-card textarea{margin:10px 14px 0;padding:8px 10px;border:1px solid var(--pb-line);border-radius:7px;background:var(--pb-chip);color:var(--pb-text);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;resize:none;min-height:66px;max-height:40vh;field-sizing:content}
+.pb-composer textarea,.pb-card textarea{margin:12px 14px 0;padding:8px 10px;border:1px solid var(--pb-line);border-radius:7px;background:var(--pb-chip);color:var(--pb-text);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;resize:none;min-height:66px;max-height:40vh;field-sizing:content}
 .pb-composer textarea:focus,.pb-card textarea:focus{outline:none;border-color:var(--pb-accent);background:var(--pb-panel)}
 .pb-composer-foot,.pb-card-editfoot{display:flex;align-items:center;gap:8px;padding:10px 14px 12px}
 .pb-hint{flex:1;color:var(--pb-faint);font-size:11px;white-space:nowrap}
@@ -137,6 +137,9 @@ button.pb-quote:disabled{cursor:default;color:var(--pb-muted)}
 .pb-card .edit{display:flex;flex-direction:column;gap:8px}
 .pb-card textarea{margin:0}
 .pb-card-editfoot{padding:0}
+.pb-popover{position:fixed;z-index:20;width:min(360px,calc(100vw - 24px));background:var(--pb-panel);border:1px solid var(--pb-line);border-radius:10px;box-shadow:var(--pb-shadow);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;color:var(--pb-text);animation:pbrise .18s ease-out}
+.pb-popover .pb-card{border:none;border-radius:10px;padding:12px 14px 8px}
+.pb-popover .pb-card:focus-visible{outline:none}
 .pb-panel-foot{border-top:1px solid var(--pb-line);padding:10px 12px;display:flex;align-items:center;gap:8px;flex-shrink:0}
 .pb-panel-foot .pb-btn.primary{display:inline-flex;align-items:center;gap:6px}
 .pb-panel-foot .pb-btn.primary svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
@@ -164,11 +167,12 @@ button.pb-quote:disabled{cursor:default;color:var(--pb-muted)}
   .pb-list{padding-bottom:12px}
   .pb-composer{left:0;right:0;bottom:0;top:auto!important;width:auto;border-radius:14px 14px 0 0;border-bottom:none;animation:pbsheet .22s ease-out}
   .pb-composer textarea{min-height:88px}
+  .pb-popover{left:0;right:0;bottom:0;top:auto!important;width:auto;border-radius:14px 14px 0 0;border-bottom:none;animation:pbsheet .22s ease-out}
   .pb-hint{display:none}
   .pb-toast{bottom:auto;top:44px}
   @keyframes pbsheet{from{transform:translateY(100%)}to{transform:none}}
 }
-body:has(.pb-composer:not([hidden])) .pb-fab{display:none!important}
+body:has(.pb-composer:not([hidden]),.pb-popover:not([hidden])) .pb-fab{display:none!important}
 @media (prefers-reduced-motion:reduce){.pb-review,.pb-review *,.pagebin-bar *{animation:none!important}}
 `;
 
@@ -196,10 +200,10 @@ ${frameHtml}
 </aside>
 </div>
 <div class="pb-composer pb-review" id="pb-composer" hidden role="dialog" aria-label="New comment">
-<div class="pb-quote" id="pb-composer-quote"></div>
 <textarea id="pb-composer-text" rows="3" maxlength="${limit}" placeholder="What should the agent change?" aria-label="Comment"></textarea>
 <div class="pb-composer-foot">${modHint}<button class="pb-btn quiet" id="pb-composer-cancel" type="button">Cancel</button><button class="pb-btn primary" id="pb-composer-save" type="button" disabled>Comment</button></div>
 </div>
+<div class="pb-popover pb-review" id="pb-popover" hidden role="dialog" aria-label="Comment"></div>
 <template id="pb-tpl-decision"><article class="pb-drow" role="listitem" tabindex="-1"><button class="q" type="button" title="Jump to this decision"></button><div class="answer"></div><div class="dnote" hidden></div><div class="meta"><span class="pb-chip"></span><span class="state saving"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="keep" type="button" title="Confirm the recommended answer">Keep recommendation</button><button class="pb-ib" data-act="jump-decision" type="button" title="Jump to this decision">${arrow}</button></span></div></article></template>
 <template id="pb-tpl-card"><article class="pb-card" role="listitem" tabindex="-1"><div class="pb-tag" hidden></div><button class="pb-quote" type="button" title="Jump to this text"></button><div class="body"></div><div class="edit" hidden><textarea rows="3" maxlength="${limit}" aria-label="Edit comment"></textarea><div class="pb-card-editfoot">${modHint}<button class="pb-btn quiet" data-act="edit-cancel" type="button">Cancel</button><button class="pb-btn primary" data-act="edit-save" type="button">Save</button></div></div><div class="meta"><span class="when"></span><span class="state"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="expand" type="button" hidden>Show</button><button class="pb-ib text" data-act="reopen" type="button" title="Reopen this comment for the agent" hidden>Reopen</button><button class="pb-ib text" data-act="retry" type="button" title="Save this comment again" hidden>Retry</button><button class="pb-ib text danger" data-act="discard" type="button" title="Drop this unsaved comment" hidden>Discard</button><button class="pb-ib" data-act="jump" type="button" title="Jump to anchor">${arrow}</button><button class="pb-ib" data-act="edit" type="button" title="Edit"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M12 8l4 4"/></svg></button><button class="pb-ib danger" data-act="delete" type="button" title="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></span></div></article></template>
 <script type="application/json" id="pb-review-config">${reviewConfigJson(config)}</script>
@@ -297,7 +301,6 @@ const VIEWER_SCRIPT = `
   const LIMITS = config.limits;
   const API = "/api/artifacts/" + encodeURIComponent(config.id) + "/review/" + encodeURIComponent(config.token);
   const DRAFT_KEY = "pagebin:review-draft:" + config.id;
-  const FIRST_SAVE_KEY = "pagebin:review-first-save:" + config.id;
   const PANEL_KEY = "pagebin:review-panel-width";
   const FRAME_TARGET = config.frameOrigin || "*";
   const UNDO_MS = 6000;
@@ -316,6 +319,7 @@ const VIEWER_SCRIPT = `
   const composer = $("pb-composer");
   const composerText = $("pb-composer-text");
   const composerSave = $("pb-composer-save");
+  const popover = $("pb-popover");
   const preview = $("pb-preview");
   const resizer = $("pb-resize");
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -334,7 +338,10 @@ const VIEWER_SCRIPT = `
     selection: null,
     draft: null,
     editingId: null,
+    editingIn: null,
     editDraft: null,
+    popover: null,
+    activeId: null,
     expanded: new Set(),
     frameReady: false,
     frameIsEntry: true,
@@ -442,6 +449,7 @@ const VIEWER_SCRIPT = `
   function syncFrame() {
     if (!state.frameIsEntry) return;
     pushHighlights();
+    send({ type: "pb:active", id: state.activeId });
     if (state.loaded) send({ type: "pb:decisions-apply", values: savedDecisionValues() });
     restoreDraft();
   }
@@ -529,26 +537,27 @@ const VIEWER_SCRIPT = `
 
   // ---- composer ----
   function openComposer(sel, body) {
+    closePopover();
     state.draft = sel;
     state.selection = null;
     hideAffordance();
     send({ type: "pb:draft", anchor: sel.anchor });
-    $("pb-composer-quote").textContent = excerpt(sel.anchor.quote, 220);
     composerText.value = body || "";
     composerSave.disabled = composerText.value.trim() === "";
     composer.hidden = false;
-    positionComposer(sel);
+    positionFloating(composer, sel);
     composerText.focus();
   }
 
-  function positionComposer(sel) {
+  // Places a floating card under the anchored text, or above it when there is no room below.
+  function positionFloating(el, sel) {
     if (mobile()) {
-      composer.style.left = composer.style.top = "";
+      el.style.left = el.style.top = "";
       return;
     }
     const box = frame.getBoundingClientRect();
-    const w = composer.offsetWidth;
-    const h = composer.offsetHeight;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
     let left = Math.max(12, box.right - w - 16);
     let top = Math.max(44, box.bottom - h - 16);
     if (sel.rect) {
@@ -556,8 +565,8 @@ const VIEWER_SCRIPT = `
       top = box.top + sel.rect.bottom + 10;
       if (top + h > window.innerHeight - 12) top = Math.max(44, box.top + sel.rect.top - h - 10);
     }
-    composer.style.left = left + "px";
-    composer.style.top = top + "px";
+    el.style.left = left + "px";
+    el.style.top = top + "px";
   }
 
   function closeComposer(discard) {
@@ -574,16 +583,11 @@ const VIEWER_SCRIPT = `
     if (!body || !draft) return;
     const now = new Date().toISOString();
     const comment = { id: "local-" + Math.random().toString(36).slice(2), anchor: draft.anchor, body, status: "open", createdAt: now, updatedAt: now, found: true, start: draft.start, saving: true, local: true };
-    const firstSave = !stored("session", FIRST_SAVE_KEY);
     state.comments.push(comment);
     closeComposer(false);
     send({ type: "pb:clear-selection" });
     pushHighlights();
     render({ bump: true });
-    if (firstSave) {
-      store("session", FIRST_SAVE_KEY, "1");
-      if (!state.panelOpen && !mobile()) setPanel(true);
-    }
     await submitComment(comment, draft);
   }
 
@@ -617,6 +621,55 @@ const VIEWER_SCRIPT = `
       render();
       toast("Comment not saved. Retry it from the panel.");
     }
+  }
+
+  // ---- popover ----
+  // Clicking a highlight shows its comment over the document; the panel stays as it is.
+  function openPopover(id, rect, end) {
+    if (!state.comments.some((c) => c.id === id)) return;
+    closeComposer(false);
+    hideAffordance();
+    if (mobile() && state.panelOpen) setPanel(false);
+    if (state.editingIn === "popover") state.editingId = state.editingIn = null;
+    state.popover = { id, rect, end };
+    popover.hidden = false;
+    renderPopover();
+    popover.querySelector(".pb-card")?.focus({ preventScroll: true });
+    syncActive();
+  }
+
+  function closePopover() {
+    if (!state.popover) return;
+    state.popover = null;
+    if (state.editingIn === "popover") state.editingId = state.editingIn = null;
+    popover.hidden = true;
+    popover.replaceChildren();
+    syncActive();
+  }
+
+  // Outside clicks and new selections leave an open editor alone; it has its own Cancel.
+  function dismissPopover() {
+    if (state.editingIn !== "popover") closePopover();
+  }
+
+  function renderPopover() {
+    if (!state.popover) return;
+    const c = state.comments.find((x) => x.id === state.popover.id);
+    if (!c) return closePopover();
+    const hadFocus = popover.contains(document.activeElement);
+    const el = card(c, "popover");
+    popover.replaceChildren(el);
+    if (hadFocus) el.focus({ preventScroll: true });
+    positionFloating(popover, state.popover);
+  }
+
+  // The selected comment's highlight stands out: the popover's, else a focused panel card's.
+  function syncActive() {
+    const focused = document.activeElement instanceof Element ? document.activeElement.closest("#pb-list .pb-card") : null;
+    const id = state.popover ? state.popover.id : focused ? focused.dataset.id : null;
+    if (id === state.activeId) return;
+    state.activeId = id;
+    send({ type: "pb:active", id });
   }
 
   // ---- panel ----
@@ -844,16 +897,18 @@ const VIEWER_SCRIPT = `
     }
     $("pb-preview-back").hidden = state.view !== "preview";
 
-    if (!state.panelOpen) return;
-    const scrollTop = list.scrollTop;
-    // Async renders rebuild the list; carry an open editor's text, caret, and focus across.
-    const liveEditor = list.querySelector(".pb-card .edit:not([hidden]) textarea");
+    // Async renders rebuild the cards; carry an open editor's text, caret, and focus across.
+    const liveEditor = document.querySelector("#pb-list .pb-card .edit:not([hidden]) textarea, #pb-popover .pb-card .edit:not([hidden]) textarea");
     if (liveEditor && state.editDraft) {
       state.editDraft.value = liveEditor.value;
       state.editDraft.start = liveEditor.selectionStart;
       state.editDraft.end = liveEditor.selectionEnd;
       if (document.activeElement === liveEditor) state.editDraft.focus = true;
     }
+    renderPopover();
+
+    if (!state.panelOpen) return;
+    const scrollTop = list.scrollTop;
     list.replaceChildren();
     if (state.loadError) {
       const error = document.createElement("div");
@@ -944,11 +999,14 @@ const VIEWER_SCRIPT = `
     return el;
   }
 
-  function card(c) {
+  // where is "list" for the panel or "popover" for the card shown over the document.
+  function card(c, where = "list") {
     const el = $("pb-tpl-card").content.firstElementChild.cloneNode(true);
     setModKeys(el);
+    const inList = where === "list";
+    if (!inList) el.removeAttribute("role");
     const addressed = c.status === "addressed";
-    const collapsed = addressed && !state.expanded.has(c.id);
+    const collapsed = addressed && inList && !state.expanded.has(c.id);
     const detached = c.found === false && state.frameIsEntry;
     el.dataset.id = c.id;
     el.classList.toggle("detached", detached);
@@ -967,6 +1025,7 @@ const VIEWER_SCRIPT = `
       tag.innerHTML = ICON_DETACHED + " Text not found in v" + config.version + " \\u00b7 made on v" + escapeHtml(c.anchor.version);
     }
     const quote = el.querySelector(".pb-quote");
+    quote.hidden = !inList;
     quote.textContent = excerpt(c.anchor.quote, 140);
     quote.disabled = c.found === false;
     quote.title = c.found === false ? "Anchor not found in this version" : "Jump to this text";
@@ -978,11 +1037,12 @@ const VIEWER_SCRIPT = `
     stateEl.className = "state " + (c.saving ? "saving" : "saved");
     stateEl.innerHTML = c.saving ? "Saving\\u2026" : addressed || c.failed ? "" : ICON_CHECK + " Saved";
     const expand = el.querySelector('[data-act="expand"]');
-    expand.hidden = !addressed;
+    expand.hidden = !addressed || !inList;
     expand.textContent = collapsed ? "Show" : "Hide";
     const reopenButton = el.querySelector('[data-act="reopen"]');
     reopenButton.hidden = !addressed;
     reopenButton.disabled = c.saving;
+    el.querySelector('[data-act="jump"]').hidden = !inList;
     el.querySelector('[data-act="jump"]').disabled = c.found === false;
     el.querySelector('[data-act="retry"]').hidden = !c.failed;
     el.querySelector('[data-act="discard"]').hidden = !c.failed;
@@ -990,7 +1050,7 @@ const VIEWER_SCRIPT = `
     el.querySelector('[data-act="edit"]').disabled = c.saving;
     el.querySelector('[data-act="delete"]').hidden = c.local;
     el.querySelector('[data-act="delete"]').disabled = c.saving;
-    if (state.editingId === c.id) {
+    if (state.editingId === c.id && state.editingIn === where) {
       bodyEl.hidden = true;
       const edit = el.querySelector(".edit");
       edit.hidden = false;
@@ -1013,8 +1073,10 @@ const VIEWER_SCRIPT = `
     if (mobile()) setPanel(false);
   }
 
+  // Prefers the popover's copy while focus is in the popover, so its actions keep focus there.
   function focusCard(id) {
-    const el = [...list.querySelectorAll("[data-id]")].find((node) => node.dataset.id === id);
+    const hosts = popover.contains(document.activeElement) ? [popover, list] : [list, popover];
+    const el = hosts.map((host) => [...host.querySelectorAll("[data-id]")].find((node) => node.dataset.id === id)).find(Boolean);
     if (!el) return;
     el.scrollIntoView({ block: "nearest" });
     el.classList.remove("flash");
@@ -1026,7 +1088,7 @@ const VIEWER_SCRIPT = `
   // ---- comment mutations ----
   async function commitEdit(cardEl, c) {
     const body = cardEl.querySelector("textarea").value.trim();
-    state.editingId = null;
+    state.editingId = state.editingIn = null;
     if (!body || body === c.body) {
       render();
       focusCard(c.id);
@@ -1160,6 +1222,7 @@ const VIEWER_SCRIPT = `
         if (!state.frameIsEntry) {
           hideAffordance();
           closeComposer(false);
+          closePopover();
           for (const c of state.comments) c.found = null;
         }
         syncFrame();
@@ -1197,10 +1260,11 @@ const VIEWER_SCRIPT = `
         if (!composer.hidden) {
           if (sel && state.draft && sel.anchor.quote === state.draft.anchor.quote) {
             state.draft = { ...state.draft, rect: sel.rect, end: sel.end };
-            positionComposer(state.draft);
+            positionFloating(composer, state.draft);
           }
           break;
         }
+        if (sel) dismissPopover();
         state.selection = sel;
         if (sel) placeAffordance(sel);
         else hideAffordance();
@@ -1226,10 +1290,22 @@ const VIEWER_SCRIPT = `
         render();
         break;
       case "pb:highlight-click":
-        if (!isString(msg.id)) break;
-        setPanel(true);
-        focusCard(msg.id);
+        if (!state.frameIsEntry) break;
+        if (isString(msg.id) && msg.rect) openPopover(msg.id, msg.rect, msg.end || null);
+        else dismissPopover();
         break;
+      case "pb:active-rect": {
+        if (!state.popover || msg.id !== state.popover.id || !msg.rect || mobile()) break;
+        const inView = msg.rect.bottom > 0 && msg.rect.top < frame.clientHeight;
+        if (!inView) {
+          dismissPopover();
+          break;
+        }
+        state.popover.rect = msg.rect;
+        state.popover.end = msg.end || null;
+        positionFloating(popover, state.popover);
+        break;
+      }
     }
   });
 
@@ -1282,7 +1358,7 @@ const VIEWER_SCRIPT = `
     list.scrollTo({ top, behavior: matchMedia("(prefers-reduced-motion:reduce)").matches ? "auto" : "smooth" });
   });
 
-  list.addEventListener("click", (e) => {
+  function onCardClick(e) {
     const target = e.target instanceof Element ? e.target : null;
     if (!target) return;
     const row = target.closest(".pb-drow");
@@ -1305,11 +1381,12 @@ const VIEWER_SCRIPT = `
     if (act === "jump") jumpTo(c.id);
     if (act === "edit") {
       state.editingId = c.id;
+      state.editingIn = cardEl.closest("#pb-popover") ? "popover" : "list";
       state.editDraft = { id: c.id, value: c.body, start: c.body.length, end: c.body.length, focus: true };
       render();
     }
     if (act === "edit-cancel") {
-      state.editingId = null;
+      state.editingId = state.editingIn = null;
       render();
       focusCard(c.id);
     }
@@ -1332,8 +1409,8 @@ const VIEWER_SCRIPT = `
       render();
       focusCard(c.id);
     }
-  });
-  list.addEventListener("keydown", (e) => {
+  }
+  function onCardKeydown(e) {
     if (e.target.tagName !== "TEXTAREA") return;
     const cardEl = e.target.closest(".pb-card");
     const c = cardEl && state.comments.find((x) => x.id === cardEl.dataset.id);
@@ -1343,11 +1420,25 @@ const VIEWER_SCRIPT = `
       commitEdit(cardEl, c);
     } else if (e.key === "Escape") {
       e.preventDefault();
-      state.editingId = null;
+      state.editingId = state.editingIn = null;
       render();
       focusCard(c.id);
     }
+  }
+  for (const host of [list, popover]) {
+    host.addEventListener("click", onCardClick);
+    host.addEventListener("keydown", onCardKeydown);
+  }
+  popover.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    closePopover();
+    frame.focus();
   });
+  document.addEventListener("pointerdown", (e) => {
+    if (state.popover && !(e.target instanceof Node && popover.contains(e.target))) dismissPopover();
+  });
+  list.addEventListener("focusin", syncActive);
+  list.addEventListener("focusout", () => setTimeout(syncActive));
 
   $("pb-copy-response").addEventListener("click", async () => {
     const ok = await copyText(responseMarkdown());
@@ -1376,7 +1467,8 @@ const VIEWER_SCRIPT = `
   });
 
   window.addEventListener("resize", () => {
-    if (state.draft) positionComposer(state.draft);
+    if (state.draft) positionFloating(composer, state.draft);
+    if (state.popover) positionFloating(popover, state.popover);
     if ((!affordance.hidden || fab.classList.contains("selecting")) && state.selection) placeAffordance(state.selection);
   });
 
@@ -1420,7 +1512,7 @@ const VIEWER_SCRIPT = `
   }
   document.addEventListener("focusin", (e) => {
     if (!vv || !mobile() || !(e.target instanceof Element) || !e.target.matches("textarea, input")) return;
-    const sheet = e.target.closest("#pb-composer, #pb-panel");
+    const sheet = e.target.closest("#pb-composer, #pb-panel, #pb-popover");
     if (!sheet) return;
     if (docked !== sheet) {
       undock();

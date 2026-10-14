@@ -24,8 +24,8 @@ import { REVIEW_LIMITS } from "../shared/review";
 //   pb:tab              { anchor, rect, end, start }  Tab pressed with text selected
 //   pb:resolved         { results: [{ id, found, start }] }
 //   pb:highlight-click  { id | null, rect, end }  id is null for a click outside every highlight
-//   pb:active-rect      { id, rect, end, clipped }  the selected highlight moved; clipped when a
-//                                                 scroll container hides it
+//   pb:active-rect      { id, rect, end, visible }  the selected highlight moved; visible is false
+//                                                 once no fragment shows in the frame viewport
 //   pb:decisions        { decisions: [{ id, question, start, controls, values, notOffered }] }
 //   pb:decision-input   { id, name, values }
 //
@@ -253,22 +253,27 @@ const REVIEW_FRAME_SCRIPT_BODY = `
     return { rect: { ...box, width: box.right - box.left, height: box.bottom - box.top }, end: pickRect(rects[rects.length - 1]) };
   }
 
-  // True when an ancestor that clips its overflow has scrolled the box fully out of its own view.
-  function clippedByAncestor(el, box) {
-    for (let node = el.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+  const disjoint = (a, b) => a.bottom <= b.top || a.top >= b.bottom || a.right <= b.left || a.left >= b.right;
+
+  // A fragment shows when it is inside the viewport and inside every ancestor that clips overflow.
+  function fragmentVisible(mark, rect) {
+    if (disjoint(rect, { left: 0, top: 0, right: innerWidth, bottom: innerHeight })) return false;
+    for (let node = mark.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
       const style = getComputedStyle(node);
-      if (style.overflowX === "visible" && style.overflowY === "visible") continue;
-      const clip = node.getBoundingClientRect();
-      if (box.bottom <= clip.top || box.top >= clip.bottom || box.right <= clip.left || box.left >= clip.right) return true;
+      if (style.overflowX !== "visible" || style.overflowY !== "visible") {
+        if (disjoint(rect, node.getBoundingClientRect())) return false;
+      }
     }
-    return false;
+    return true;
   }
 
   function announceActiveRect() {
     if (!activeId) return;
     const marks = marksOf(activeId);
     const box = marksRect(marks);
-    if (box) post({ type: "pb:active-rect", id: activeId, ...box, clipped: clippedByAncestor(marks[0], box.rect) });
+    if (!box) return;
+    const visible = marks.some((mark) => [...mark.getClientRects()].some((rect) => fragmentVisible(mark, rect)));
+    post({ type: "pb:active-rect", id: activeId, ...box, visible });
   }
 
   function applyDraft(anchor) {

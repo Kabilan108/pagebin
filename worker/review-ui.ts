@@ -1298,8 +1298,7 @@ const VIEWER_SCRIPT = `
         break;
       case "pb:active-rect": {
         if (!state.popover || msg.id !== state.popover.id || !msg.rect || mobile()) break;
-        const inView = !msg.clipped && msg.rect.bottom > 0 && msg.rect.top < frame.clientHeight;
-        if (!inView) {
+        if (msg.visible === false) {
           dismissPopover();
           break;
         }

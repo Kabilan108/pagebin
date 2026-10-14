@@ -253,16 +253,21 @@ const REVIEW_FRAME_SCRIPT_BODY = `
     return { rect: { ...box, width: box.right - box.left, height: box.bottom - box.top }, end: pickRect(rects[rects.length - 1]) };
   }
 
-  const disjoint = (a, b) => a.bottom <= b.top || a.top >= b.bottom || a.right <= b.left || a.left >= b.right;
+  const outsideX = (a, b) => a.right <= b.left || a.left >= b.right;
+  const outsideY = (a, b) => a.bottom <= b.top || a.top >= b.bottom;
 
-  // A fragment shows when it is inside the viewport and inside every ancestor that clips overflow.
+  // A fragment shows when it is inside the viewport and, on each axis an ancestor clips, inside
+  // that ancestor. overflow-x: clip can leave the y axis visible, so the axes are tested apart.
   function fragmentVisible(mark, rect) {
-    if (disjoint(rect, { left: 0, top: 0, right: innerWidth, bottom: innerHeight })) return false;
+    const viewport = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    if (outsideX(rect, viewport) || outsideY(rect, viewport)) return false;
     for (let node = mark.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
       const style = getComputedStyle(node);
-      if (style.overflowX !== "visible" || style.overflowY !== "visible") {
-        if (disjoint(rect, node.getBoundingClientRect())) return false;
-      }
+      const clipsX = style.overflowX !== "visible";
+      const clipsY = style.overflowY !== "visible";
+      if (!clipsX && !clipsY) continue;
+      const box = node.getBoundingClientRect();
+      if ((clipsX && outsideX(rect, box)) || (clipsY && outsideY(rect, box))) return false;
     }
     return true;
   }

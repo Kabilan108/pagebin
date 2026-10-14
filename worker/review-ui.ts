@@ -137,7 +137,7 @@ button.pb-quote:disabled{cursor:default;color:var(--pb-muted)}
 .pb-card .edit{display:flex;flex-direction:column;gap:8px}
 .pb-card textarea{margin:0}
 .pb-card-editfoot{padding:0}
-.pb-popover{position:fixed;z-index:20;width:min(360px,calc(100vw - 24px));background:var(--pb-panel);border:1px solid var(--pb-line);border-radius:10px;box-shadow:var(--pb-shadow);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;color:var(--pb-text);animation:pbrise .18s ease-out}
+.pb-popover{position:fixed;z-index:20;width:min(360px,calc(100vw - 24px));max-height:min(420px,60vh);overflow-y:auto;overscroll-behavior:contain;background:var(--pb-panel);border:1px solid var(--pb-line);border-radius:10px;box-shadow:var(--pb-shadow);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;color:var(--pb-text);animation:pbrise .18s ease-out}
 .pb-popover .pb-card{border:none;border-radius:10px;padding:12px 14px 8px}
 .pb-popover .pb-card:focus-visible{outline:none}
 .pb-panel-foot{border-top:1px solid var(--pb-line);padding:10px 12px;display:flex;align-items:center;gap:8px;flex-shrink:0}
@@ -167,7 +167,7 @@ button.pb-quote:disabled{cursor:default;color:var(--pb-muted)}
   .pb-list{padding-bottom:12px}
   .pb-composer{left:0;right:0;bottom:0;top:auto!important;width:auto;border-radius:14px 14px 0 0;border-bottom:none;animation:pbsheet .22s ease-out}
   .pb-composer textarea{min-height:88px}
-  .pb-popover{left:0;right:0;bottom:0;top:auto!important;width:auto;border-radius:14px 14px 0 0;border-bottom:none;animation:pbsheet .22s ease-out}
+  .pb-popover{left:0;right:0;bottom:0;top:auto!important;width:auto;max-height:62vh;border-radius:14px 14px 0 0;border-bottom:none;animation:pbsheet .22s ease-out}
   .pb-hint{display:none}
   .pb-toast{bottom:auto;top:44px}
   @keyframes pbsheet{from{transform:translateY(100%)}to{transform:none}}
@@ -626,7 +626,7 @@ const VIEWER_SCRIPT = `
   // ---- popover ----
   // Clicking a highlight shows its comment over the document; the panel stays as it is.
   function openPopover(id, rect, end) {
-    if (!state.comments.some((c) => c.id === id)) return;
+    if (state.editingIn === "popover" || !state.comments.some((c) => c.id === id)) return;
     closeComposer(false);
     hideAffordance();
     if (mobile() && state.panelOpen) setPanel(false);
@@ -898,8 +898,10 @@ const VIEWER_SCRIPT = `
     $("pb-preview-back").hidden = state.view !== "preview";
 
     // Async renders rebuild the cards; carry an open editor's text, caret, and focus across.
-    const liveEditor = document.querySelector("#pb-list .pb-card .edit:not([hidden]) textarea, #pb-popover .pb-card .edit:not([hidden]) textarea");
-    if (liveEditor && state.editDraft) {
+    const editorHost = state.editingIn === "popover" ? popover : list;
+    const editingCard = [...editorHost.querySelectorAll(".pb-card")].find((node) => node.dataset.id === state.editingId);
+    const liveEditor = editingCard && editingCard.querySelector(".edit:not([hidden]) textarea");
+    if (liveEditor && state.editDraft && state.editDraft.id === state.editingId) {
       state.editDraft.value = liveEditor.value;
       state.editDraft.start = liveEditor.selectionStart;
       state.editDraft.end = liveEditor.selectionEnd;
@@ -1296,7 +1298,7 @@ const VIEWER_SCRIPT = `
         break;
       case "pb:active-rect": {
         if (!state.popover || msg.id !== state.popover.id || !msg.rect || mobile()) break;
-        const inView = msg.rect.bottom > 0 && msg.rect.top < frame.clientHeight;
+        const inView = !msg.clipped && msg.rect.bottom > 0 && msg.rect.top < frame.clientHeight;
         if (!inView) {
           dismissPopover();
           break;

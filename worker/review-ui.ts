@@ -598,11 +598,15 @@ const VIEWER_SCRIPT = `
     try {
       const payload = await api("POST", "/comments", { anchor: comment.anchor, body: comment.body });
       if (!payload || !validComment(payload.comment)) throw new Error("unexpected response");
+      const localId = comment.id;
       Object.assign(comment, payload.comment, { saving: false, local: false, failed: false });
       state.comments = withoutOtherCopies(state.comments, comment);
+      // A Retry from the popover must keep it open under the comment's server id.
+      if (state.popover && state.popover.id === localId) state.popover.id = comment.id;
       // A newer draft may have been started while this one was saving; keep it.
       if (isThisDraft(savedDraft())) store("local", DRAFT_KEY, null);
       pushHighlights();
+      syncActive();
       render();
       toast("Comment saved");
     } catch (error) {

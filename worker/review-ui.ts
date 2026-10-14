@@ -43,8 +43,9 @@ html,body{height:100%;height:100dvh;overflow:hidden;overscroll-behavior:none;bac
 .pb-composer{position:fixed;z-index:20;width:min(380px,calc(100vw - 24px));background:var(--pb-panel);border:1px solid var(--pb-line);border-radius:10px;box-shadow:var(--pb-shadow);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;color:var(--pb-text);display:flex;flex-direction:column;animation:pbrise .18s ease-out}
 .pb-quote{margin:12px 14px 0;padding:2px 0 2px 10px;border-left:2px solid var(--pb-accent);color:var(--pb-muted);font-size:12px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .pb-quote::before{content:'\\201C'}.pb-quote::after{content:'\\201D'}
-.pb-composer textarea,.pb-card textarea{margin:12px 14px 0;padding:8px 10px;border:1px solid var(--pb-line);border-radius:7px;background:var(--pb-chip);color:var(--pb-text);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;resize:none;min-height:66px;max-height:40vh;field-sizing:content}
-.pb-composer textarea:focus,.pb-card textarea:focus{outline:none;border-color:var(--pb-accent);background:var(--pb-panel)}
+.pb-composer textarea,.pb-card textarea{margin:14px 14px 0;padding:0;border:none;border-radius:0;background:none;color:var(--pb-text);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;resize:none;min-height:2.9em;max-height:40vh;field-sizing:content}
+.pb-composer textarea::placeholder{color:var(--pb-faint)}
+.pb-composer textarea:focus,.pb-card textarea:focus{outline:none}
 .pb-composer-foot,.pb-card-editfoot{display:flex;align-items:center;gap:8px;padding:10px 14px 12px}
 .pb-hint{flex:1;color:var(--pb-faint);font-size:11px;white-space:nowrap}
 .pb-hint kbd{font:inherit;color:var(--pb-muted)}
@@ -166,7 +167,7 @@ button.pb-quote:disabled{cursor:default;color:var(--pb-muted)}
   .pb-panel-head{padding-top:6px}
   .pb-list{padding-bottom:12px}
   .pb-composer{left:0;right:0;bottom:0;top:auto!important;width:auto;border-radius:14px 14px 0 0;border-bottom:none;animation:pbsheet .22s ease-out}
-  .pb-composer textarea{min-height:88px}
+  .pb-composer textarea{min-height:4.35em}
   .pb-popover{left:0;right:0;bottom:0;top:auto!important;width:auto;max-height:62vh;border-radius:14px 14px 0 0;border-bottom:none;animation:pbsheet .22s ease-out}
   .pb-hint{display:none}
   .pb-toast{bottom:auto;top:44px}
@@ -200,12 +201,12 @@ ${frameHtml}
 </aside>
 </div>
 <div class="pb-composer pb-review" id="pb-composer" hidden role="dialog" aria-label="New comment">
-<textarea id="pb-composer-text" rows="3" maxlength="${limit}" placeholder="What should the agent change?" aria-label="Comment"></textarea>
+<textarea id="pb-composer-text" rows="2" maxlength="${limit}" placeholder="What should the agent change?" aria-label="Comment"></textarea>
 <div class="pb-composer-foot">${modHint}<button class="pb-btn quiet" id="pb-composer-cancel" type="button">Cancel</button><button class="pb-btn primary" id="pb-composer-save" type="button" disabled>Comment</button></div>
 </div>
 <div class="pb-popover pb-review" id="pb-popover" hidden role="dialog" aria-label="Comment"></div>
 <template id="pb-tpl-decision"><article class="pb-drow" role="listitem" tabindex="-1"><button class="q" type="button" title="Jump to this decision"></button><div class="answer"></div><div class="dnote" hidden></div><div class="meta"><span class="pb-chip"></span><span class="state saving"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="keep" type="button" title="Confirm the recommended answer">Keep recommendation</button><button class="pb-ib" data-act="jump-decision" type="button" title="Jump to this decision">${arrow}</button></span></div></article></template>
-<template id="pb-tpl-card"><article class="pb-card" role="listitem" tabindex="-1"><div class="pb-tag" hidden></div><button class="pb-quote" type="button" title="Jump to this text"></button><div class="body"></div><div class="edit" hidden><textarea rows="3" maxlength="${limit}" aria-label="Edit comment"></textarea><div class="pb-card-editfoot">${modHint}<button class="pb-btn quiet" data-act="edit-cancel" type="button">Cancel</button><button class="pb-btn primary" data-act="edit-save" type="button">Save</button></div></div><div class="meta"><span class="when"></span><span class="state"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="expand" type="button" hidden>Show</button><button class="pb-ib text" data-act="reopen" type="button" title="Reopen this comment for the agent" hidden>Reopen</button><button class="pb-ib text" data-act="retry" type="button" title="Save this comment again" hidden>Retry</button><button class="pb-ib text danger" data-act="discard" type="button" title="Drop this unsaved comment" hidden>Discard</button><button class="pb-ib" data-act="jump" type="button" title="Jump to anchor">${arrow}</button><button class="pb-ib" data-act="edit" type="button" title="Edit"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M12 8l4 4"/></svg></button><button class="pb-ib danger" data-act="delete" type="button" title="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></span></div></article></template>
+<template id="pb-tpl-card"><article class="pb-card" role="listitem" tabindex="-1"><div class="pb-tag" hidden></div><button class="pb-quote" type="button" title="Jump to this text"></button><div class="body"></div><div class="edit" hidden><textarea rows="2" maxlength="${limit}" aria-label="Edit comment"></textarea><div class="pb-card-editfoot">${modHint}<button class="pb-btn quiet" data-act="edit-cancel" type="button">Cancel</button><button class="pb-btn primary" data-act="edit-save" type="button">Save</button></div></div><div class="meta"><span class="when"></span><span class="state"></span><span class="spacer"></span><span class="actions"><button class="pb-ib text" data-act="expand" type="button" hidden>Show</button><button class="pb-ib text" data-act="reopen" type="button" title="Reopen this comment for the agent" hidden>Reopen</button><button class="pb-ib text" data-act="retry" type="button" title="Save this comment again" hidden>Retry</button><button class="pb-ib text danger" data-act="discard" type="button" title="Drop this unsaved comment" hidden>Discard</button><button class="pb-ib" data-act="jump" type="button" title="Jump to anchor">${arrow}</button><button class="pb-ib" data-act="edit" type="button" title="Edit"><svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M12 8l4 4"/></svg></button><button class="pb-ib danger" data-act="delete" type="button" title="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></span></div></article></template>
 <script type="application/json" id="pb-review-config">${reviewConfigJson(config)}</script>
 <script>${reviewViewerScript()}</script>`;
 }

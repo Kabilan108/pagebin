@@ -193,6 +193,22 @@ nix build github:Kabilan108/pagebin
 
 The flake exposes the CLI package for `x86_64-linux`.
 
+`bun build --compile` embeds the build-time Bun runtime, including its root CA store, in the binary. `packages.<system>.default` uses the flake's own nixpkgs `bun`. To build with your `bun` and pick up your overlays and security bumps, apply the overlay and use `pkgs.pagebin`:
+
+```nix
+# flake.nix
+inputs.pagebin = {
+  url = "github:Kabilan108/pagebin";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+
+# NixOS or home-manager module
+nixpkgs.overlays = [ inputs.pagebin.overlays.default ];
+environment.systemPackages = [ pkgs.pagebin ]; # or home.packages
+```
+
+The package definition lives in `nix/package.nix` and works with `callPackage`.
+
 ### PDF reader build
 
 Wrangler builds the reader assets before local development and deployment with `bun run scripts/build-pdf-viewer.ts`. This downloads the pinned official PDF.js legacy distribution, verifies its SHA-256, and disables PDF scripting and saved preference overrides. The generated files live in `dist/worker-assets` and are served by the Worker's `ASSETS` binding. No PDF content or capability URL is sent to a third-party viewer. Builds require access to GitHub releases; checksum or configuration patch mismatches fail the build.

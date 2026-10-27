@@ -18,6 +18,7 @@ on:
       - tools/oxlint/**
       - flake.nix
       - flake.lock
+      - nix/**
       - wrangler.toml
       - .github/workflows/release.yml
 
